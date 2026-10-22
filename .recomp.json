@@ -1,0 +1,15 @@
+{
+  "$schema": "https://recomp.fyi/schema/v1.json",
+  "game": "Mirror's Edge",
+  "system": "Xbox 360",
+  "type": "recomp",
+  "project": "RunnerRecompiled",
+  "status": "in-progress",
+  "targets": ["Android"],
+  "toolchain": ["Xenonrecomp", "Rexglue"],
+  "approach": "Static recompilation of the Xbox 360 XEX to native ARM64, own kernel/XAM runtime, RexGlue Vulkan GPU backend",
+  "maintainers": [{ "name": "singlemate", "link": "https://github.com/singlemate" }],
+  "help": ["Rendering artifacts on distant buildings", "XMA audio decoding", "Xbox save storage and device selector"],
+  "tags": ["arm64", "vulkan", "android"],
+  "notes": "Runs on Android ARM64 (tested on Lenovo Legion Y700 Gen 4). Reaches the title screen with controller input and a local offline profile sign-in; menus and levels are not reached yet. No audio decoding, no save storage yet. You must supply your own Xbox 360 copy of the game; no game files are included."
+}

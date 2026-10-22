@@ -1,0 +1,289 @@
+[main]
+file_path = "default.xex"
+out_directory_path = "generated-third"
+switch_table_file_path = "switches.toml"
+skip_lr = false
+skip_msr = false
+ctr_as_local = false
+xer_as_local = false
+reserved_as_local = false
+cr_as_local = false
+non_argument_as_local = false
+non_volatile_as_local = false
+
+# Unique patterns; complete register sequence and return validated.
+restgprlr_14_address = 0x829e4080
+savegprlr_14_address = 0x829e4030
+restfpr_14_address = 0x829e4b0c
+savefpr_14_address = 0x829e4ac0
+restvmx_14_address = 0x82b5bb38
+savevmx_14_address = 0x82b5b8a0
+restvmx_64_address = 0x82b5bbcc
+savevmx_64_address = 0x82b5b934
+# Verified leaf routine with date-field switch; complete range ends after its last blr.
+[[main.functions]]
+address = 0x8223a5d8
+size = 0xdc
+[[main.functions]]
+address = 0x8225bd38
+size = 0xf4
+
+[[main.functions]]
+address = 0x8225be30
+size = 0x154
+
+[[main.functions]]
+address = 0x822b7be8
+size = 0x1f8
+
+[[main.functions]]
+address = 0x8236a2c8
+size = 0x214
+
+[[main.functions]]
+address = 0x823738f8
+size = 0x6c
+
+[[main.functions]]
+address = 0x823741d8
+size = 0x50
+
+[[main.functions]]
+address = 0x82449570
+size = 0xf8
+
+[[main.functions]]
+address = 0x824822e8
+size = 0x84
+
+[[main.functions]]
+address = 0x824bfbb0
+size = 0xb8
+
+[[main.functions]]
+address = 0x824bfc68
+size = 0xb8
+
+[[main.functions]]
+address = 0x824c4be0
+size = 0x1ac
+
+[[main.functions]]
+address = 0x82512640
+size = 0x90
+
+[[main.functions]]
+address = 0x8257dbe8
+size = 0x78
+
+[[main.functions]]
+address = 0x825889f8
+size = 0x8c
+
+[[main.functions]]
+address = 0x825c78b0
+size = 0x2b8
+
+[[main.functions]]
+address = 0x825c9440
+size = 0xb8
+
+[[main.functions]]
+address = 0x825ff558
+size = 0x7c
+
+[[main.functions]]
+address = 0x825ff5d8
+size = 0x80
+
+[[main.functions]]
+address = 0x825ff658
+size = 0x98
+
+[[main.functions]]
+address = 0x826a5450
+size = 0xb0
+
+[[main.functions]]
+address = 0x826a5590
+size = 0x128
+
+[[main.functions]]
+address = 0x826a6870
+size = 0xcc
+
+[[main.functions]]
+address = 0x826a7e68
+size = 0x19c
+
+[[main.functions]]
+address = 0x826a7f8c
+size = 0x78
+
+[[main.functions]]
+address = 0x826b4510
+size = 0xa0
+
+[[main.functions]]
+address = 0x826baa00
+size = 0x88
+
+[[main.functions]]
+address = 0x826d5e60
+size = 0xec
+
+[[main.functions]]
+address = 0x827469d0
+size = 0x84
+
+[[main.functions]]
+address = 0x82747380
+size = 0x458
+
+[[main.functions]]
+address = 0x827473c0
+size = 0x418
+
+[[main.functions]]
+address = 0x8274747c
+size = 0x35c
+
+[[main.functions]]
+address = 0x827475b0
+size = 0x228
+
+[[main.functions]]
+address = 0x82756898
+size = 0xa4
+
+[[main.functions]]
+address = 0x8275a950
+size = 0x270
+
+[[main.functions]]
+address = 0x8275aaa0
+size = 0x120
+
+[[main.functions]]
+address = 0x828a5ed0
+size = 0x98
+
+[[main.functions]]
+address = 0x828bc8a0
+size = 0x80
+
+[[main.functions]]
+address = 0x8291f8a0
+size = 0x140
+
+[[main.functions]]
+address = 0x8293cad8
+size = 0xbc
+
+[[main.functions]]
+address = 0x8299bf40
+size = 0x78
+
+[[main.functions]]
+address = 0x8299bfc0
+size = 0x6c
+
+[[main.functions]]
+address = 0x829b4080
+size = 0x43c
+
+[[main.functions]]
+address = 0x829b4158
+size = 0x35c
+
+[[main.functions]]
+address = 0x829b4270
+size = 0x244
+
+[[main.functions]]
+address = 0x829b44c0
+size = 0x1dc
+
+[[main.functions]]
+address = 0x82a323b0
+size = 0x58
+
+[[main.functions]]
+address = 0x82a32408
+size = 0x58
+
+[[main.functions]]
+address = 0x82a32540
+size = 0x58
+
+[[main.functions]]
+address = 0x82a593a8
+size = 0x5c
+
+[[main.functions]]
+address = 0x82a59408
+size = 0x5c
+
+[[main.functions]]
+address = 0x82a59468
+size = 0x68
+
+[[main.functions]]
+address = 0x82a594d0
+size = 0x4c
+
+[[main.functions]]
+address = 0x82ac1808
+size = 0x114
+
+[[main.functions]]
+address = 0x82b10348
+size = 0x110
+
+[[main.functions]]
+address = 0x82b8ca38
+size = 0x50
+
+[[main.functions]]
+address = 0x82bf53a8
+size = 0x54
+
+[[main.functions]]
+address = 0x82bf9508
+size = 0x344
+
+[[main.functions]]
+address = 0x82bf952c
+size = 0x320
+
+[[main.functions]]
+address = 0x82bf9598
+size = 0x2b4
+
+[[main.functions]]
+address = 0x82d64578
+size = 0x80
+
+[[main.functions]]
+address = 0x82e07b00
+size = 0x78
+
+[[main.functions]]
+address = 0x82e50798
+size = 0x68
+
+[[main.functions]]
+address = 0x82e50800
+size = 0x64
+
+[[main.functions]]
+address = 0x82e50868
+size = 0x5c
+
+[[main.functions]]
+address = 0x82e508c8
+size = 0x198
+
+[[main.functions]]
+address = 0x82e50a60
+size = 0x16c

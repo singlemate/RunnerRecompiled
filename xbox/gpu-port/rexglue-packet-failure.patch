@@ -1,0 +1,92 @@
+diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
+index da8e432..db69a43 100644
+--- a/include/rex/graphics/command_processor.h
++++ b/include/rex/graphics/command_processor.h
+@@ -235,6 +235,8 @@ class CommandProcessor {
+   GraphicsSystem* graphics_system_ = nullptr;
+   RegisterFile* register_file_ = nullptr;
+ 
++  // Latched on the GPU worker: failed packets must never be retried or acknowledged.
++  bool packet_fault_ = false;
+   std::atomic<bool> worker_running_;
+   system::object_ref<system::XHostThread> worker_thread_;
+ 
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+index a744375..1bac6d7 100644
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -241,6 +241,12 @@ void CommandProcessor::WorkerThreadMain() {
+     // Execute. Note that we handle wraparound transparently.
+     read_ptr_index_ = ExecutePrimaryBuffer(read_ptr_index_, write_ptr_index);
+ 
++    if (packet_fault_) {
++      REXGPU_ERROR("Command processor stopped after packet failure; read pointer not acknowledged.");
++      worker_running_ = false;
++      break;
++    }
++
+     // TODO(benvanik): use reader->Read_update_freq_ and only issue after moving
+     //     that many indices.
+     if (read_ptr_writeback_ptr_) {
+@@ -619,18 +625,19 @@ uint32_t CommandProcessor::ExecutePrimaryBuffer(uint32_t read_index, uint32_t wr
+   memory::RingBuffer reader(memory_->TranslatePhysical(primary_buffer_ptr_), primary_buffer_size_);
+   reader.set_read_offset(read_index * sizeof(uint32_t));
+   reader.set_write_offset(write_index * sizeof(uint32_t));
+-  do {
+-    if (!ExecutePacket(&reader)) {
+-      // This probably should be fatal - but we're going to continue anyways.
++  while (reader.read_count()) {
++    const uint32_t packet_start = reader.read_offset();
++    if (!ExecutePacket(&reader) || packet_fault_) {
++      packet_fault_ = true;
++      reader.set_read_offset(packet_start);
+       REXGPU_ERROR("**** PRIMARY RINGBUFFER: Failed to execute packet.");
+-      assert_always();
+       break;
+     }
+-  } while (reader.read_count());
++  }
+ 
+-  OnPrimaryBufferEnd();
++  if (!packet_fault_) OnPrimaryBufferEnd();
+ 
+-  return write_index;
++  return reader.read_offset() / sizeof(uint32_t);
+ }
+ 
+ void CommandProcessor::ExecuteIndirectBuffer(uint32_t ptr, uint32_t count) {
+@@ -641,6 +648,7 @@ void CommandProcessor::ExecuteIndirectBuffer(uint32_t ptr, uint32_t count) {
+   reader.set_write_offset(count * sizeof(uint32_t));
+   do {
+     if (!ExecutePacket(&reader)) {
++      packet_fault_ = true;
+       // Return up a level if we encounter a bad packet.
+       REXGPU_ERROR("**** INDIRECT RINGBUFFER: Failed to execute packet.");
+       assert_always();
+@@ -663,6 +671,7 @@ void CommandProcessor::ExecutePacket(uint32_t ptr, uint32_t count) {
+ }
+ 
+ bool CommandProcessor::ExecutePacket(memory::RingBuffer* reader) {
++  if (packet_fault_ || reader->read_count() < sizeof(uint32_t)) return false;
+   const uint32_t packet = reader->ReadAndSwap<uint32_t>();
+   const uint32_t packet_type = packet >> 30;
+   if (packet == 0) {
+@@ -714,6 +723,10 @@ bool CommandProcessor::ExecutePacketType0(memory::RingBuffer* reader, uint32_t p
+ bool CommandProcessor::ExecutePacketType1(memory::RingBuffer* reader, uint32_t packet) {
+   // Type-1 packet.
+   // Contains two registers of data. Type-0 should be more common.
++  if (reader->read_count() < 2 * sizeof(uint32_t)) {
++    REXGPU_ERROR("ExecutePacketType1 truncated payload");
++    return false;
++  }
+   uint32_t reg_index_1 = packet & 0x7FF;
+   uint32_t reg_index_2 = (packet >> 11) & 0x7FF;
+   uint32_t reg_data_1 = reader->ReadAndSwap<uint32_t>();
+@@ -972,6 +985,7 @@ bool CommandProcessor::ExecutePacketType3_INDIRECT_BUFFER(memory::RingBuffer* re
+   assert_zero(list_length & ~0xFFFFF);
+   list_length &= 0xFFFFF;
+   ExecuteIndirectBuffer(GpuToCpu(list_ptr), list_length);
++  if (packet_fault_) return false;
+   return true;
+ }
+ 

@@ -1,0 +1,15 @@
+# Видеонастройка и настоящий игровой ring — 21 октября 2026
+
+Реализован конкретный ExGetXConfigSetting: category 3 / setting 10 (XCONFIG_USER_VIDEO_FLAGS). Guest profile 0x00040000 взят из изученного pinned SDK xboxkrnl_xconfig.cpp; значение не объявляется настройкой физического планшета. Результат — четыре big-endian bytes. Проверены capacity, null buffer size query, required_size (uint16 BE), BUFFER_TOO_SMALL и INVALID_PARAMETER_3. Required-size на ошибке равен нулю, как в wrapper SDK. Другие категории/настройки не получают фиктивные значения — диагностическая остановка. Невалидные guest pointers также останавливают probe до записи.
+
+На Y700 прошли 220/220 loader checks (шесть новых: значение/BE required-size, короткий buffer без изменения содержимого, zero required-size на ошибке, size-only query, null+nonzero capacity). Финальный binary после добавления null-only identifier handler повторно исполнял настоящий startup; self-test этого последнего минимального handler отдельно не вызывал.
+
+Настоящий запуск прошёл ExGetXConfigSetting (SUCCESS, required=4), затем явный сброс VdSetSystemCommandBufferGpuIdentifierAddress(0). Для null случая нет destination, потребитель completion не активируется. Ненулевой адрес по-прежнему вызывает явную остановку; он не заменён no-op, fake fence completion или фиктивным system buffer.
+
+После этого игра выделила настоящие физические allocations: 32768 B, 3145728 B, 96 B и 32 B. Вызвала VdInitializeRingBuffer: physical 0x1FBF6000, size_log2=12, размер 2^(12+3)=32768 B. Forwarding в реальный SDK CommandProcessor выполнен после проверки, что весь ring находится в живой physical allocation. Затем VdEnableRingBufferRPtrWriteBack установил physical 0x1FBF503C. Инициализация ring НЕ означает, что первые игровые PM4 уже обработаны; это в данном этапе не подтверждено.
+
+Следующая остановка: VdSetSystemCommandBufferGpuIdentifierAddress с r3=0xFFBF4008 (LR=0x828143F4). Этот адрес принадлежит выделенному игрой physical block. Требуется разобраться с identifier/completion protocol и сопоставить с реальными PM4/system-buffer операциями. Пустая реализация в pinned SDK сама по себе не считается доказательством полной семантики. Никакие идентификаторы/готовность здесь не выдумываются.
+
+Подтверждённый real GPU SetupContext по-прежнему SUCCESS, graphics IRQ callback зарегистрирован. Изображения/draw нет, automatic vblank ещё не подключён. Все device processes завершились ожидаемой диагностикой (exit 42), ничего бесконечного не оставлено. Нативный executable установлен по ADB; APK, XEX и исходные игровые данные не менялись. Логи: device-xconfig-self-test.log, device-xconfig-game.log; итог xconfig-ring-result.json. Изменений SDK в этом этапе не было, cumulative patch остаётся прежним.
+
+Следующий этап — non-null identifier registration/completion с диагностикой первых PM4 submissions. Также остаются lifecycle/normal shutdown, allocation retention при GPU submissions, vblank и presentation. Не выдавать зарегистрированное кольцо за работающий игровой renderer.

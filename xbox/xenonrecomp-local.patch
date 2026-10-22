@@ -1,0 +1,283 @@
+diff --git a/XenonRecomp/recompiler.cpp b/XenonRecomp/recompiler.cpp
+index fa91527..d5f6831 100644
+--- a/XenonRecomp/recompiler.cpp
++++ b/XenonRecomp/recompiler.cpp
+@@ -90,11 +90,23 @@ bool Recompiler::LoadConfig(const std::string_view& configFilePath)
+     }
+ 
+     image = Image::ParseImage(file.data(), file.size());
++    // Local diagnostic export: never changes the input XEX.
++    if (const char* dumpPath = std::getenv("ME_RECOMP_IMAGE_DUMP"))
++    {
++        for (const auto& section : image.sections)
++        {
++            const auto path = fmt::format("{}.{}.bin", dumpPath, section.base);
++            std::ofstream dump(path, std::ios::binary);
++            dump.write(reinterpret_cast<const char*>(section.data), section.size);
++            fmt::println("Diagnostic section {} base 0x{:X}, size 0x{:X}, write {}", section.name, section.base, section.size, dump.good());
++        }
++    }
+     return true;
+ }
+ 
+ void Recompiler::Analyse()
+ {
++    std::unordered_map<size_t, size_t> exceptionDataRanges;
+     for (size_t i = 14; i < 128; i++)
+     {
+         if (i < 32)
+@@ -183,6 +195,22 @@ void Recompiler::Analyse()
+         fn.BeginAddress = ByteSwap(fn.BeginAddress);
+         fn.Data = ByteSwap(fn.Data);
+ 
++        // Xbox exception metadata is stored immediately before the entry.
++        // Do not interpret the handler/scope pointers as executable gap code.
++        if (fn.ExceptionFlag && fn.BeginAddress >= image.base + 8)
++        {
++            const auto* rdata = image.Find(".rdata");
++            const auto* pair = static_cast<const uint32_t*>(image.Find(fn.BeginAddress - 8));
++            const uint32_t handler = ByteSwap(pair[0]);
++            const uint32_t scope = ByteSwap(pair[1]);
++            bool handlerInCode = false;
++            for (const auto& section : image.sections)
++                if ((section.flags & SectionFlags_Code) && handler >= section.base && handler < section.base + section.size)
++                    handlerInCode = true;
++            if (handlerInCode && rdata && scope >= rdata->base && scope < rdata->base + rdata->size)
++                exceptionDataRanges.emplace(fn.BeginAddress - 8, 8);
++        }
++
+         if (image.symbols.find(fn.BeginAddress) == image.symbols.end())
+         {
+             auto& f = functions.emplace_back();
+@@ -224,6 +252,13 @@ void Recompiler::Analyse()
+ 
+         while (data < dataEnd)
+         {
++            auto exceptionData = exceptionDataRanges.find(base);
++            if (exceptionData != exceptionDataRanges.end())
++            {
++                base += exceptionData->second;
++                data += exceptionData->second;
++                continue;
++            }
+             auto invalidInstr = config.invalidInstructions.find(ByteSwap(*(uint32_t*)data));
+             if (invalidInstr != config.invalidInstructions.end())
+             {
+@@ -400,6 +435,8 @@ bool Recompiler::Recompile(
+                 else
+                 {
+                     println("\t// ERROR {:X}", address);
++                    fmt::println("ERROR: Unresolved direct call target {:X}", address);
++                    println("\t__builtin_trap(); // unresolved guest call target");
+                 }
+             }
+         };
+@@ -609,7 +646,9 @@ bool Recompiler::Recompile(
+     case PPC_INST_BCTR:
+         if (switchTable != config.switchTables.end())
+         {
+-            println("\tswitch ({}.u64) {{", r(switchTable->second.r));
++            // Recovered switch patterns use a 32-bit index (rlwinm/slwi/lbzx).
++            // Upper GPR bits may remain nonzero after addi wraps the low word.
++            println("\tswitch ({}.u32) {{", r(switchTable->second.r));
+ 
+             for (size_t i = 0; i < switchTable->second.labels.size(); i++)
+             {
+@@ -619,7 +658,7 @@ bool Recompiler::Recompile(
+                 {
+                     println("\t\t// ERROR: 0x{:X}", label);
+                     fmt::println("ERROR: Switch case at {:X} is trying to jump outside function: {:X}", base, label);
+-                    println("\t\treturn;");
++                    println("\t\t__builtin_trap(); // unresolved switch target");
+                 }
+                 else
+                 {
+@@ -1301,6 +1340,12 @@ bool Recompiler::Recompile(
+         println("\t{}.ca = ({}.u64 & 0x20000000) != 0;", xer(), r(insn.operands[0]));
+         break;
+ 
++    case PPC_INST_MULHD:
++        println("\t{}.s64 = int64_t((__int128({}.s64) * __int128({}.s64)) >> 64);", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.compare<int64_t>({}.s64, 0, {});", cr(0), r(insn.operands[0]), xer());
++        break;
++
+     case PPC_INST_MULHW:
+         println("\t{}.s64 = (int64_t({}.s32) * int64_t({}.s32)) >> 32;", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
+         break;
+@@ -1325,6 +1370,12 @@ bool Recompiler::Recompile(
+             println("\t{}.compare<int32_t>({}.s32, 0, {});", cr(0), r(insn.operands[0]), xer());
+         break;
+ 
++    case PPC_INST_EQV:
++        println("\t{}.u64 = ~({}.u64 ^ {}.u64);", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.compare<int32_t>({}.s32, 0, {});", cr(0), r(insn.operands[0]), xer());
++        break;
++
+     case PPC_INST_NAND:
+         println("\t{}.u64 = ~({}.u64 & {}.u64);", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
+         break;
+@@ -1769,6 +1820,7 @@ bool Recompiler::Recompile(
+         println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_and_si128(simde_mm_load_si128((simde__m128i*){}.u8), simde_mm_load_si128((simde__m128i*){}.u8)));", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
+         break;
+ 
++    case PPC_INST_VANDC:
+     case PPC_INST_VANDC128:
+         println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_andnot_si128(simde_mm_load_si128((simde__m128i*){}.u8), simde_mm_load_si128((simde__m128i*){}.u8)));", v(insn.operands[0]), v(insn.operands[2]), v(insn.operands[1]));
+         break;
+@@ -1785,6 +1837,11 @@ bool Recompiler::Recompile(
+         println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_avg_epu8(simde_mm_load_si128((simde__m128i*){}.u8), simde_mm_load_si128((simde__m128i*){}.u8)));", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
+         break;
+ 
++    case PPC_INST_VCTUXS:
++    case PPC_INST_VCFPUXWS128:
++        println("\t{} = me_float_to_u32_fixed({}, {}, ctx.vscr);", v(insn.operands[0]), v(insn.operands[1]), insn.operands[2]);
++        break;
++
+     case PPC_INST_VCTSXS:
+     case PPC_INST_VCFPSXWS128:
+         printSetFlushMode(true);
+@@ -2042,6 +2099,21 @@ bool Recompiler::Recompile(
+         }
+         break;
+ 
++    case PPC_INST_VPKUWUS:
++    case PPC_INST_VPKUWUS128:
++        println("\t{} = me_pack_u32_u16({}, {}, ctx.vscr);", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
++        break;
++
++    case PPC_INST_VPKUHUS:
++    case PPC_INST_VPKUHUS128:
++        println("\t{} = me_pack_u16_u8({}, {}, ctx.vscr);", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
++        break;
++
++    case PPC_INST_VPKSWSS:
++    case PPC_INST_VPKSWSS128:
++        println("\t{} = me_pack_s32_s16({}, {}, ctx.vscr);", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
++        break;
++
+     case PPC_INST_VPKSHUS:
+     case PPC_INST_VPKSHUS128:
+         println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_packus_epi16(simde_mm_load_si128((simde__m128i*){}.s16), simde_mm_load_si128((simde__m128i*){}.s16)));", v(insn.operands[0]), v(insn.operands[2]), v(insn.operands[1]));
+@@ -2087,7 +2159,12 @@ bool Recompiler::Recompile(
+         println("\tsimde_mm_store_ps({}.f32, simde_mm_div_ps(simde_mm_set1_ps(1), simde_mm_sqrt_ps(simde_mm_load_ps({}.f32))));", v(insn.operands[0]), v(insn.operands[1]));
+         break;
+ 
++    case PPC_INST_VNOR:
++        println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_xor_si128(simde_mm_or_si128(simde_mm_load_si128((simde__m128i*){}.u8), simde_mm_load_si128((simde__m128i*){}.u8)), simde_mm_set1_epi32(-1)));", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
++        break;
++
+     case PPC_INST_VSEL:
++    case PPC_INST_VSEL128:
+         println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_or_si128(simde_mm_andnot_si128(simde_mm_load_si128((simde__m128i*){}.u8), simde_mm_load_si128((simde__m128i*){}.u8)), simde_mm_and_si128(simde_mm_load_si128((simde__m128i*){}.u8), simde_mm_load_si128((simde__m128i*){}.u8))));", v(insn.operands[0]), v(insn.operands[3]), v(insn.operands[1]), v(insn.operands[3]), v(insn.operands[2]));
+         break;
+ 
+@@ -2430,6 +2507,8 @@ bool Recompiler::Recompile(const Function& fn)
+             if (!Recompile(fn, base, insn, data, switchTable, localVariables, csrState))
+             {
+                 fmt::println("Unrecognized instruction at 0x{:X}: {}", base, insn.opcode->name);
++                // Fail explicitly instead of silently skipping game semantics.
++                println("\t__builtin_trap(); // unsupported guest instruction at 0x{:X}", base);
+                 allRecompiled = false;
+             }
+         }
+diff --git a/XenonUtils/ppc_context.h b/XenonUtils/ppc_context.h
+index 31a86cd..a8fd9c5 100644
+--- a/XenonUtils/ppc_context.h
++++ b/XenonUtils/ppc_context.h
+@@ -251,7 +251,7 @@ struct PPCFPSCRRegister
+ 
+     inline void setcsr(uint32_t csr) noexcept
+     {
+-        __asm__ __volatile__("msr fpcr, %0" : : "r"(csr));
++        __asm__ __volatile__("msr fpcr, %0" : : "r"(static_cast<uint64_t>(csr)));
+     }
+ #else
+ #   error "Missing implementation for FPSCR."
+@@ -542,8 +542,74 @@ struct alignas(0x40) PPCContext
+     PPCVRegister v126;
+     PPCVRegister v127;
+ #endif
++    // Sticky saturation bit for newly implemented vector pack instructions.
++    // Local context extension; runtime ABI integration must use this header.
++    uint32_t vscr = 0;
+ };
+ 
++inline PPCVRegister me_pack_u32_u16(const PPCVRegister& a, const PPCVRegister& b, uint32_t& vscr)
++{
++    PPCVRegister result{};
++    for (unsigned i = 0; i < 4; ++i) {
++        const uint32_t x = b.u32[i], y = a.u32[i];
++        if (x > 65535 || y > 65535) vscr |= 1;
++        result.u16[i] = uint16_t(x > 65535 ? 65535 : x);
++        result.u16[i + 4] = uint16_t(y > 65535 ? 65535 : y);
++    }
++    return result;
++}
++
++inline PPCVRegister me_float_to_u32_fixed(const PPCVRegister& input, unsigned scale, uint32_t& vscr)
++{
++    PPCVRegister result{};
++    for (unsigned i = 0; i < 4; ++i) {
++        const uint32_t bits = input.u32[i];
++        const uint32_t fraction = bits & 0x7fffff;
++        const unsigned exponent = (bits >> 23) & 255;
++        const bool negative = (bits >> 31) != 0;
++        if (exponent == 255) {
++            if (fraction != 0) continue; // NaN converts to zero, no new saturation.
++            result.u32[i] = negative ? 0 : UINT32_MAX;
++            vscr |= 1;
++            continue;
++        }
++        const int integerExponent = int(exponent) - 127 + int(scale);
++        // All binary32 subnormals remain below 1 for an immediate scale <= 31.
++        if (exponent == 0 || integerExponent < 0) continue;
++        if (negative) { vscr |= 1; continue; }
++        if (integerExponent >= 32) { result.u32[i] = UINT32_MAX; vscr |= 1; continue; }
++        const uint32_t significand = fraction | 0x800000;
++        result.u32[i] = integerExponent >= 23
++            ? significand << (integerExponent - 23)
++            : significand >> (23 - integerExponent);
++    }
++    return result;
++}
++
++inline PPCVRegister me_pack_u16_u8(const PPCVRegister& a, const PPCVRegister& b, uint32_t& vscr)
++{
++    PPCVRegister result{};
++    for (unsigned i = 0; i < 8; ++i) {
++        const uint16_t x = b.u16[i], y = a.u16[i];
++        if (x > 255 || y > 255) vscr |= 1;
++        result.u8[i] = uint8_t(x > 255 ? 255 : x);
++        result.u8[i + 8] = uint8_t(y > 255 ? 255 : y);
++    }
++    return result;
++}
++
++inline PPCVRegister me_pack_s32_s16(const PPCVRegister& a, const PPCVRegister& b, uint32_t& vscr)
++{
++    PPCVRegister result{};
++    for (unsigned i = 0; i < 4; ++i) {
++        const int32_t x = b.s32[i], y = a.s32[i];
++        if (x < -32768 || x > 32767 || y < -32768 || y > 32767) vscr |= 1;
++        result.s16[i] = int16_t(x < -32768 ? -32768 : x > 32767 ? 32767 : x);
++        result.s16[i + 4] = int16_t(y < -32768 ? -32768 : y > 32767 ? 32767 : y);
++    }
++    return result;
++}
++
+ inline uint8_t VectorMaskL[] =
+ {
+     0x0F, 0x0E, 0x0D, 0x0C, 0x0B, 0x0A, 0x09, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, 0x00,
+@@ -694,7 +760,9 @@ inline uint64_t __rdtsc()
+     uint64_t ret;
+     asm volatile("mrs %0, cntvct_el0\n\t"
+                  : "=r"(ret)::"memory");
+-    return ret;
++    uint64_t frequency;
++    asm volatile("mrs %0, cntfrq_el0" : "=r"(frequency));
++    return (ret / frequency) * 50000000ull + ((ret % frequency) * 50000000ull) / frequency;
+ }
+ #elif !defined(__x86_64__) && !defined(_M_X64)
+ #   error "Missing implementation for __rdtsc()"

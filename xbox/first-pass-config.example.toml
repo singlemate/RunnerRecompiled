@@ -1,0 +1,12 @@
+[main]
+file_path = "default.xex"
+out_directory_path = "generated"
+switch_table_file_path = "switches.toml"
+skip_lr = false
+skip_msr = false
+ctr_as_local = false
+xer_as_local = false
+reserved_as_local = false
+cr_as_local = false
+non_argument_as_local = false
+non_volatile_as_local = false

@@ -1,0 +1,26 @@
+[main]
+file_path = "default.xex"
+out_directory_path = "generated"
+switch_table_file_path = "switches.toml"
+skip_lr = false
+skip_msr = false
+ctr_as_local = false
+xer_as_local = false
+reserved_as_local = false
+cr_as_local = false
+non_argument_as_local = false
+non_volatile_as_local = false
+
+# Unique patterns; complete register sequence and return validated.
+restgprlr_14_address = 0x829e4080
+savegprlr_14_address = 0x829e4030
+restfpr_14_address = 0x829e4b0c
+savefpr_14_address = 0x829e4ac0
+restvmx_14_address = 0x82b5bb38
+savevmx_14_address = 0x82b5b8a0
+restvmx_64_address = 0x82b5bbcc
+savevmx_64_address = 0x82b5b934
+# Verified leaf routine with date-field switch; complete range ends after its last blr.
+[[main.functions]]
+address = 0x8223a5d8
+size = 0xdc

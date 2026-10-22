@@ -1,0 +1,27 @@
+# Never commit game data, generated code, build outputs or keys.
+work/
+private/
+build/
+*.xex
+*.iso
+*.god
+*.bin
+*.tfc
+*.xxx
+*.bik
+*.ppm
+*.log
+*.apk
+*.idsig
+*.p12
+*.jks
+*.keystore
+*.so
+*.o
+*.a
+*.dex
+*.class
+__pycache__/
+.venv/
+ppc_recomp*.cpp
+ppc_func_mapping.cpp

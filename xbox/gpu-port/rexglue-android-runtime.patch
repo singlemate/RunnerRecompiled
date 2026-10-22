@@ -1,0 +1,1511 @@
+diff --git a/include/rex/chrono/chrono.h b/include/rex/chrono/chrono.h
+index d876846..34e8e68 100644
+--- a/include/rex/chrono/chrono.h
++++ b/include/rex/chrono/chrono.h
+@@ -116,8 +116,8 @@ using XSystemClock = detail::NtSystemClock<detail::Domain::Guest>;
+ 
+ namespace std::chrono {
+ 
+-#ifdef __APPLE__
+-// Apple libc++ does not expose clock_time_conversion or clock_cast.
++#if defined(__APPLE__) || defined(__ANDROID__)
++// Apple and Android NDK libc++ do not expose clock_time_conversion or clock_cast.
+ template <class, class>
+ struct clock_time_conversion {};
+ 
+diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
+index da8e432..5d34da2 100644
+--- a/include/rex/graphics/command_processor.h
++++ b/include/rex/graphics/command_processor.h
+@@ -11,12 +11,16 @@
+ 
+ #pragma once
+ 
++#include <rex/memory/gpu_memory.h>
++#include <rex/graphics/host_worker.h>
++#include <rex/graphics/guest_execution_guard.h>
+ #include <atomic>
+ #include <cstring>
+ #include <functional>
+ #include <memory>
+ #include <mutex>
+ #include <queue>
++#include <stdexcept>
+ #include <string>
+ #include <unordered_map>
+ #include <vector>
+@@ -90,6 +94,16 @@ class CommandProcessor {
+   Shader* active_vertex_shader() const { return active_vertex_shader_; }
+   Shader* active_pixel_shader() const { return active_pixel_shader_; }
+ 
++  // Select before Initialize. Guest gate integration is still the caller's responsibility.
++  void UseExternalHostWorker() {
++    if (initialization_started_ || host_worker_) throw std::logic_error("Select GPU host worker only once before Initialize");
++    host_worker_ = std::make_unique<HostWorker>();
++  }
++  void SetGuestExecutionHooks(GuestExecutionHooks hooks) {
++    if (initialization_started_ || !host_worker_) throw std::logic_error("Select external GPU worker, then set guest gate before Initialize");
++    if (bool(hooks.enter) != bool(hooks.leave)) throw std::invalid_argument("Guest gate hooks must be paired");
++    guest_execution_hooks_ = std::move(hooks);
++  }
+   virtual bool Initialize();
+   virtual void Shutdown();
+ 
+@@ -138,7 +152,7 @@ class CommandProcessor {
+     size_t length = 0;
+   };
+ 
+-  void WorkerThreadMain();
++  void WorkerThreadMain(bool context_initialized = false);
+   virtual bool SetupContext() = 0;
+   virtual void ShutdownContext() = 0;
+ 
+@@ -230,14 +244,24 @@ class CommandProcessor {
+   // Shared memexport readback enable state with backend legacy-flag override support.
+   bool IsReadbackMemexportEnabled(bool legacy_backend_flag) const;
+ 
+-  memory::Memory* memory_ = nullptr;
++  memory::GpuMemory* memory_ = nullptr;
+   system::KernelState* kernel_state_ = nullptr;
+   GraphicsSystem* graphics_system_ = nullptr;
+   RegisterFile* register_file_ = nullptr;
+ 
++  // Latched on the GPU worker: failed packets must never be retried or acknowledged.
++  bool packet_fault_ = false;
++  GuestExecutionHooks guest_execution_hooks_;
++  GuestExecutionGuard* active_guest_execution_ = nullptr;
++  bool initialization_started_ = false;
++  std::unique_ptr<HostWorker> host_worker_;
+   std::atomic<bool> worker_running_;
++#if !REX_GPU_EXTERNAL_HOST
+   system::object_ref<system::XHostThread> worker_thread_;
++#endif
+ 
++  std::mutex pending_fns_mutex_;
++  bool HasPendingFunctions();
+   std::queue<std::function<void()>> pending_fns_;
+ 
+   // MicroEngine binary from PM4_ME_INIT
+diff --git a/include/rex/graphics/d3d12/primitive_processor.h b/include/rex/graphics/d3d12/primitive_processor.h
+index 98aae46..b6ccaaf 100644
+--- a/include/rex/graphics/d3d12/primitive_processor.h
++++ b/include/rex/graphics/d3d12/primitive_processor.h
+@@ -11,6 +11,7 @@
+ 
+ #pragma once
+ 
++#include <rex/memory/gpu_memory.h>
+ #include <cstdint>
+ #include <deque>
+ #include <memory>
+@@ -26,7 +27,7 @@ class D3D12CommandProcessor;
+ 
+ class D3D12PrimitiveProcessor final : public PrimitiveProcessor {
+  public:
+-  D3D12PrimitiveProcessor(const RegisterFile& register_file, memory::Memory& memory,
++  D3D12PrimitiveProcessor(const RegisterFile& register_file, memory::GpuMemory& memory,
+                           SharedMemory& shared_memory, D3D12CommandProcessor& command_processor)
+       : PrimitiveProcessor(register_file, memory, shared_memory),
+         command_processor_(command_processor) {}
+diff --git a/include/rex/graphics/d3d12/render_target_cache.h b/include/rex/graphics/d3d12/render_target_cache.h
+index cd7693a..e673d81 100644
+--- a/include/rex/graphics/d3d12/render_target_cache.h
++++ b/include/rex/graphics/d3d12/render_target_cache.h
+@@ -11,6 +11,7 @@
+ 
+ #pragma once
+ 
++#include <rex/memory/gpu_memory.h>
+ #include <algorithm>
+ #include <array>
+ #include <cstddef>
+@@ -40,7 +41,7 @@ class D3D12CommandProcessor;
+ 
+ class D3D12RenderTargetCache final : public RenderTargetCache {
+  public:
+-  D3D12RenderTargetCache(const RegisterFile& register_file, const memory::Memory& memory,
++  D3D12RenderTargetCache(const RegisterFile& register_file, const memory::GpuMemory& memory,
+                          uint32_t draw_resolution_scale_x, uint32_t draw_resolution_scale_y,
+                          D3D12CommandProcessor& command_processor, bool bindless_resources_used)
+       : RenderTargetCache(register_file, memory, draw_resolution_scale_x, draw_resolution_scale_y),
+@@ -75,7 +76,7 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
+   // Performs the resolve to a shared memory area according to the current
+   // register values, and also clears the render targets if needed. Must be in a
+   // frame for calling.
+-  bool Resolve(const memory::Memory& memory, D3D12SharedMemory& shared_memory,
++  bool Resolve(const memory::GpuMemory& memory, D3D12SharedMemory& shared_memory,
+                D3D12TextureCache& texture_cache, uint32_t& written_address_out,
+                uint32_t& written_length_out);
+ 
+diff --git a/include/rex/graphics/d3d12/shared_memory.h b/include/rex/graphics/d3d12/shared_memory.h
+index 5100818..6485cc3 100644
+--- a/include/rex/graphics/d3d12/shared_memory.h
++++ b/include/rex/graphics/d3d12/shared_memory.h
+@@ -11,6 +11,7 @@
+ 
+ #pragma once
+ 
++#include <rex/memory/gpu_memory.h>
+ #include <algorithm>
+ #include <memory>
+ #include <utility>
+@@ -27,7 +28,7 @@ class D3D12CommandProcessor;
+ 
+ class D3D12SharedMemory : public SharedMemory {
+  public:
+-  D3D12SharedMemory(D3D12CommandProcessor& command_processor, memory::Memory& memory);
++  D3D12SharedMemory(D3D12CommandProcessor& command_processor, memory::GpuMemory& memory);
+   ~D3D12SharedMemory() override;
+ 
+   bool Initialize();
+diff --git a/include/rex/graphics/graphics_system.h b/include/rex/graphics/graphics_system.h
+index ac6b056..bc0a81b 100644
+--- a/include/rex/graphics/graphics_system.h
++++ b/include/rex/graphics/graphics_system.h
+@@ -11,6 +11,7 @@
+ 
+ #pragma once
+ 
++#include <rex/memory/gpu_memory.h>
+ #include "rex/system/function_dispatcher.h"
+ 
+ #include <atomic>
+@@ -22,6 +23,8 @@
+ #include <thread>
+ 
+ #include <rex/graphics/register_file.h>
++#include <rex/graphics/guest_execution_guard.h>
++#include <rex/system/xvideo.h>
+ #include <rex/kernel.h>
+ #include <rex/memory.h>
+ #include <rex/system/interfaces/graphics.h>
+@@ -52,7 +55,7 @@ class GraphicsSystem : public system::IGraphicsSystem {
+ 
+   virtual std::string name() const = 0;
+ 
+-  memory::Memory* memory() const { return memory_; }
++  memory::GpuMemory* memory() const { return memory_; }
+   runtime::FunctionDispatcher* function_dispatcher() const { return function_dispatcher_; }
+   system::KernelState* kernel_state() const { return kernel_state_; }
+   ::rex::ui::GraphicsProvider* provider() const override { return provider_.get(); }
+@@ -61,6 +64,12 @@ class GraphicsSystem : public system::IGraphicsSystem {
+   X_STATUS SetupPresentation(::rex::ui::WindowedAppContext* app_context) override;
+   X_STATUS SetupGuestGpu(runtime::FunctionDispatcher* function_dispatcher,
+                          system::KernelState* kernel_state) override;
++  // Offscreen external runtime: caller supplies video mode and pumps vblank.
++  X_STATUS SetupExternalGpu(memory::GpuMemory&, GuestExecutionHooks,
++      std::function<bool(uint32_t, uint32_t, uint32_t, uint32_t)> interrupt,
++      uint32_t width, uint32_t height, float refresh);
++  void PumpExternalVblank() { MarkVblank(); }
++  void QueryGuestVideoMode(system::X_VIDEO_MODE* mode);
+   bool has_presentation() const override { return presenter_ != nullptr; }
+   void Shutdown() override;
+ 
+@@ -76,6 +85,12 @@ class GraphicsSystem : public system::IGraphicsSystem {
+ 
+   void SetInterruptCallback(uint32_t callback, uint32_t user_data) override;
+   void DispatchInterruptCallback(uint32_t source, uint32_t cpu);
++  using ExternalInterruptDispatcher = std::function<bool(uint32_t, uint32_t, uint32_t, uint32_t)>;
++  // Set before starting GPU workers; empty retains the legacy dispatcher.
++  void SetExternalInterruptDispatcher(ExternalInterruptDispatcher dispatch) {
++    external_interrupt_dispatcher_ = std::move(dispatch);
++  }
++
+ 
+   virtual void ClearCaches();
+   virtual void InvalidateGpuMemory();
+@@ -108,18 +123,25 @@ class GraphicsSystem : public system::IGraphicsSystem {
+ 
+   void MarkVblank();
+ 
+-  memory::Memory* memory_ = nullptr;
++  memory::GpuMemory* memory_ = nullptr;
+   runtime::FunctionDispatcher* function_dispatcher_ = nullptr;
+   system::KernelState* kernel_state_ = nullptr;
+   ::rex::ui::WindowedAppContext* app_context_ = nullptr;
+   std::unique_ptr<::rex::ui::GraphicsProvider> provider_;
+   bool provider_supports_presentation_ = false;
+ 
++  ExternalInterruptDispatcher external_interrupt_dispatcher_;
+   uint32_t interrupt_callback_ = 0;
+   uint32_t interrupt_callback_data_ = 0;
+ 
+   std::atomic<bool> vsync_worker_running_;
++#if !REX_GPU_EXTERNAL_HOST
+   system::object_ref<system::XHostThread> vsync_worker_thread_;
++#endif
++  bool external_runtime_ = false;
++  uint32_t external_width_ = 0, external_height_ = 0;
++  float external_refresh_ = 0;
++
+ 
+   RegisterFile register_file_;
+   std::unique_ptr<CommandProcessor> command_processor_;
+diff --git a/include/rex/graphics/pipeline/render_target/cache.h b/include/rex/graphics/pipeline/render_target/cache.h
+index 3bbd52e..e1604d7 100644
+--- a/include/rex/graphics/pipeline/render_target/cache.h
++++ b/include/rex/graphics/pipeline/render_target/cache.h
+@@ -10,6 +10,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <rex/memory/gpu_memory.h>
+ #include <cmath>
+ #include <cstdint>
+ #include <functional>
+@@ -181,7 +182,7 @@ class RenderTargetCache {
+   uint32_t GetLastUpdateBoundRenderTargets(uint32_t* depth_and_color_formats_out = nullptr) const;
+ 
+  protected:
+-  RenderTargetCache(const RegisterFile& register_file, const memory::Memory& memory,
++  RenderTargetCache(const RegisterFile& register_file, const memory::GpuMemory& memory,
+                     uint32_t draw_resolution_scale_x, uint32_t draw_resolution_scale_y)
+       : register_file_(register_file),
+         draw_extent_estimator_(register_file, memory),
+diff --git a/include/rex/graphics/pipeline/shader/interpreter.h b/include/rex/graphics/pipeline/shader/interpreter.h
+index 3e4fe7c..3ab3a94 100644
+--- a/include/rex/graphics/pipeline/shader/interpreter.h
++++ b/include/rex/graphics/pipeline/shader/interpreter.h
+@@ -10,6 +10,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <rex/memory/gpu_memory.h>
+ #include <algorithm>
+ #include <array>
+ #include <cstddef>
+@@ -26,7 +27,7 @@ namespace rex::graphics {
+ 
+ class ShaderInterpreter {
+  public:
+-  ShaderInterpreter(const RegisterFile& register_file, const memory::Memory& memory)
++  ShaderInterpreter(const RegisterFile& register_file, const memory::GpuMemory& memory)
+       : register_file_(register_file), memory_(memory) {}
+ 
+   class ExportSink {
+@@ -119,7 +120,7 @@ class ShaderInterpreter {
+   void ExecuteVertexFetchInstruction(ucode::VertexFetchInstruction instr);
+ 
+   const RegisterFile& register_file_;
+-  const memory::Memory& memory_;
++  const memory::GpuMemory& memory_;
+ 
+   ExportSink* export_sink_ = nullptr;
+ 
+diff --git a/include/rex/graphics/primitive_processor.h b/include/rex/graphics/primitive_processor.h
+index 2945731..0a2834e 100644
+--- a/include/rex/graphics/primitive_processor.h
++++ b/include/rex/graphics/primitive_processor.h
+@@ -10,6 +10,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <rex/memory/gpu_memory.h>
+ #include <algorithm>
+ #include <climits>
+ #include <cstddef>
+@@ -195,7 +196,7 @@ class PrimitiveProcessor {
+   static constexpr uint32_t kMinRequiredConvertedIndexBufferSize =
+       sizeof(uint32_t) * (UINT16_MAX - 2) * 3 * +XE_GPU_PRIMITIVE_PROCESSOR_SIMD_SIZE;
+ 
+-  PrimitiveProcessor(const RegisterFile& register_file, memory::Memory& memory,
++  PrimitiveProcessor(const RegisterFile& register_file, memory::GpuMemory& memory,
+                      SharedMemory& shared_memory)
+       : register_file_(register_file), memory_(memory), shared_memory_(shared_memory) {}
+ 
+@@ -624,7 +625,7 @@ class PrimitiveProcessor {
+   }
+ 
+   const RegisterFile& register_file_;
+-  memory::Memory& memory_;
++  memory::GpuMemory& memory_;
+   SharedMemory& shared_memory_;
+ 
+   bool full_32bit_vertex_indices_used_ = false;
+diff --git a/include/rex/graphics/shared_memory.h b/include/rex/graphics/shared_memory.h
+index 4d85a2b..cb6184a 100644
+--- a/include/rex/graphics/shared_memory.h
++++ b/include/rex/graphics/shared_memory.h
+@@ -10,6 +10,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <rex/memory/gpu_memory.h>
+ #include <cstdint>
+ #include <mutex>
+ #include <utility>
+@@ -96,7 +97,7 @@ class SharedMemory {
+   void RangeWrittenByGpu(uint32_t start, uint32_t length);
+ 
+  protected:
+-  SharedMemory(memory::Memory& memory);
++  SharedMemory(memory::GpuMemory& memory);
+   // Call in implementation-specific initialization.
+   void InitializeCommon();
+   void InitializeSparseHostGpuMemory(uint32_t granularity_log2);
+@@ -110,7 +111,7 @@ class SharedMemory {
+   static constexpr uint32_t kHostGpuMemoryOptimalSparseAllocationLog2 = 22;
+   static_assert(kHostGpuMemoryOptimalSparseAllocationLog2 <= kBufferSizeLog2);
+ 
+-  memory::Memory& memory() const { return memory_; }
++  memory::GpuMemory& memory() const { return memory_; }
+ 
+   uint32_t page_size_log2() const { return page_size_log2_; }
+ 
+@@ -141,7 +142,7 @@ class SharedMemory {
+       const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges) = 0;
+ 
+  private:
+-  memory::Memory& memory_;
++  memory::GpuMemory& memory_;
+ 
+   // Log2 of invalidation granularity (the system page size, but the dependency
+   // on it is not hard - the access callback takes a range as an argument, and
+diff --git a/include/rex/graphics/util/draw.h b/include/rex/graphics/util/draw.h
+index 3da182d..780924b 100644
+--- a/include/rex/graphics/util/draw.h
++++ b/include/rex/graphics/util/draw.h
+@@ -10,6 +10,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <rex/memory/gpu_memory.h>
+ #include <cmath>
+ #include <cstdint>
+ #include <utility>
+@@ -581,7 +582,7 @@ struct ResolveInfo {
+ // color render target formats are properly emulated as -32...32, true if
+ // emulated as snorm, with range limited to -1...1, but with correct blending
+ // within that range.
+-bool GetResolveInfo(const RegisterFile& regs, const memory::Memory& memory,
++bool GetResolveInfo(const RegisterFile& regs, const memory::GpuMemory& memory,
+                     uint32_t draw_resolution_scale_x, uint32_t draw_resolution_scale_y,
+                     bool fixed_rg16_truncated_to_minus_1_to_1,
+                     bool fixed_rgba16_truncated_to_minus_1_to_1, ResolveInfo& info_out);
+diff --git a/include/rex/graphics/util/draw_extent_estimator.h b/include/rex/graphics/util/draw_extent_estimator.h
+index e5e4908..468cba5 100644
+--- a/include/rex/graphics/util/draw_extent_estimator.h
++++ b/include/rex/graphics/util/draw_extent_estimator.h
+@@ -10,6 +10,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <rex/memory/gpu_memory.h>
+ #include <cstdint>
+ #include <optional>
+ 
+@@ -22,7 +23,7 @@ namespace rex::graphics {
+ 
+ class DrawExtentEstimator {
+  public:
+-  DrawExtentEstimator(const RegisterFile& register_file, const memory::Memory& memory)
++  DrawExtentEstimator(const RegisterFile& register_file, const memory::GpuMemory& memory)
+       : register_file_(register_file),
+         memory_(memory),
+         shader_interpreter_(register_file, memory) {}
+@@ -57,7 +58,7 @@ class DrawExtentEstimator {
+   };
+ 
+   const RegisterFile& register_file_;
+-  const memory::Memory& memory_;
++  const memory::GpuMemory& memory_;
+ 
+   ShaderInterpreter shader_interpreter_;
+ };
+diff --git a/include/rex/graphics/vulkan/primitive_processor.h b/include/rex/graphics/vulkan/primitive_processor.h
+index 35d58d3..6440f9e 100644
+--- a/include/rex/graphics/vulkan/primitive_processor.h
++++ b/include/rex/graphics/vulkan/primitive_processor.h
+@@ -10,6 +10,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <rex/memory/gpu_memory.h>
+ #include <memory>
+ #include <utility>
+ 
+@@ -23,7 +24,7 @@ class VulkanCommandProcessor;
+ 
+ class VulkanPrimitiveProcessor final : public PrimitiveProcessor {
+  public:
+-  VulkanPrimitiveProcessor(const RegisterFile& register_file, memory::Memory& memory,
++  VulkanPrimitiveProcessor(const RegisterFile& register_file, memory::GpuMemory& memory,
+                            SharedMemory& shared_memory, VulkanCommandProcessor& command_processor)
+       : PrimitiveProcessor(register_file, memory, shared_memory),
+         command_processor_(command_processor) {}
+diff --git a/include/rex/graphics/vulkan/render_target_cache.h b/include/rex/graphics/vulkan/render_target_cache.h
+index 34f7033..fa7fa3d 100644
+--- a/include/rex/graphics/vulkan/render_target_cache.h
++++ b/include/rex/graphics/vulkan/render_target_cache.h
+@@ -10,6 +10,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <rex/memory/gpu_memory.h>
+ #include <array>
+ #include <cstdint>
+ #include <cstring>
+@@ -84,7 +85,7 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+         : framebuffer(framebuffer), host_extent(host_extent) {}
+   };
+ 
+-  VulkanRenderTargetCache(const RegisterFile& register_file, const memory::Memory& memory,
++  VulkanRenderTargetCache(const RegisterFile& register_file, const memory::GpuMemory& memory,
+                           uint32_t draw_resolution_scale_x, uint32_t draw_resolution_scale_y,
+                           VulkanCommandProcessor& command_processor);
+   ~VulkanRenderTargetCache();
+@@ -105,7 +106,7 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+   // Performs the resolve to a shared memory area according to the current
+   // register values, and also clears the render targets if needed. Must be in a
+   // frame for calling.
+-  bool Resolve(const memory::Memory& memory, VulkanSharedMemory& shared_memory,
++  bool Resolve(const memory::GpuMemory& memory, VulkanSharedMemory& shared_memory,
+                VulkanTextureCache& texture_cache, uint32_t& written_address_out,
+                uint32_t& written_length_out);
+ 
+diff --git a/include/rex/graphics/vulkan/shared_memory.h b/include/rex/graphics/vulkan/shared_memory.h
+index 104bdad..e8c8870 100644
+--- a/include/rex/graphics/vulkan/shared_memory.h
++++ b/include/rex/graphics/vulkan/shared_memory.h
+@@ -10,6 +10,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <rex/memory/gpu_memory.h>
+ #include <algorithm>
+ #include <memory>
+ #include <utility>
+@@ -25,7 +26,7 @@ class VulkanCommandProcessor;
+ 
+ class VulkanSharedMemory : public SharedMemory {
+  public:
+-  VulkanSharedMemory(VulkanCommandProcessor& command_processor, memory::Memory& memory,
++  VulkanSharedMemory(VulkanCommandProcessor& command_processor, memory::GpuMemory& memory,
+                      VkPipelineStageFlags guest_shader_pipeline_stages);
+   ~VulkanSharedMemory() override;
+ 
+diff --git a/include/rex/platform/fpscr.h b/include/rex/platform/fpscr.h
+index c2c4fd4..59078f2 100644
+--- a/include/rex/platform/fpscr.h
++++ b/include/rex/platform/fpscr.h
+@@ -75,7 +75,7 @@ struct FPSCRPlatform {
+     return csr;
+   }
+ 
+-  static inline void setcsr(u32 csr) noexcept { __asm__ __volatile__("msr fpcr, %0" : : "r"(csr)); }
++  static inline void setcsr(u32 csr) noexcept { __asm__ __volatile__("msr fpcr, %0" : : "r"(static_cast<uint64_t>(csr))); }
+ 
+   static inline void InitHostExceptions(u32& csr) noexcept {
+     csr &= ~ExceptionMask;  // Clear enable bits to disable exceptions
+diff --git a/include/rex/system/xmemory.h b/include/rex/system/xmemory.h
+index 0c39a42..80c8166 100644
+--- a/include/rex/system/xmemory.h
++++ b/include/rex/system/xmemory.h
+@@ -18,6 +18,7 @@
+ #include <vector>
+ 
+ #include <rex/memory/utils.h>
++#include <rex/memory/gpu_memory.h>
+ #include <rex/ppc/func.h>  // PPCFunc type
+ #include <rex/system/mmio_handler.h>
+ #include <rex/thread/mutex.h>
+@@ -360,10 +361,10 @@ class PhysicalHeap : public BaseHeap {
+ // overlap with other ranges. Each range is represented by a BaseHeap of either
+ // VirtualHeap or PhysicalHeap depending on type. Heaps model the page tables
+ // and can handle reservation and committing of requested pages.
+-class Memory {
++class Memory : public GpuMemory {
+  public:
+   Memory();
+-  ~Memory();
++  ~Memory() override;
+ 
+   // Initializes the memory system.
+   // This may fail if the host address space could not be reserved or the
+@@ -395,7 +396,7 @@ class Memory {
+ 
+   // Base address of physical memory in the host address space.
+   // This is often something like 0x200000000.
+-  inline uint8_t* physical_membase() const { return physical_membase_; }
++  inline uint8_t* physical_membase() const override { return physical_membase_; }
+ 
+   // Translates a guest physical address to a host address that can be accessed
+   // as a normal pointer.
+@@ -430,7 +431,7 @@ class Memory {
+   // will trigger the specified read and write callbacks for dword read/writes.
+   bool AddVirtualMappedRange(uint32_t virtual_address, uint32_t mask, uint32_t size, void* context,
+                              runtime::MMIOReadCallback read_callback,
+-                             runtime::MMIOWriteCallback write_callback);
++                             runtime::MMIOWriteCallback write_callback) override;
+ 
+   // Gets the defined MMIO range for the given virtual address, if any.
+   runtime::MMIORange* LookupVirtualMappedRange(uint32_t virtual_address);
+@@ -490,16 +491,16 @@ class Memory {
+   // Returns a handle for unregistering or for skipping one notification handler
+   // while triggering data providers.
+   void* RegisterPhysicalMemoryInvalidationCallback(PhysicalMemoryInvalidationCallback callback,
+-                                                   void* callback_context);
++                                                   void* callback_context) override;
+   // Unregisters a physical memory invalidation callback previously added with
+   // RegisterPhysicalMemoryInvalidationCallback.
+-  void UnregisterPhysicalMemoryInvalidationCallback(void* callback_handle);
++  void UnregisterPhysicalMemoryInvalidationCallback(void* callback_handle) override;
+ 
+   // Enables physical memory access callbacks for the specified memory range,
+   // snapped to system page boundaries.
+   void EnablePhysicalMemoryAccessCallbacks(uint32_t physical_address, uint32_t length,
+                                            bool enable_invalidation_notifications,
+-                                           bool enable_data_providers);
++                                           bool enable_data_providers) override;
+ 
+   // Forces triggering of watch callbacks for a virtual address range if pages
+   // are watched there and unwatching them. Returns whether any page was
+diff --git a/src/core/memory_posix.cpp b/src/core/memory_posix.cpp
+index b52bf39..2cdcd55 100644
+--- a/src/core/memory_posix.cpp
++++ b/src/core/memory_posix.cpp
+@@ -53,8 +53,7 @@
+ 
+ #include <linux/ashmem.h>
+ 
+-// TODO(tomc): Android or maybe na. idk
+-// #include "xenia/base/main_android.h"
++#include <rex/main_android.h>
+ #endif
+ 
+ namespace rex {
+diff --git a/src/core/threading_posix.cpp b/src/core/threading_posix.cpp
+index 9ac8d15..ea0bf5b 100644
+--- a/src/core/threading_posix.cpp
++++ b/src/core/threading_posix.cpp
+@@ -270,7 +270,7 @@ static sem_t* RexCreateAnonymousSemaphore() {
+ class PosixConditionBase {
+  public:
+   PosixConditionBase() {
+-#if REX_PLATFORM_LINUX
++#if REX_PLATFORM_LINUX && !REX_PLATFORM_ANDROID
+     // Use robust mutexes so waits can recover if owner thread terminates.
+     pthread_mutexattr_t attr;
+     if (pthread_mutexattr_init(&attr) == 0) {
+@@ -290,7 +290,7 @@ class PosixConditionBase {
+   WaitResult Wait(std::chrono::milliseconds timeout) {
+     bool executed;
+     auto predicate = [this] { return this->signaled(); };
+-#if REX_PLATFORM_LINUX
++#if REX_PLATFORM_LINUX && !REX_PLATFORM_ANDROID
+     auto native_mutex = static_cast<pthread_mutex_t*>(mutex_.native_handle());
+     int lock_result = pthread_mutex_lock(native_mutex);
+     if (lock_result == EOWNERDEAD) {
+@@ -344,7 +344,7 @@ class PosixConditionBase {
+       locks.reserve(handles.size());
+ 
+       for (size_t i = 0; i < handles.size(); ++i) {
+-#if REX_PLATFORM_LINUX
++#if REX_PLATFORM_LINUX && !REX_PLATFORM_ANDROID
+         auto native_mutex = static_cast<pthread_mutex_t*>(handles[i]->mutex_.native_handle());
+         int result = pthread_mutex_trylock(native_mutex);
+         if (result == 0 || result == EOWNERDEAD) {
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+index a744375..22e0248 100644
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -116,6 +116,8 @@ CommandProcessor::CommandProcessor(GraphicsSystem* graphics_system,
+ CommandProcessor::~CommandProcessor() = default;
+ 
+ bool CommandProcessor::Initialize() {
++  if (initialization_started_) return false;
++  initialization_started_ = true;
+   // Initialize the gamma ramps to their default (linear) values - taken from
+   // what games set when starting with the sRGB (return value 1)
+   // VdGetCurrentDisplayGamma.
+@@ -136,6 +138,22 @@ bool CommandProcessor::Initialize() {
+   }
+ 
+   worker_running_ = true;
++  if (host_worker_) {
++    if (!host_worker_->StartReady([this] {
++            GuestExecutionBinding access(active_guest_execution_, guest_execution_hooks_);
++            return SetupContext();
++          },
++            [this] { WorkerThreadMain(true); })) {
++      worker_running_ = false;
++      REXGPU_ERROR("External GPU worker context setup failed");
++      return false;
++    }
++    return true;
++  }
++#if REX_GPU_EXTERNAL_HOST
++  worker_running_ = false;
++  return false;
++#else
+   worker_thread_ = system::object_ref<system::XHostThread>(
+       new system::XHostThread(kernel_state_, 128 * 1024, 0, [this]() {
+         WorkerThreadMain();
+@@ -144,24 +162,43 @@ bool CommandProcessor::Initialize() {
+   worker_thread_->set_name("GPU Commands");
+   worker_thread_->Create();
+ 
++#endif
+   return true;
+ }
+ 
+ void CommandProcessor::Shutdown() {
+   worker_running_ = false;
+   write_ptr_index_event_->Set();
+-  worker_thread_->Wait(0, 0, 0, nullptr);
+-  worker_thread_.reset();
++  if (host_worker_) {
++    host_worker_->Join();
++    if (host_worker_->failure()) REXGPU_ERROR("External GPU worker failed");
++  }
++#if !REX_GPU_EXTERNAL_HOST
++  else if (worker_thread_) {
++    worker_thread_->Wait(0, 0, 0, nullptr);
++    worker_thread_.reset();
++  }
++#endif
+ }
+ 
+ void CommandProcessor::InitializeShaderStorage(const std::filesystem::path& cache_root,
+                                                uint32_t title_id, bool blocking) {}
+ 
++bool CommandProcessor::HasPendingFunctions() {
++  std::lock_guard<std::mutex> lock(pending_fns_mutex_);
++  return !pending_fns_.empty();
++}
++
+ void CommandProcessor::CallInThread(std::function<void()> fn) {
+-  if (pending_fns_.empty() && system::XThread::IsInThread(worker_thread_.get())) {
++  bool in_worker = host_worker_ && host_worker_->IsCurrentThread();
++#if !REX_GPU_EXTERNAL_HOST
++  if (!host_worker_) in_worker = system::XThread::IsInThread(worker_thread_.get());
++#endif
++  if (!HasPendingFunctions() && in_worker) {
+     fn();
+   } else {
+-    pending_fns_.push(std::move(fn));
++    { std::lock_guard<std::mutex> lock(pending_fns_mutex_); pending_fns_.push(std::move(fn)); }
++    write_ptr_index_event_->Set();
+   }
+ }
+ 
+@@ -197,16 +234,21 @@ void CommandProcessor::SetDesiredSwapPostEffect(SwapPostEffect swap_post_effect)
+   CallInThread([this, swap_post_effect]() { swap_post_effect_actual_ = swap_post_effect; });
+ }
+ 
+-void CommandProcessor::WorkerThreadMain() {
+-  if (!SetupContext()) {
++void CommandProcessor::WorkerThreadMain(bool context_initialized) {
++  if (!context_initialized && !SetupContext()) {
+     rex::FatalError("Unable to setup command processor internal state");
+     return;
+   }
+ 
+   while (worker_running_) {
+-    while (!pending_fns_.empty()) {
+-      auto fn = std::move(pending_fns_.front());
+-      pending_fns_.pop();
++    GuestExecutionBinding access(active_guest_execution_, guest_execution_hooks_);
++    for (;;) {
++      std::function<void()> fn;
++      {
++        std::lock_guard<std::mutex> lock(pending_fns_mutex_);
++        if (pending_fns_.empty()) break;
++        fn = std::move(pending_fns_.front()); pending_fns_.pop();
++      }
+       fn();
+     }
+ 
+@@ -229,10 +271,10 @@ void CommandProcessor::WorkerThreadMain() {
+         rex::thread::MaybeYield();
+         loop_count++;
+         write_ptr_index = write_ptr_index_.load();
+-      } while (worker_running_ && pending_fns_.empty() &&
++      } while (worker_running_ && !HasPendingFunctions() &&
+                (write_ptr_index == 0xBAADF00D || read_ptr_index_ == write_ptr_index));
+       ReturnFromWait();
+-      if (!worker_running_ || !pending_fns_.empty()) {
++      if (!worker_running_ || HasPendingFunctions()) {
+         continue;
+       }
+     }
+@@ -241,6 +283,12 @@ void CommandProcessor::WorkerThreadMain() {
+     // Execute. Note that we handle wraparound transparently.
+     read_ptr_index_ = ExecutePrimaryBuffer(read_ptr_index_, write_ptr_index);
+ 
++    if (packet_fault_) {
++      REXGPU_ERROR("Command processor stopped after packet failure; read pointer not acknowledged.");
++      worker_running_ = false;
++      break;
++    }
++
+     // TODO(benvanik): use reader->Read_update_freq_ and only issue after moving
+     //     that many indices.
+     if (read_ptr_writeback_ptr_) {
+@@ -252,6 +300,7 @@ void CommandProcessor::WorkerThreadMain() {
+     // but no games seem to actually use it.
+   }
+ 
++  GuestExecutionBinding shutdown_access(active_guest_execution_, guest_execution_hooks_);
+   ShutdownContext();
+ }
+ 
+@@ -261,10 +310,16 @@ void CommandProcessor::Pause() {
+   }
+   paused_ = true;
+ 
++  if (host_worker_) host_worker_->RequestPause();
+   thread::Fence fence;
+-  CallInThread([&fence]() {
++  CallInThread([this, &fence]() {
+     fence.Signal();
+-    thread::Thread::GetCurrentThread()->Suspend();
++    if (host_worker_) {
++      PrepareForWait();
++      host_worker_->PauseCurrent();
++      ReturnFromWait();
++    }
++    else thread::Thread::GetCurrentThread()->Suspend();
+   });
+ 
+   fence.Wait();
+@@ -276,7 +331,10 @@ void CommandProcessor::Resume() {
+   }
+   paused_ = false;
+ 
+-  worker_thread_->thread()->Resume();
++  if (host_worker_) host_worker_->Resume();
++#if !REX_GPU_EXTERNAL_HOST
++  else worker_thread_->thread()->Resume();
++#endif
+ }
+ 
+ bool CommandProcessor::Save(::rex::stream::ByteStream* stream) {
+@@ -608,41 +666,57 @@ void CommandProcessor::MakeCoherent() {
+   regs_volatile[XE_GPU_REG_COHER_STATUS_HOST] = 0;
+ }
+ 
+-void CommandProcessor::PrepareForWait() {}
++void CommandProcessor::PrepareForWait() {
++  if (active_guest_execution_) active_guest_execution_->Release();
++}
+ 
+-void CommandProcessor::ReturnFromWait() {}
++void CommandProcessor::ReturnFromWait() {
++  if (active_guest_execution_) active_guest_execution_->Acquire();
++}
+ 
+ uint32_t CommandProcessor::ExecutePrimaryBuffer(uint32_t read_index, uint32_t write_index) {
+   SCOPE_profile_cpu_f("gpu");
+ 
++  memory_->SynchronizePhysicalWrites();
+   // Execute commands!
+   memory::RingBuffer reader(memory_->TranslatePhysical(primary_buffer_ptr_), primary_buffer_size_);
+   reader.set_read_offset(read_index * sizeof(uint32_t));
+   reader.set_write_offset(write_index * sizeof(uint32_t));
+-  do {
+-    if (!ExecutePacket(&reader)) {
+-      // This probably should be fatal - but we're going to continue anyways.
++  while (reader.read_count()) {
++    const uint32_t packet_start = reader.read_offset();
++    if (!ExecutePacket(&reader) || packet_fault_) {
++      packet_fault_ = true;
++      reader.set_read_offset(packet_start);
+       REXGPU_ERROR("**** PRIMARY RINGBUFFER: Failed to execute packet.");
+-      assert_always();
+       break;
+     }
+-  } while (reader.read_count());
++  }
+ 
+-  OnPrimaryBufferEnd();
++  if (!packet_fault_) OnPrimaryBufferEnd();
+ 
+-  return write_index;
++  return reader.read_offset() / sizeof(uint32_t);
+ }
+ 
+ void CommandProcessor::ExecuteIndirectBuffer(uint32_t ptr, uint32_t count) {
+   SCOPE_profile_cpu_f("gpu");
+ 
+   // Execute commands!
+-  memory::RingBuffer reader(memory_->TranslatePhysical(ptr), count * sizeof(uint32_t));
++  if (!count) return;
++  if (count > 0x100000 || !memory_->IsPhysicalRangeValid(ptr, count * sizeof(uint32_t))) {
++    REXGPU_ERROR("Invalid indirect/linear GPU buffer: address {:08X}, words {}", ptr, count);
++    packet_fault_ = true;
++    return;
++  }
++  // RingBuffer represents equal offsets as empty. A linear IB has no spare
++  // word in guest memory, so use a logical sentinel capacity. Read count ends
++  // before the sentinel; it is never read or written.
++  memory::RingBuffer reader(memory_->TranslatePhysical(ptr), (count + 1) * sizeof(uint32_t));
+   reader.set_write_offset(count * sizeof(uint32_t));
+   do {
+     if (!ExecutePacket(&reader)) {
++      packet_fault_ = true;
+       // Return up a level if we encounter a bad packet.
+-      REXGPU_ERROR("**** INDIRECT RINGBUFFER: Failed to execute packet.");
++      REXGPU_ERROR("**** INDIRECT RINGBUFFER: Failed to execute packet at byte offset {:08X}, remaining {}.", reader.read_offset(), reader.read_count());
+       assert_always();
+       break;
+     }
+@@ -651,7 +725,16 @@ void CommandProcessor::ExecuteIndirectBuffer(uint32_t ptr, uint32_t count) {
+ 
+ void CommandProcessor::ExecutePacket(uint32_t ptr, uint32_t count) {
+   // Execute commands!
+-  memory::RingBuffer reader(memory_->TranslatePhysical(ptr), count * sizeof(uint32_t));
++  if (!count) return;
++  if (count > 0x100000 || !memory_->IsPhysicalRangeValid(ptr, count * sizeof(uint32_t))) {
++    REXGPU_ERROR("Invalid indirect/linear GPU buffer: address {:08X}, words {}", ptr, count);
++    packet_fault_ = true;
++    return;
++  }
++  // RingBuffer represents equal offsets as empty. A linear IB has no spare
++  // word in guest memory, so use a logical sentinel capacity. Read count ends
++  // before the sentinel; it is never read or written.
++  memory::RingBuffer reader(memory_->TranslatePhysical(ptr), (count + 1) * sizeof(uint32_t));
+   reader.set_write_offset(count * sizeof(uint32_t));
+   do {
+     if (!ExecutePacket(&reader)) {
+@@ -663,6 +746,7 @@ void CommandProcessor::ExecutePacket(uint32_t ptr, uint32_t count) {
+ }
+ 
+ bool CommandProcessor::ExecutePacket(memory::RingBuffer* reader) {
++  if (packet_fault_ || reader->read_count() < sizeof(uint32_t)) return false;
+   const uint32_t packet = reader->ReadAndSwap<uint32_t>();
+   const uint32_t packet_type = packet >> 30;
+   if (packet == 0) {
+@@ -714,6 +798,10 @@ bool CommandProcessor::ExecutePacketType0(memory::RingBuffer* reader, uint32_t p
+ bool CommandProcessor::ExecutePacketType1(memory::RingBuffer* reader, uint32_t packet) {
+   // Type-1 packet.
+   // Contains two registers of data. Type-0 should be more common.
++  if (reader->read_count() < 2 * sizeof(uint32_t)) {
++    REXGPU_ERROR("ExecutePacketType1 truncated payload");
++    return false;
++  }
+   uint32_t reg_index_1 = packet & 0x7FF;
+   uint32_t reg_index_2 = (packet >> 11) & 0x7FF;
+   uint32_t reg_data_1 = reader->ReadAndSwap<uint32_t>();
+@@ -972,6 +1060,7 @@ bool CommandProcessor::ExecutePacketType3_INDIRECT_BUFFER(memory::RingBuffer* re
+   assert_zero(list_length & ~0xFFFFF);
+   list_length &= 0xFFFFF;
+   ExecuteIndirectBuffer(GpuToCpu(list_ptr), list_length);
++  if (packet_fault_) return false;
+   return true;
+ }
+ 
+@@ -989,6 +1078,9 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
+ 
+   bool is_memory = (wait_info & 0x10) != 0;
+ 
++#if REX_GPU_EXTERNAL_HOST
++  REXGPU_INFO("external_gpu_wait_begin info={:08X} address={:08X} reference={:08X} mask={:08X}", wait_info, poll_reg_addr, ref, mask);
++#endif
+   bool matched = false;
+   do {
+     uint32_t value = 0;
+@@ -1047,7 +1139,10 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
+           return false;
+         }
+       } else {
++        PrepareForWait();
+         rex::thread::MaybeYield();
++        ReturnFromWait();
++        if (!worker_running_) return false;
+       }
+     }
+   } while (!matched);
+@@ -1135,6 +1230,9 @@ bool CommandProcessor::ExecutePacketType3_COND_WRITE(memory::RingBuffer* reader,
+     // Register.
+     value = ReadRegisterValue(poll_reg_addr);
+   }
++#if REX_GPU_EXTERNAL_HOST
++  REXGPU_INFO("external_gpu_wait_begin info={:08X} address={:08X} reference={:08X} mask={:08X}", wait_info, poll_reg_addr, ref, mask);
++#endif
+   bool matched = false;
+   switch (wait_info & 0x7) {
+     case 0x0:  // Never.
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+index 19874a5..ce8e75f 100644
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -1981,7 +1981,7 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+   }
+ 
+   system::X_VIDEO_MODE video_mode;
+-  kernel::xboxkrnl::VdQueryVideoMode(&video_mode);
++  graphics_system_->QueryGuestVideoMode(&video_mode);
+   uint32_t display_width = std::max(uint32_t(1), uint32_t(video_mode.display_width));
+   uint32_t display_height = std::max(uint32_t(1), uint32_t(video_mode.display_height));
+ 
+diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/render_target_cache.cpp
+index dd321a5..35281af 100644
+--- a/src/graphics/d3d12/render_target_cache.cpp
++++ b/src/graphics/d3d12/render_target_cache.cpp
+@@ -9,6 +9,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <rex/memory/gpu_memory.h>
+ #include "thirdparty/dxbc/DXBCChecksum.h"
+ 
+ #include <algorithm>
+@@ -1159,7 +1160,7 @@ void D3D12RenderTargetCache::WriteEdramUintPow2UAVDescriptor(D3D12_CPU_DESCRIPTO
+                                 D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+ }
+ 
+-bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMemory& shared_memory,
++bool D3D12RenderTargetCache::Resolve(const memory::GpuMemory& memory, D3D12SharedMemory& shared_memory,
+                                      D3D12TextureCache& texture_cache,
+                                      uint32_t& written_address_out, uint32_t& written_length_out) {
+   written_address_out = 0;
+diff --git a/src/graphics/d3d12/shared_memory.cpp b/src/graphics/d3d12/shared_memory.cpp
+index a5c97a0..1c2519e 100644
+--- a/src/graphics/d3d12/shared_memory.cpp
++++ b/src/graphics/d3d12/shared_memory.cpp
+@@ -9,6 +9,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <rex/memory/gpu_memory.h>
+ #include <cstring>
+ #include <utility>
+ #include <vector>
+@@ -28,7 +29,7 @@ REXCVAR_DEFINE_BOOL(d3d12_tiled_shared_memory, true, "GPU/D3D12",
+ namespace rex::graphics::d3d12 {
+ 
+ D3D12SharedMemory::D3D12SharedMemory(D3D12CommandProcessor& command_processor,
+-                                     memory::Memory& memory)
++                                     memory::GpuMemory& memory)
+     : SharedMemory(memory), command_processor_(command_processor) {}
+ 
+ D3D12SharedMemory::~D3D12SharedMemory() {
+diff --git a/src/graphics/graphics_system.cpp b/src/graphics/graphics_system.cpp
+index 8f2fcb0..1d1f6a0 100644
+--- a/src/graphics/graphics_system.cpp
++++ b/src/graphics/graphics_system.cpp
+@@ -77,6 +77,10 @@ GraphicsSystem::GraphicsSystem() : vsync_worker_running_(false) {}
+ GraphicsSystem::~GraphicsSystem() = default;
+ 
+ X_STATUS GraphicsSystem::SetupPresentation(ui::WindowedAppContext* app_context) {
++#if REX_GPU_EXTERNAL_HOST
++  return X_STATUS_NOT_IMPLEMENTED; // This build deliberately has no window backend.
++#else
++
+   if (presenter_) {
+     return X_STATUS_SUCCESS;
+   }
+@@ -113,10 +117,16 @@ X_STATUS GraphicsSystem::SetupPresentation(ui::WindowedAppContext* app_context)
+     return X_STATUS_UNSUCCESSFUL;
+   }
+   return X_STATUS_SUCCESS;
++
++#endif
+ }
+ 
+ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dispatcher,
+                                        system::KernelState* kernel_state) {
++#if REX_GPU_EXTERNAL_HOST
++  return X_STATUS_NOT_IMPLEMENTED; // Use the explicit external runtime contract.
++#else
++
+   memory_ = function_dispatcher->memory();
+   function_dispatcher_ = function_dispatcher;
+   kernel_state_ = kernel_state;
+@@ -151,7 +161,7 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
+   vsync_worker_thread_ = system::object_ref<system::XHostThread>(
+       new system::XHostThread(kernel_state_, 128 * 1024, 0, [this]() {
+         system::X_VIDEO_MODE video_mode;
+-        kernel::xboxkrnl::VdQueryVideoMode(&video_mode);
++        QueryGuestVideoMode(&video_mode);
+         double refresh_rate_hz = std::max(1.0, double(float(video_mode.refresh_rate)));
+         uint64_t guest_tick_frequency = chrono::Clock::guest_tick_frequency();
+         uint64_t vsync_interval_ticks =
+@@ -176,6 +186,47 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
+   vsync_worker_thread_->Create();
+ 
+   return X_STATUS_SUCCESS;
++
++#endif
++}
++
++void GraphicsSystem::QueryGuestVideoMode(system::X_VIDEO_MODE* mode) {
++  if (external_runtime_) {
++    *mode = {};
++    mode->display_width = external_width_; mode->display_height = external_height_;
++    mode->refresh_rate = external_refresh_;
++    return;
++  }
++#if !REX_GPU_EXTERNAL_HOST
++  kernel::xboxkrnl::VdQueryVideoMode(mode);
++#else
++  *mode = {};
++#endif
++}
++
++X_STATUS GraphicsSystem::SetupExternalGpu(memory::GpuMemory& memory, GuestExecutionHooks hooks,
++    std::function<bool(uint32_t, uint32_t, uint32_t, uint32_t)> interrupt,
++    uint32_t width, uint32_t height, float refresh) {
++  if (command_processor_ || !hooks.enter || !hooks.leave || !interrupt ||
++      !width || !height || !(refresh >= 1 && refresh <= 240)) return X_STATUS_UNSUCCESSFUL;
++  external_runtime_ = true; memory_ = &memory;
++  external_width_ = width; external_height_ = height; external_refresh_ = refresh;
++  external_interrupt_dispatcher_ = std::move(interrupt);
++  if (!provider_) CreateProvider(false);
++  if (!provider_) return X_STATUS_UNSUCCESSFUL;
++  command_processor_ = CreateCommandProcessor();
++  if (!command_processor_) return X_STATUS_UNSUCCESSFUL;
++  command_processor_->UseExternalHostWorker();
++  command_processor_->SetGuestExecutionHooks(hooks);
++  if (!command_processor_->Initialize()) return X_STATUS_UNSUCCESSFUL;
++  {
++    GuestExecutionGuard access(hooks);
++    if (!memory_->AddVirtualMappedRange(0x7fc80000, 0xffff0000, 0xffff, this,
++        reinterpret_cast<runtime::MMIOReadCallback>(ReadRegisterThunk),
++        reinterpret_cast<runtime::MMIOWriteCallback>(WriteRegisterThunk))) return X_STATUS_UNSUCCESSFUL;
++  }
++  command_processor_->SetDesiredSwapPostEffect(ParseSwapPostEffect(REXCVAR_GET(swap_post_effect)));
++  return X_STATUS_SUCCESS;
+ }
+ 
+ void GraphicsSystem::Shutdown() {
+@@ -184,16 +235,21 @@ void GraphicsSystem::Shutdown() {
+     command_processor_.reset();
+   }
+ 
++#if !REX_GPU_EXTERNAL_HOST
+   if (vsync_worker_thread_) {
+     vsync_worker_running_ = false;
+     vsync_worker_thread_->Wait(0, 0, 0, nullptr);
+     vsync_worker_thread_.reset();
+   }
+ 
++#endif
++
+   if (presenter_) {
++#if !REX_GPU_EXTERNAL_HOST
+     if (app_context_) {
+       app_context_->CallInUIThreadSynchronous([this]() { presenter_.reset(); });
+     }
++#endif
+     // If there's no app context (thus the presenter is owned by the thread that
+     // initialized the GraphicsSystem) or can't be queueing UI thread calls
+     // anymore, shutdown anyway.
+@@ -239,7 +295,7 @@ uint32_t GraphicsSystem::ReadRegister(uint32_t addr) {
+       return 0x0000200E;
+     case 0x194C: {  // R500_D1MODE_V_COUNTER
+       system::X_VIDEO_MODE video_mode;
+-      kernel::xboxkrnl::VdQueryVideoMode(&video_mode);
++      QueryGuestVideoMode(&video_mode);
+       return std::min(uint32_t(video_mode.display_height), uint32_t(0x0FFF));
+     }
+     case 0x1951:    // interrupt status
+@@ -247,7 +303,7 @@ uint32_t GraphicsSystem::ReadRegister(uint32_t addr) {
+     case 0x1961: {  // AVIVO_D1MODE_VIEWPORT_SIZE
+       // Maximum [width(0x0FFF), height(0x0FFF)].
+       system::X_VIDEO_MODE video_mode;
+-      kernel::xboxkrnl::VdQueryVideoMode(&video_mode);
++      QueryGuestVideoMode(&video_mode);
+       uint32_t viewport_width = std::min(uint32_t(video_mode.display_width), uint32_t(0x0FFF));
+       uint32_t viewport_height = std::min(uint32_t(video_mode.display_height), uint32_t(0x0FFF));
+       return (viewport_width << 16) | viewport_height;
+@@ -299,6 +355,16 @@ void GraphicsSystem::DispatchInterruptCallback(uint32_t source, uint32_t cpu) {
+     return;
+   }
+ 
++  if (external_interrupt_dispatcher_) {
++    if (!external_interrupt_dispatcher_(interrupt_callback_, interrupt_callback_data_, source, cpu)) {
++      REXGPU_ERROR("External GPU interrupt dispatcher rejected delivery");
++    }
++    return;
++  }
++
++#if REX_GPU_EXTERNAL_HOST
++  REXGPU_ERROR("External GPU interrupt callback has no dispatcher");
++#else
+   auto thread = system::XThread::GetCurrentThread();
+   assert_not_null(thread);
+ 
+@@ -314,6 +380,7 @@ void GraphicsSystem::DispatchInterruptCallback(uint32_t source, uint32_t cpu) {
+   uint64_t args[] = {source, interrupt_callback_data_};
+   function_dispatcher_->ExecuteInterrupt(thread->thread_state(), interrupt_callback_, args,
+                                          rex::countof(args));
++#endif
+ }
+ 
+ void GraphicsSystem::MarkVblank() {
+diff --git a/src/graphics/shared_memory.cpp b/src/graphics/shared_memory.cpp
+index ec0df7c..f82fc99 100644
+--- a/src/graphics/shared_memory.cpp
++++ b/src/graphics/shared_memory.cpp
+@@ -9,6 +9,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <rex/memory/gpu_memory.h>
+ #include <algorithm>
+ #include <cstring>
+ #include <utility>
+@@ -22,7 +23,7 @@
+ 
+ namespace rex::graphics {
+ 
+-SharedMemory::SharedMemory(memory::Memory& memory) : memory_(memory) {
++SharedMemory::SharedMemory(memory::GpuMemory& memory) : memory_(memory) {
+   page_size_log2_ = rex::log2_ceil(uint32_t(rex::memory::page_size()));
+ }
+ 
+@@ -338,6 +339,7 @@ void SharedMemory::UnlinkWatchRange(WatchRange* range) {
+ }
+ 
+ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, size_t count) {
++  memory().SynchronizePhysicalWrites();
+   if (ranges == nullptr || !count) {
+     return true;
+   }
+diff --git a/src/graphics/util/draw.cpp b/src/graphics/util/draw.cpp
+index 305380e..2461e3a 100644
+--- a/src/graphics/util/draw.cpp
++++ b/src/graphics/util/draw.cpp
+@@ -9,6 +9,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <rex/memory/gpu_memory.h>
+ #include <algorithm>
+ #include <cmath>
+ 
+@@ -762,7 +763,7 @@ const ResolveCopyShaderInfo resolve_copy_shader_info[size_t(ResolveCopyShaderInd
+     {"Resolve Copy Full 128bpp", true, 2, 4, 4, 3},
+ };
+ 
+-bool GetResolveInfo(const RegisterFile& regs, const memory::Memory& memory,
++bool GetResolveInfo(const RegisterFile& regs, const memory::GpuMemory& memory,
+                     uint32_t draw_resolution_scale_x, uint32_t draw_resolution_scale_y,
+                     bool fixed_rg16_truncated_to_minus_1_to_1,
+                     bool fixed_rgba16_truncated_to_minus_1_to_1, ResolveInfo& info_out) {
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 001f36b..a0cbb16 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -2404,7 +2404,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+       static_cast<uint32_t>(frontbuffer_format));
+ 
+   system::X_VIDEO_MODE video_mode;
+-  kernel::xboxkrnl::VdQueryVideoMode(&video_mode);
++  graphics_system_->QueryGuestVideoMode(&video_mode);
+   uint32_t display_width = std::max(uint32_t(1), uint32_t(video_mode.display_width));
+   uint32_t display_height = std::max(uint32_t(1), uint32_t(video_mode.display_height));
+ 
+diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeline_cache.cpp
+index 91ac08f..3164f59 100644
+--- a/src/graphics/vulkan/pipeline_cache.cpp
++++ b/src/graphics/vulkan/pipeline_cache.cpp
+@@ -3480,8 +3480,14 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
+   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+   const VkDevice device = vulkan_device->device();
+   VkPipeline pipeline;
++#if REX_GPU_EXTERNAL_HOST
++  REXGPU_INFO("external_gpu_pipeline_driver_begin");
++#endif
+   VkResult create_result = dfn.vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1,
+                                                          &pipeline_create_info, nullptr, &pipeline);
++#if REX_GPU_EXTERNAL_HOST
++  REXGPU_INFO("external_gpu_pipeline_driver_end result={}", int(create_result));
++#endif
+   if (create_result != VK_SUCCESS) {
+     uint64_t ps_hash = creation_arguments.pixel_shader
+                            ? creation_arguments.pixel_shader->shader().ucode_data_hash()
+diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
+index 0298f06..a821987 100644
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -9,6 +9,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <rex/memory/gpu_memory.h>
+ #include <algorithm>
+ #include <array>
+ #include <cstddef>
+@@ -181,7 +182,7 @@ const VulkanRenderTargetCache::TransferModeInfo
+ };
+ 
+ VulkanRenderTargetCache::VulkanRenderTargetCache(const RegisterFile& register_file,
+-                                                 const memory::Memory& memory,
++                                                 const memory::GpuMemory& memory,
+                                                  uint32_t draw_resolution_scale_x,
+                                                  uint32_t draw_resolution_scale_y,
+                                                  VulkanCommandProcessor& command_processor)
+@@ -1124,7 +1125,7 @@ void VulkanRenderTargetCache::EndSubmission() {
+   }
+ }
+ 
+-bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
++bool VulkanRenderTargetCache::Resolve(const memory::GpuMemory& memory,
+                                       VulkanSharedMemory& shared_memory,
+                                       VulkanTextureCache& texture_cache,
+                                       uint32_t& written_address_out, uint32_t& written_length_out) {
+diff --git a/src/graphics/vulkan/shared_memory.cpp b/src/graphics/vulkan/shared_memory.cpp
+index 6788214..6b62f93 100644
+--- a/src/graphics/vulkan/shared_memory.cpp
++++ b/src/graphics/vulkan/shared_memory.cpp
+@@ -9,6 +9,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <rex/memory/gpu_memory.h>
+ #include <algorithm>
+ #include <cstring>
+ #include <utility>
+@@ -30,7 +31,7 @@ REXCVAR_DEFINE_BOOL(vulkan_sparse_shared_memory, true, "GPU/Vulkan",
+ namespace rex::graphics::vulkan {
+ 
+ VulkanSharedMemory::VulkanSharedMemory(VulkanCommandProcessor& command_processor,
+-                                       memory::Memory& memory,
++                                       memory::GpuMemory& memory,
+                                        VkPipelineStageFlags guest_shader_pipeline_stages)
+     : SharedMemory(memory),
+       command_processor_(command_processor),
+diff --git a/src/ui/presenter.cpp b/src/ui/presenter.cpp
+index 7360ed9..0800e26 100644
+--- a/src/ui/presenter.cpp
++++ b/src/ui/presenter.cpp
+@@ -1,3 +1,4 @@
++#include <stdexcept>
+ /**
+  ******************************************************************************
+  * Xenia : Xbox 360 Emulator Research Project                                 *
+@@ -303,11 +304,18 @@ Presenter::~Presenter() {
+     // Null the pointer to prevent an infinite loop between SetPresenter and
+     // SetWindowSurfaceFromUIThread calling each other.
+     window_ = nullptr;
++#if !REX_GPU_EXTERNAL_HOST
+     old_window->SetPresenter(nullptr);
++#else
++    assert_null(old_window); // External headless build cannot attach a Window.
++#endif
+   }
+ }
+ 
+ void Presenter::SetWindowSurfaceFromUIThread(Window* new_window, Surface* new_surface) {
++#if REX_GPU_EXTERNAL_HOST
++  if (new_window) throw std::logic_error("Window unsupported in external headless GPU build");
++#endif
+   // No intrusive lifetime management must be performed from UI drawers - defer
+   // it if needed.
+   assert_false(is_executing_ui_drawers_);
+@@ -350,7 +358,11 @@ void Presenter::SetWindowSurfaceFromUIThread(Window* new_window, Surface* new_su
+       // Null the pointer to prevent an infinite loop between SetPresenter and
+       // SetWindowSurfaceFromUIThread calling each other.
+       window_ = nullptr;
+-      old_window->SetPresenter(nullptr);
++  #if !REX_GPU_EXTERNAL_HOST
++    old_window->SetPresenter(nullptr);
++#else
++    assert_null(old_window); // External headless build cannot attach a Window.
++#endif
+     }
+ 
+     // Attach to the new one.
+diff --git a/include/rex/memory/gpu_memory.h b/include/rex/memory/gpu_memory.h
+new file mode 100644
+--- /dev/null
++++ b/include/rex/memory/gpu_memory.h
+@@ -0,0 +1,32 @@
++#pragma once
++#include <cstdint>
++#include <utility>
++#include <rex/system/mmio_handler.h>
++
++namespace rex::memory {
++// GPU-facing memory contract. Implementations own mappings and synchronization.
++// Physical translations retain the SDK 512 MiB mask and big-endian byte layout.
++// Invalidation semantics are those documented by Memory, not optional no-ops.
++class GpuMemory {
++ public:
++  virtual ~GpuMemory() = default;
++  virtual uint8_t* physical_membase() const = 0;
++  virtual bool IsPhysicalRangeValid(uint32_t address, uint32_t length) const {
++    return length && uint64_t(address & 0x1fffffff) + length <= 0x20000000ull;
++  }
++  // Legacy Memory uses fault-based watches. External polling providers override this.
++  virtual void SynchronizePhysicalWrites() {}
++  template <typename T = uint8_t*> T TranslatePhysical(uint32_t address) const {
++    auto* base = physical_membase();
++    return base ? reinterpret_cast<T>(base + (address & 0x1fffffff)) : nullptr;
++  }
++  virtual bool AddVirtualMappedRange(uint32_t address, uint32_t mask, uint32_t size,
++      void* context, runtime::MMIOReadCallback read, runtime::MMIOWriteCallback write) = 0;
++  using PhysicalMemoryInvalidationCallback = std::pair<uint32_t, uint32_t> (*)(
++      void*, uint32_t, uint32_t, bool);
++  virtual void* RegisterPhysicalMemoryInvalidationCallback(PhysicalMemoryInvalidationCallback,
++      void*) = 0;
++  virtual void UnregisterPhysicalMemoryInvalidationCallback(void*) = 0;
++  virtual void EnablePhysicalMemoryAccessCallbacks(uint32_t, uint32_t, bool, bool) = 0;
++};
++} // namespace rex::memory
+diff --git a/include/rex/main_android.h b/include/rex/main_android.h
+new file mode 100644
+--- /dev/null
++++ b/include/rex/main_android.h
+@@ -0,0 +1,6 @@
++#pragma once
++#include <android/api-level.h>
++
++namespace rex {
++inline int GetAndroidApiLevel() noexcept { return android_get_device_api_level(); }
++}  // namespace rex
+diff --git a/include/rex/ui/surface_android.h b/include/rex/ui/surface_android.h
+new file mode 100644
+--- /dev/null
++++ b/include/rex/ui/surface_android.h
+@@ -0,0 +1,34 @@
++#pragma once
++#include <android/native_window.h>
++#include <rex/ui/surface.h>
++
++namespace rex::ui {
++// Own a reference independently of the Java Surface / Activity lifetime.
++// Like Surface itself, construction and access belong on the UI thread.
++class AndroidNativeWindowSurface final : public Surface {
++ public:
++  explicit AndroidNativeWindowSurface(ANativeWindow* window) : window_(window) {
++    if (window_) ANativeWindow_acquire(window_);
++  }
++  ~AndroidNativeWindowSurface() override {
++    if (window_) ANativeWindow_release(window_);
++  }
++  TypeIndex GetType() const override { return kTypeIndex_AndroidNativeWindow; }
++  ANativeWindow* window() const { return window_; }
++
++ protected:
++  bool GetSizeImpl(uint32_t& width, uint32_t& height) const override {
++    width = height = 0;
++    if (!window_) return false;
++    const int32_t w = ANativeWindow_getWidth(window_);
++    const int32_t h = ANativeWindow_getHeight(window_);
++    if (w <= 0 || h <= 0) return false;
++    width = static_cast<uint32_t>(w);
++    height = static_cast<uint32_t>(h);
++    return true;
++  }
++
++ private:
++  ANativeWindow* window_;
++};
++}  // namespace rex::ui
+diff --git a/include/rex/graphics/host_worker.h b/include/rex/graphics/host_worker.h
+new file mode 100644
+--- /dev/null
++++ b/include/rex/graphics/host_worker.h
+@@ -0,0 +1,70 @@
++#pragma once
++#include <condition_variable>
++#include <exception>
++#include <functional>
++#include <future>
++#include <memory>
++#include <mutex>
++#include <thread>
++
++namespace rex::graphics {
++// Host lifecycle only. Does not own guest scheduling or memory serialization.
++// One owner controls Start/Join/RequestPause/Resume; never Join from the worker.
++class HostWorker {
++ public:
++  ~HostWorker() { Join(); }
++  HostWorker() = default;
++  HostWorker(const HostWorker&) = delete;
++  bool Start(std::function<void()> run) {
++    std::lock_guard<std::mutex> lock(mutex_);
++    if (started_ || !run) return false;
++    started_ = true;
++    try {
++      thread_ = std::thread([this, run = std::move(run)] {
++        current_ = this;
++        try { run(); }
++        catch (...) { std::lock_guard<std::mutex> lock(mutex_); failure_ = std::current_exception(); }
++        current_ = nullptr;
++      });
++    } catch (...) { started_ = false; return false; }
++    return true;
++  }
++  // Waits for setup on the worker. False/exception prevents run from starting.
++  // Caller must release locks needed by setup before entering this method.
++  bool StartReady(std::function<bool()> setup, std::function<void()> run) {
++    if (!setup || !run) return false;
++    auto ready = std::make_shared<std::promise<bool>>();
++    auto result = ready->get_future();
++    if (!Start([setup = std::move(setup), run = std::move(run), ready] {
++      bool initialized;
++      try { initialized = setup(); }
++      catch (...) { ready->set_exception(std::current_exception()); throw; }
++      ready->set_value(initialized);
++      if (initialized) run();
++    })) return false;
++    bool initialized = false;
++    try { initialized = result.get(); }
++    catch (...) { Join(); return false; }
++    if (!initialized) Join();
++    return initialized;
++  }
++  bool IsCurrentThread() const { return current_ == this; }
++  void RequestPause() { std::lock_guard<std::mutex> lock(mutex_); paused_ = true; }
++  void PauseCurrent() {
++    std::unique_lock<std::mutex> lock(mutex_);
++    changed_.wait(lock, [this] { return !paused_; });
++  }
++  void Resume() {
++    std::lock_guard<std::mutex> lock(mutex_); paused_ = false; changed_.notify_all();
++  }
++  void Join() { Resume(); if (thread_.joinable()) thread_.join(); }
++  std::exception_ptr failure() const { std::lock_guard<std::mutex> lock(mutex_); return failure_; }
++ private:
++  static inline thread_local HostWorker* current_ = nullptr;
++  mutable std::mutex mutex_;
++  std::condition_variable changed_;
++  std::thread thread_;
++  bool started_ = false, paused_ = false;
++  std::exception_ptr failure_;
++};
++} // namespace rex::graphics
+diff --git a/include/rex/graphics/guest_execution_guard.h b/include/rex/graphics/guest_execution_guard.h
+new file mode 100644
+--- /dev/null
++++ b/include/rex/graphics/guest_execution_guard.h
+@@ -0,0 +1,33 @@
++#pragma once
++#include <functional>
++#include <stdexcept>
++
++namespace rex::graphics {
++struct GuestExecutionHooks { std::function<void()> enter, leave; };
++// Worker-thread-only scope. Hooks must be paired; leave must not throw.
++class GuestExecutionGuard {
++ public:
++  explicit GuestExecutionGuard(const GuestExecutionHooks& hooks) : hooks_(hooks) {
++    if (bool(hooks.enter) != bool(hooks.leave)) throw std::invalid_argument("Guest gate hooks must be paired");
++    Acquire();
++  }
++  ~GuestExecutionGuard() { Release(); }
++  GuestExecutionGuard(const GuestExecutionGuard&) = delete;
++  void Acquire() { if (!held_ && hooks_.enter) { hooks_.enter(); held_ = true; } }
++  void Release() { if (held_) { held_ = false; hooks_.leave(); } }
++ private:
++  const GuestExecutionHooks& hooks_;
++  bool held_ = false;
++};
++class GuestExecutionBinding {
++ public:
++  GuestExecutionBinding(GuestExecutionGuard*& slot, const GuestExecutionHooks& hooks)
++      : slot_(slot), previous_(slot), guard_(hooks) { slot_ = &guard_; }
++  ~GuestExecutionBinding() { slot_ = previous_; }
++  GuestExecutionBinding(const GuestExecutionBinding&) = delete;
++ private:
++  GuestExecutionGuard*& slot_;
++  GuestExecutionGuard* previous_;
++  GuestExecutionGuard guard_;
++};
++} // namespace rex::graphics

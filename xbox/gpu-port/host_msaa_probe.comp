@@ -1,0 +1,13 @@
+#version 450
+#extension GL_EXT_samplerless_texture_functions : require
+layout(local_size_x=4,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0) uniform texture2DMS source_image;
+layout(set=1,binding=0,std430) writeonly buffer Results { vec4 rgba[4]; } result;
+layout(push_constant) uniform Probe { ivec4 coordinates; ivec2 sample_ids; } probe;
+void main(){
+ uint index=gl_GlobalInvocationID.x;
+ if(index>=4)return;
+ ivec2 position=index<2?probe.coordinates.xy:probe.coordinates.zw;
+ int sample_id=probe.sample_ids[index&1];
+ result.rgba[index]=texelFetch(source_image,position,sample_id);
+}

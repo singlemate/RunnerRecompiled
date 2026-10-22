@@ -1,0 +1,13 @@
+# Интерфейс памяти GPU — 21 октября 2026
+
+GPU-компоненты RexGlue теперь принимают rex::memory::GpuMemory, а не конкретный rex::memory::Memory. Это отдельный контракт physical_membase/TranslatePhysical, MMIO registration и physical invalidation. Сохранена прежняя маска физических адресов 0x1fffffff и исходные сигнатуры callbacks. В legacy SDK Memory реализует этот интерфейс; изменён его C++ layout (vtable), поэтому смешивать старые и новые объекты сборки нельзя. Скомпилированы заново все 80 объектов текущего GPU build; полный SDK/runtime не собран и не проверен.
+
+Собственный MeRexGpuMemory держит ссылки на существующие MeGpuPhysicalView и MeGpuMmio. Он не создаёт Memory, файл памяти, heap или другую копию игрового состояния. Поддержана регистрация только GPU-окна SDK; повторная регистрация/неверный диапазон отвергается. В его MMIO bridge передаётся nullptr вместо PPCContext: это допустимо именно для GraphicsSystem Read/WriteRegisterThunk, которые аргумент игнорируют; это НЕ общий мост ABI XenonRecomp/RexGlue. При уничтожении bridge снимает принадлежащую ему привязку.
+
+Write-watch не реализован: register/unregister/enable invalidation явно бросают исключение. До реализации отслеживания записей этот адаптер не может успешно инициализировать SharedMemory полноценного GPU. Подмена callback пустым обработчиком отсутствует. Перехват обычных scalar stores из предыдущего этапа недостаточен: нужны SIMD, атомарные и host-side записи, освобождение памяти и правила синхронизации с GPU worker.
+
+На Y700 прошли 148 loader checks. Дополнительные 12 проверяют вызов через настоящий SDK GpuMemory base, адресацию той же физической памяти, видимость записи в CPU-алиасе, SDK callback → scalar MMIO, корректную передачу host-order значения, запрет повторной регистрации, снятие binding и явный отказ write-watch. Это тест адаптера; GraphicsSystem/CommandProcessor в loader ещё не созданы.
+
+Сборка GPU прошла 35+8+6+31 = 80 объектов; отдельные shader/bootstrap/host-service executables слинкованы заново. Их повторный запуск в этом этапе не выполнялся. Строгая полная линковка GPU по-прежнему не проходит: 12 внешних символов вместо 16. Четыре Memory-зависимости заменены виртуальным контрактом, это не доказательство реализации invalidation. Оставшиеся зависимости относятся к worker, guest interrupt и UI. Full plugin.so не получен, изображения игры нет.
+
+Новый rexglue-android-runtime.patch — СОВОКУПНЫЙ патч относительно pinned SDK c94f5ebdcb3c9d1a460ca48e04f9758448f8d518: Android, packet-failure и memory interface вместе. На чистое дерево применять только его, не накладывать старые два патча дополнительно. Старые патчи сохранены как исторические. Native executable обновлён на устройстве; APK и исходный XEX не менялись.
