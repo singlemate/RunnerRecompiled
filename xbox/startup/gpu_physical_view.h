@@ -1,16 +1,22 @@
 #pragma once
 #include "physical_memory.h"
+#include "gpu_write_watch.h"
 #include <rex/memory/ring_buffer.h>
 #include <memory>
 #include <cstring>
 
 // Non-owning GPU view of the SAME memfd backing the guest physical aliases.
-// Callers hold the loader execution gate. This is not GPU write-watch or a CP.
+// Without a committed map, callers hold the loader execution gate.
 struct MeGpuPhysicalView {
     uint8_t* raw = nullptr;
     const MePhysicalMemory* memory = nullptr;
+    // When set, ranges are validated against its committed-page map, which is safe to
+    // read from the GPU thread while guest threads allocate or free.
+    const MeGpuWriteWatch* committed = nullptr;
     uint8_t* resolve(uint32_t physical, uint32_t size) const {
-        if (!raw || !memory || !size || uint64_t(physical) + size > 0x20000000) return nullptr;
+        if (!raw || !size || uint64_t(physical) + size > 0x20000000) return nullptr;
+        if (committed) return committed->range_committed(physical, size) ? raw + physical : nullptr;
+        if (!memory) return nullptr;
         for (const auto& allocation : memory->allocations)
             if (physical >= allocation.physical && uint64_t(physical) + size <=
                 uint64_t(allocation.physical) + allocation.size) return raw + physical;

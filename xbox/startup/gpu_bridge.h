@@ -11,4 +11,6 @@ void me_gpu_irq_callback(uint32_t callback, uint32_t argument);
 void me_gpu_vblank();
 int me_gpu_make_swap(uint32_t* words, const uint32_t* fetch, uint32_t virtual_address,
     uint32_t physical_address, uint32_t format, uint32_t color_space, uint32_t width, uint32_t height);
+// APK display: ANativeWindow* or nullptr (blocks until the old window is released).
+void me_display_set_window(void* window);
 }

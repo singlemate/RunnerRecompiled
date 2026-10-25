@@ -1,0 +1,932 @@
+diff --git a/include/rex/graphics/flags.h b/include/rex/graphics/flags.h
+index 2cf24c4..32aa73d 100644
+--- a/include/rex/graphics/flags.h
++++ b/include/rex/graphics/flags.h
+@@ -106,4 +106,6 @@ REXCVAR_DECLARE(bool, d3d12_readback_memexport);
+ REXCVAR_DECLARE(bool, d3d12_readback_resolve);
+ #endif  // REX_HAS_D3D12
+ 
++REXCVAR_DECLARE(bool, xenos_sample_positions);
++
+ #define XE_GPU_FINE_GRAINED_DRAW_SCOPES 1
+diff --git a/include/rex/graphics/util/draw.h b/include/rex/graphics/util/draw.h
+index 780924b..4ea9d0e 100644
+--- a/include/rex/graphics/util/draw.h
++++ b/include/rex/graphics/util/draw.h
+@@ -107,6 +107,35 @@ bool IsRasterizationPotentiallyDone(const RegisterFile& regs, bool primitive_pol
+ extern const int8_t kD3D10StandardSamplePositions2x[2][2];
+ extern const int8_t kD3D10StandardSamplePositions4x[4][2];
+ 
++// Xenos sample positions in guest order, in 1/16th of a pixel from the center
++// like the D3D10.1 positions above. They're quite different though, at 2x the
++// diagonal even goes the other way.
++//
++// There aren't any public sources that directly document Xenos positions, but
++// they can be reasonably inferred from a few different places:
++// - R6xx and R7xx 3D Register Reference Guide (PA_SC_MODE_CNTL, pg. 44)
++//   outlines these exact 2x and 4x positions. Additionally, Mesa's r600 driver
++//   programs with these same positions. Evergreen moved to the D3D10.1 ones.
++// - Most UE3 titles add (-0.25, 0.25) or (-0.125, -0.125) to the device's x/y
++//   viewport offsets for 2x or 4x tiling modes, matching R6xx/R7xx sample 0:
++//   (-4, 4) or (-2, -2) in 1/16 units. Under predicated tiling, UE3 applies
++//   them to align sample 0 with non-MSAA depth when restoring depth. Since the
++//   D3D10.1 positions can't match this correction, restored depth can fail
++//   subsequent depth tests and leave parts of the scene unshaded.
++// Ported from Xenia Canary commit cc4981a465.
++constexpr int8_t kXenosSamplePositions2x[2][2] = {{-4, 4}, {4, -4}};
++constexpr int8_t kXenosSamplePositions4x[4][2] = {{-2, -2}, {2, 2}, {-6, 6}, {6, -6}};
++
++// Writes the Xenos position paired with each host sample and returns the
++// sample count. Uses the same mapping as render target loads/stores, choosing
++// the closest host samples where possible:
++// - 4x: guest sample order for host RT; 0, 3, 2, 1 for interlock.
++// - Native 2x: guest sample XOR 1; both host samples are equally close.
++// - 2x as 4x: samples 0 and 3 for host RT; 2 and 1 for interlock.
++//   The unused samples repeat these positions.
++uint32_t GetHostSampleXenosPositions(xenos::MsaaSamples msaa_samples, bool native_2x,
++                                     bool interlock, int8_t (*positions_out)[2]);
++
+ reg::RB_DEPTHCONTROL GetNormalizedDepthControl(const RegisterFile& regs);
+ 
+ // Direct3D 9 and Xenos constant polygon offset is an absolute floating-point
+@@ -252,14 +281,12 @@ struct ViewportInfo {
+   // and Nvidia hardware (not WARP); as well as to hide the differences between
+   // 0 and 8+ viewportSubPixelBits on Vulkan, and to prevent any numerical error
+   // in bound checking in host APIs, viewport bounds are returned as integers.
+-  // Also they're returned as non-negative, also to make it easier to crop (so
+-  // Vulkan maxViewportDimensions and viewportBoundsRange don't have to be
+-  // handled separately - maxViewportDimensions is greater than or equal to the
+-  // largest framebuffer image size, so it's safe, and viewportBoundsRange is
+-  // always bigger than maxViewportDimensions. All fractional offsetting,
+-  // including the half-pixel offset, and cropping are handled via ndc_scale and
+-  // ndc_offset.
+-  uint32_t xy_offset[2];
++  // The offset may be negative, down to -maxViewportDimensions (Vulkan's
++  // viewportBoundsRange always covers twice that), and the extent is at most
++  // maxViewportDimensions. All fractional offsetting, including the half-pixel
++  // offset, and cropping beyond those limits are handled via ndc_scale and
++  // ndc_offset. (Xenia Canary commit 6579cc2a4c.)
++  int32_t xy_offset[2];
+   // Extent can be zero for an empty viewport - host APIs not supporting empty
+   // viewports need to use an empty scissor rectangle.
+   uint32_t xy_extent[2];
+diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+index 696ff48..d6903f3 100644
+--- a/include/rex/graphics/vulkan/command_processor.h
++++ b/include/rex/graphics/vulkan/command_processor.h
+@@ -186,7 +186,9 @@ class VulkanCommandProcessor : public CommandProcessor {
+                               VkImageLayout new_layout,
+                               uint32_t src_queue_family_index = VK_QUEUE_FAMILY_IGNORED,
+                               uint32_t dst_queue_family_index = VK_QUEUE_FAMILY_IGNORED,
+-                              bool skip_if_equal = true);
++                              bool skip_if_equal = true,
++                              // Has to stay valid until barriers are submitted.
++                              const VkSampleLocationsInfoEXT* sample_locations = nullptr);
+   // Returns whether any barriers have been submitted - if true is returned, the
+   // render pass will also be closed.
+   bool SubmitBarriers(bool force_end_render_pass);
+diff --git a/include/rex/graphics/vulkan/deferred_command_buffer.h b/include/rex/graphics/vulkan/deferred_command_buffer.h
+index 9d2a848..e7c8ede 100644
+--- a/include/rex/graphics/vulkan/deferred_command_buffer.h
++++ b/include/rex/graphics/vulkan/deferred_command_buffer.h
+@@ -31,9 +31,13 @@ class DeferredCommandBuffer {
+   void Reset();
+   void Execute(VkCommandBuffer command_buffer);
+ 
+-  // render_pass_begin->pNext of all barriers must be null.
++  // render_pass_begin->pNext must be null. sample_locations, if not null, are
++  // used for the initial depth layout transition (only when
++  // has_depth_attachment) and for the subpass (Xenia Canary commit cc4981a465).
+   void CmdVkBeginRenderPass(const VkRenderPassBeginInfo* render_pass_begin,
+-                            VkSubpassContents contents) {
++                            VkSubpassContents contents,
++                            const VkSampleLocationsInfoEXT* sample_locations = nullptr,
++                            bool has_depth_attachment = false) {
+     assert_null(render_pass_begin->pNext);
+     size_t arguments_size = sizeof(ArgsVkBeginRenderPass);
+     uint32_t clear_value_count = render_pass_begin->clearValueCount;
+@@ -43,6 +47,12 @@ class DeferredCommandBuffer {
+       clear_values_offset = arguments_size;
+       arguments_size += sizeof(VkClearValue) * clear_value_count;
+     }
++    size_t sample_locations_offset = 0;
++    if (sample_locations) {
++      arguments_size = rex::align(arguments_size, alignof(VkSampleLocationEXT));
++      sample_locations_offset = arguments_size;
++      arguments_size += sizeof(VkSampleLocationEXT) * sample_locations->sampleLocationsCount;
++    }
+     uint8_t* args_ptr =
+         reinterpret_cast<uint8_t*>(WriteCommand(Command::kVkBeginRenderPass, arguments_size));
+     auto& args = *reinterpret_cast<ArgsVkBeginRenderPass*>(args_ptr);
+@@ -51,6 +61,14 @@ class DeferredCommandBuffer {
+     args.render_area = render_pass_begin->renderArea;
+     args.clear_value_count = clear_value_count;
+     args.contents = contents;
++    args.sample_locations_count = sample_locations ? sample_locations->sampleLocationsCount : 0;
++    args.has_depth_attachment = has_depth_attachment;
++    if (sample_locations) {
++      args.sample_locations_per_pixel = sample_locations->sampleLocationsPerPixel;
++      args.sample_location_grid_size = sample_locations->sampleLocationGridSize;
++      std::memcpy(args_ptr + sample_locations_offset, sample_locations->pSampleLocations,
++                  sizeof(VkSampleLocationEXT) * args.sample_locations_count);
++    }
+     if (clear_value_count) {
+       std::memcpy(args_ptr + clear_values_offset, render_pass_begin->pClearValues,
+                   sizeof(VkClearValue) * clear_value_count);
+@@ -273,7 +291,7 @@ class DeferredCommandBuffer {
+     args.query_count = query_count;
+   }
+ 
+-  // pNext of all barriers must be null.
++  // pNext of all barriers must be null, except for VkSampleLocationsInfoEXT.
+   void CmdVkPipelineBarrier(VkPipelineStageFlags src_stage_mask,
+                             VkPipelineStageFlags dst_stage_mask, VkDependencyFlags dependency_flags,
+                             uint32_t memory_barrier_count, const VkMemoryBarrier* memory_barriers,
+@@ -396,8 +414,13 @@ class DeferredCommandBuffer {
+     VkRect2D render_area;
+     uint32_t clear_value_count;
+     VkSubpassContents contents;
+-    // Followed by aligned optional VkClearValue[].
++    VkSampleCountFlagBits sample_locations_per_pixel;
++    VkExtent2D sample_location_grid_size;
++    uint32_t sample_locations_count;
++    bool has_depth_attachment;
++    // Followed by aligned optional VkClearValue[], VkSampleLocationEXT[].
+     static_assert(alignof(VkClearValue) <= alignof(uintmax_t));
++    static_assert(alignof(VkSampleLocationEXT) <= alignof(uintmax_t));
+   };
+ 
+   struct ArgsVkBeginRendering {
+@@ -533,13 +556,23 @@ class DeferredCommandBuffer {
+     uint32_t memory_barrier_count;
+     uint32_t buffer_memory_barrier_count;
+     uint32_t image_memory_barrier_count;
++    uint32_t sample_locations_info_count;
+     // Followed by aligned optional VkMemoryBarrier[],
+-    // optional VkBufferMemoryBarrier[], optional VkImageMemoryBarrier[].
++    // optional VkBufferMemoryBarrier[], optional VkImageMemoryBarrier[], then
++    // sample_locations_info_count aligned ArgsSampleLocationsInfo records,
++    // each followed by its VkSampleLocationEXT[].
+     static_assert(alignof(VkMemoryBarrier) <= alignof(uintmax_t));
+     static_assert(alignof(VkBufferMemoryBarrier) <= alignof(uintmax_t));
+     static_assert(alignof(VkImageMemoryBarrier) <= alignof(uintmax_t));
+   };
+ 
++  struct ArgsSampleLocationsInfo {
++    uint32_t image_memory_barrier_index;
++    VkSampleCountFlagBits samples_per_pixel;
++    VkExtent2D grid_size;
++    uint32_t count;
++  };
++
+   struct ArgsVkPushConstants {
+     VkPipelineLayout layout;
+     VkShaderStageFlags stage_flags;
+@@ -583,6 +616,9 @@ class DeferredCommandBuffer {
+ 
+   // uintmax_t to ensure uint64_t and pointer alignment of all structures.
+   std::vector<uintmax_t> command_stream_;
++  // For rebuilding pNext chains of barriers with sample locations.
++  std::vector<VkImageMemoryBarrier> image_barriers_with_sample_locations_;
++  std::vector<VkSampleLocationsInfoEXT> barrier_sample_locations_;
+ };
+ 
+ }  // namespace rex::graphics::vulkan
+diff --git a/include/rex/graphics/vulkan/render_target_cache.h b/include/rex/graphics/vulkan/render_target_cache.h
+index 0ea1fe8..4a40f96 100644
+--- a/include/rex/graphics/vulkan/render_target_cache.h
++++ b/include/rex/graphics/vulkan/render_target_cache.h
+@@ -80,9 +80,11 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+   struct Framebuffer {
+     VkFramebuffer framebuffer = VK_NULL_HANDLE;
+     VkExtent2D host_extent{};
++    RenderPassKey render_pass_key;
+     Framebuffer() = default;
+-    Framebuffer(VkFramebuffer framebuffer, const VkExtent2D& host_extent)
+-        : framebuffer(framebuffer), host_extent(host_extent) {}
++    Framebuffer(VkFramebuffer framebuffer, const VkExtent2D& host_extent,
++                RenderPassKey render_pass_key)
++        : framebuffer(framebuffer), host_extent(host_extent), render_pass_key(render_pass_key) {}
+   };
+ 
+   VulkanRenderTargetCache(const RegisterFile& register_file, const memory::GpuMemory& memory,
+@@ -150,6 +152,18 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+                                    : msaa_2x_no_attachments_supported_;
+   }
+ 
++  // Xenos sample locations for pipelines at the guest sample count.
++  // nullptr for the default locations. (Xenia Canary commit cc4981a465.)
++  const VkSampleLocationsInfoEXT* GetSampleLocationsInfo(xenos::MsaaSamples msaa_samples,
++                                                         bool subpass_has_attachments) const {
++    if (msaa_samples != xenos::MsaaSamples::k2X && msaa_samples != xenos::MsaaSamples::k4X) {
++      return nullptr;
++    }
++    const VkSampleLocationsInfoEXT& info =
++        sample_locations_info_[subpass_has_attachments][msaa_samples == xenos::MsaaSamples::k4X];
++    return info.sampleLocationsCount ? &info : nullptr;
++  }
++
+   // Returns the render pass object, or VK_NULL_HANDLE if failed to create.
+   // A render pass managed by the render target cache may be ended and resumed
+   // at any time (to allow for things like copying and texture loading).
+@@ -389,6 +403,11 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+     uint32_t temporary_sort_index_ = 0;
+   };
+ 
++  // Pushes the barrier to the new usage and records it.
++  void TransitionRenderTarget(VulkanRenderTarget& render_target,
++                              VkPipelineStageFlags dst_stage_mask, VkAccessFlags dst_access_mask,
++                              VkImageLayout new_layout);
++
+   struct FramebufferKey {
+     RenderPassKey render_pass_key;
+ 
+@@ -821,6 +840,11 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+ 
+   bool msaa_2x_attachments_supported_ = false;
+   bool msaa_2x_no_attachments_supported_ = false;
++
++  // Indexed by subpass_has_attachments, then whether MSAA is 4x.
++  // sampleLocationsCount is 0 when using the default sample locations.
++  VkSampleLocationsInfoEXT sample_locations_info_[2][2] = {};
++  VkSampleLocationEXT sample_locations_[2][2][4];
+   bool color_16bit_transfer_uint_formats_supported_ = true;
+   bool color_32bit_transfer_uint_formats_supported_ = true;
+   bool color_rg16_draw_format_fallback_to_float_ = false;
+diff --git a/include/rex/ui/vulkan/device.h b/include/rex/ui/vulkan/device.h
+index 947817f..41e6b3c 100644
+--- a/include/rex/ui/vulkan/device.h
++++ b/include/rex/ui/vulkan/device.h
+@@ -147,6 +147,11 @@ class VulkanDevice {
+     bool fragmentShaderSampleInterlock = false;
+     bool fragmentShaderPixelInterlock = false;
+ 
++    // VK_EXT_sample_locations (#144)
++
++    VkSampleCountFlags sampleLocationSampleCounts = 0;
++    bool variableSampleLocations = false;
++
+     // VK_EXT_shader_demote_to_helper_invocation (#277, promoted to 1.3)
+ 
+     bool shaderDemoteToHelperInvocation = false;
+@@ -184,6 +189,7 @@ class VulkanDevice {
+     bool ext_KHR_swapchain = false;                     // #2
+     bool ext_1_1_KHR_dedicated_allocation = false;      // #128
+     bool ext_EXT_shader_stencil_export = false;         // #141
++    bool ext_EXT_sample_locations = false;              // #144
+     bool ext_1_1_KHR_get_memory_requirements2 = false;  // #147
+     bool ext_1_2_KHR_image_format_list = false;         // #148
+     // Has optional features not implied by this being true.
+diff --git a/src/graphics/flags.cpp b/src/graphics/flags.cpp
+index e2983a4..f6d9b7a 100644
+--- a/src/graphics/flags.cpp
++++ b/src/graphics/flags.cpp
+@@ -28,6 +28,10 @@ REXCVAR_DEFINE_STRING(dump_shaders, "", "GPU", "Path to dump shaders to");
+ REXCVAR_DEFINE_BOOL(use_fuzzy_alpha_epsilon, false, "GPU",
+                     "Use approximate compare for alpha test values to prevent "
+                     "flickering on NVIDIA graphics cards");
++REXCVAR_DEFINE_BOOL(xenos_sample_positions, false, "GPU",
++                    "Rasterize 2x and 4x MSAA render targets at the Xenos sample positions, like "
++                    "real hardware, if the GPU and driver support it. Only applies to host render "
++                    "targets - fragment shader interlock always uses Xenos positions.");
+ REXCVAR_DEFINE_BOOL(gpu_debug_markers, false, "GPU",
+                     "Insert debug markers into GPU command streams for tools "
+                     "like PIX and RenderDoc. Automatically enabled when "
+diff --git a/src/graphics/util/draw.cpp b/src/graphics/util/draw.cpp
+index 0f79ec2..dbc3a59 100644
+--- a/src/graphics/util/draw.cpp
++++ b/src/graphics/util/draw.cpp
+@@ -91,6 +91,38 @@ reg::RB_DEPTHCONTROL GetNormalizedDepthControl(const RegisterFile& regs) {
+ const int8_t kD3D10StandardSamplePositions2x[2][2] = {{4, 4}, {-4, -4}};
+ const int8_t kD3D10StandardSamplePositions4x[4][2] = {{-2, -6}, {6, -2}, {-6, 2}, {2, 6}};
+ 
++uint32_t GetHostSampleXenosPositions(xenos::MsaaSamples msaa_samples, bool native_2x,
++                                     bool interlock, int8_t (*positions_out)[2]) {
++  assert_true(msaa_samples == xenos::MsaaSamples::k2X || msaa_samples == xenos::MsaaSamples::k4X);
++
++  static constexpr uint32_t kSampleRemap2x[2] = {1, 0};
++  static constexpr uint32_t kSampleRemap2xAs4x[4] = {0, 1, 0, 1};
++  static constexpr uint32_t kSampleRemap4x[4] = {0, 1, 2, 3};
++  static constexpr uint32_t kSampleRemap4xInterlock[4] = {0, 3, 2, 1};
++
++  const int8_t (*xenos_positions)[2];
++  const uint32_t* sample_remap;
++  uint32_t host_sample_count;
++
++  if (msaa_samples == xenos::MsaaSamples::k4X) {
++    xenos_positions = kXenosSamplePositions4x;
++    sample_remap = interlock ? kSampleRemap4xInterlock : kSampleRemap4x;
++    host_sample_count = 4;
++  } else {
++    xenos_positions = kXenosSamplePositions2x;
++    sample_remap = native_2x ? kSampleRemap2x : kSampleRemap2xAs4x;
++    host_sample_count = native_2x ? 2 : 4;
++  }
++
++  for (uint32_t i = 0; i < host_sample_count; ++i) {
++    const int8_t* position = xenos_positions[sample_remap[i]];
++    positions_out[i][0] = position[0];
++    positions_out[i][1] = position[1];
++  }
++
++  return host_sample_count;
++}
++
+ void GetPreferredFacePolygonOffset(const RegisterFile& regs, bool primitive_polygonal,
+                                    float& scale_out, float& offset_out) {
+   float scale = 0.0f, offset = 0.0f;
+@@ -372,20 +404,28 @@ void GetHostViewportInfo(const RegisterFile& regs, uint32_t draw_resolution_scal
+       // With resolution scaling, do all viewport XY scissoring in guest pixels
+       // if fractional and for the half-pixel offset - we treat guest pixels as
+       // a whole, and also the half-pixel offset would be irreversible in guest
+-      // vertices if we did flooring in host pixels. Instead of flooring, also
+-      // doing truncation for simplicity - since maxing with 0 is done anyway
+-      // (we only return viewports in the positive quarter-plane).
++      // vertices if we did flooring in host pixels.
++      //
++      // The start may be negative, down to -max, instead of being cropped at
++      // 0. With a window offset (predicated tiling draws later tiles at a
++      // negative offset) cropping gave the tiles different NDC scales and
++      // offsets, and in some frames the same geometry came out as a flat wedge
++      // or rectangle in one tile only. Vulkan guarantees that
++      // viewportBoundsRange covers -2 * maxViewportDimensions, and Direct3D 12
++      // allows -32768. The extent still stays within max.
++      // (Xenia Canary commit 6579cc2a4c.)
+       uint32_t axis_resolution_scale = i ? draw_resolution_scale_y : draw_resolution_scale_x;
+       float offset_axis = offset_base_xy[i] + offset_add_xy[i];
+       float scale_axis = scale_xy[i];
+       float scale_axis_abs = std::abs(scale_xy[i]);
+       float axis_max_unscaled_float = float(xy_max_unscaled[i]);
+-      uint32_t axis_0_int =
+-          uint32_t(rex::clamp_float(offset_axis - scale_axis_abs, 0.0f, axis_max_unscaled_float));
+-      uint32_t axis_1_int =
+-          uint32_t(rex::clamp_float(offset_axis + scale_axis_abs, 0.0f, axis_max_unscaled_float));
+-      uint32_t axis_extent_int = axis_1_int - axis_0_int;
+-      viewport_info_out.xy_offset[i] = axis_0_int * axis_resolution_scale;
++      int32_t axis_1_int = int32_t(std::floor(
++          rex::clamp_float(offset_axis + scale_axis_abs, 0.0f, axis_max_unscaled_float)));
++      int32_t axis_0_int = int32_t(std::floor(
++          rex::clamp_float(offset_axis - scale_axis_abs,
++                           float(axis_1_int) - axis_max_unscaled_float, axis_max_unscaled_float)));
++      uint32_t axis_extent_int = axis_1_int > 0 ? uint32_t(axis_1_int - axis_0_int) : 0;
++      viewport_info_out.xy_offset[i] = axis_0_int * int32_t(axis_resolution_scale);
+       viewport_info_out.xy_extent[i] = axis_extent_int * axis_resolution_scale;
+       float ndc_scale_axis;
+       float ndc_offset_axis;
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index abed4a7..af0ba60 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -2991,7 +2991,7 @@ bool VulkanCommandProcessor::PushImageMemoryBarrier(
+     VkPipelineStageFlags src_stage_mask, VkPipelineStageFlags dst_stage_mask,
+     VkAccessFlags src_access_mask, VkAccessFlags dst_access_mask, VkImageLayout old_layout,
+     VkImageLayout new_layout, uint32_t src_queue_family_index, uint32_t dst_queue_family_index,
+-    bool skip_if_equal) {
++    bool skip_if_equal, const VkSampleLocationsInfoEXT* sample_locations) {
+   if (skip_if_equal && src_stage_mask == dst_stage_mask && src_access_mask == dst_access_mask &&
+       old_layout == new_layout && src_queue_family_index == dst_queue_family_index) {
+     return false;
+@@ -3019,7 +3019,8 @@ bool VulkanCommandProcessor::PushImageMemoryBarrier(
+              subresource_range.baseArrayLayer)) {
+       continue;
+     }
+-    if (other_image_memory_barrier.subresourceRange.aspectMask == subresource_range.aspectMask &&
++    if (other_image_memory_barrier.pNext == sample_locations &&
++        other_image_memory_barrier.subresourceRange.aspectMask == subresource_range.aspectMask &&
+         other_image_memory_barrier.subresourceRange.baseMipLevel ==
+             subresource_range.baseMipLevel &&
+         other_image_memory_barrier.subresourceRange.levelCount == subresource_range.levelCount &&
+@@ -3046,7 +3047,7 @@ bool VulkanCommandProcessor::PushImageMemoryBarrier(
+   VkImageMemoryBarrier& image_memory_barrier =
+       pending_barriers_image_memory_barriers_.emplace_back();
+   image_memory_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+-  image_memory_barrier.pNext = nullptr;
++  image_memory_barrier.pNext = sample_locations;
+   image_memory_barrier.srcAccessMask = src_access_mask;
+   image_memory_barrier.dstAccessMask = dst_access_mask;
+   image_memory_barrier.oldLayout = old_layout;
+@@ -3162,8 +3163,16 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+     render_pass_begin_info.renderArea.extent = framebuffer->host_extent;
+     render_pass_begin_info.clearValueCount = 0;
+     render_pass_begin_info.pClearValues = nullptr;
+-    deferred_command_buffer_.CmdVkBeginRenderPass(&render_pass_begin_info,
+-                                                  VK_SUBPASS_CONTENTS_INLINE);
++    // The sample locations for automatic depth layout transitions and for the
++    // subpass rasterization state when variableSampleLocations is false.
++    // (Xenia Canary commit cc4981a465.)
++    deferred_command_buffer_.CmdVkBeginRenderPass(
++        &render_pass_begin_info, VK_SUBPASS_CONTENTS_INLINE,
++        framebuffer->render_pass_key.depth_and_color_used
++            ? render_target_cache_->GetSampleLocationsInfo(
++                  framebuffer->render_pass_key.msaa_samples, true)
++            : nullptr,
++        (framebuffer->render_pass_key.depth_and_color_used & 1) != 0);
+   }
+   in_render_pass_ = true;
+ }
+@@ -3254,8 +3263,13 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+     render_pass_begin_info.renderArea.extent = framebuffer->host_extent;
+     render_pass_begin_info.clearValueCount = 0;
+     render_pass_begin_info.pClearValues = nullptr;
+-    deferred_command_buffer_.CmdVkBeginRenderPass(&render_pass_begin_info,
+-                                                  VK_SUBPASS_CONTENTS_INLINE);
++    deferred_command_buffer_.CmdVkBeginRenderPass(
++        &render_pass_begin_info, VK_SUBPASS_CONTENTS_INLINE,
++        framebuffer->render_pass_key.depth_and_color_used
++            ? render_target_cache_->GetSampleLocationsInfo(
++                  framebuffer->render_pass_key.msaa_samples, true)
++            : nullptr,
++        (framebuffer->render_pass_key.depth_and_color_used & 1) != 0);
+   }
+   in_render_pass_ = true;
+ }
+diff --git a/src/graphics/vulkan/deferred_command_buffer.cpp b/src/graphics/vulkan/deferred_command_buffer.cpp
+index b49e033..62b8d2b 100644
+--- a/src/graphics/vulkan/deferred_command_buffer.cpp
++++ b/src/graphics/vulkan/deferred_command_buffer.cpp
+@@ -65,6 +65,31 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
+         } else {
+           render_pass_begin_info.pClearValues = nullptr;
+         }
++        VkAttachmentSampleLocationsEXT initial_sample_locations;
++        VkSubpassSampleLocationsEXT post_sample_locations;
++        VkRenderPassSampleLocationsBeginInfoEXT sample_locations_begin;
++        if (args.sample_locations_count) {
++          offset_bytes = rex::align(offset_bytes, alignof(VkSampleLocationEXT));
++          initial_sample_locations.attachmentIndex = 0;
++          auto& info = initial_sample_locations.sampleLocationsInfo;
++          info.sType = VK_STRUCTURE_TYPE_SAMPLE_LOCATIONS_INFO_EXT;
++          info.pNext = nullptr;
++          info.sampleLocationsPerPixel = args.sample_locations_per_pixel;
++          info.sampleLocationGridSize = args.sample_location_grid_size;
++          info.sampleLocationsCount = args.sample_locations_count;
++          info.pSampleLocations = reinterpret_cast<const VkSampleLocationEXT*>(
++              reinterpret_cast<const uint8_t*>(stream) + offset_bytes);
++          post_sample_locations.subpassIndex = 0;
++          post_sample_locations.sampleLocationsInfo = info;
++          sample_locations_begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_SAMPLE_LOCATIONS_BEGIN_INFO_EXT;
++          sample_locations_begin.pNext = nullptr;
++          sample_locations_begin.attachmentInitialSampleLocationsCount =
++              args.has_depth_attachment ? 1 : 0;
++          sample_locations_begin.pAttachmentInitialSampleLocations = &initial_sample_locations;
++          sample_locations_begin.postSubpassSampleLocationsCount = 1;
++          sample_locations_begin.pPostSubpassSampleLocations = &post_sample_locations;
++          render_pass_begin_info.pNext = &sample_locations_begin;
++        }
+         dfn.vkCmdBeginRenderPass(command_buffer, &render_pass_begin_info, args.contents);
+       } break;
+ 
+@@ -253,6 +278,31 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
+               reinterpret_cast<const uint8_t*>(stream) + barrier_offset_bytes);
+           barrier_offset_bytes += sizeof(VkImageMemoryBarrier) * args.image_memory_barrier_count;
+         }
++        if (args.sample_locations_info_count) {
++          image_barriers_with_sample_locations_.assign(
++              image_memory_barriers, image_memory_barriers + args.image_memory_barrier_count);
++          barrier_sample_locations_.resize(args.sample_locations_info_count);
++          for (uint32_t i = 0; i < args.sample_locations_info_count; ++i) {
++            barrier_offset_bytes =
++                rex::align(barrier_offset_bytes, alignof(ArgsSampleLocationsInfo));
++            const auto& locations_args = *reinterpret_cast<const ArgsSampleLocationsInfo*>(
++                reinterpret_cast<const uint8_t*>(stream) + barrier_offset_bytes);
++            barrier_offset_bytes += sizeof(ArgsSampleLocationsInfo);
++            barrier_offset_bytes = rex::align(barrier_offset_bytes, alignof(VkSampleLocationEXT));
++            auto& info = barrier_sample_locations_[i];
++            info.sType = VK_STRUCTURE_TYPE_SAMPLE_LOCATIONS_INFO_EXT;
++            info.pNext = nullptr;
++            info.sampleLocationsPerPixel = locations_args.samples_per_pixel;
++            info.sampleLocationGridSize = locations_args.grid_size;
++            info.sampleLocationsCount = locations_args.count;
++            info.pSampleLocations = reinterpret_cast<const VkSampleLocationEXT*>(
++                reinterpret_cast<const uint8_t*>(stream) + barrier_offset_bytes);
++            barrier_offset_bytes += sizeof(VkSampleLocationEXT) * locations_args.count;
++            image_barriers_with_sample_locations_[locations_args.image_memory_barrier_index].pNext =
++                &info;
++          }
++          image_memory_barriers = image_barriers_with_sample_locations_.data();
++        }
+         dfn.vkCmdPipelineBarrier(command_buffer, args.src_stage_mask, args.dst_stage_mask,
+                                  args.dependency_flags, args.memory_barrier_count, memory_barriers,
+                                  args.buffer_memory_barrier_count, buffer_memory_barriers,
+@@ -349,6 +399,21 @@ void DeferredCommandBuffer::CmdVkPipelineBarrier(
+     image_memory_barriers_offset = arguments_size;
+     arguments_size += sizeof(VkImageMemoryBarrier) * image_memory_barrier_count;
+   }
++  size_t sample_locations_offset = arguments_size;
++  uint32_t sample_locations_info_count = 0;
++  for (uint32_t i = 0; i < image_memory_barrier_count; ++i) {
++    const auto* info = static_cast<const VkSampleLocationsInfoEXT*>(image_memory_barriers[i].pNext);
++    if (!info) {
++      continue;
++    }
++    assert_true(info->sType == VK_STRUCTURE_TYPE_SAMPLE_LOCATIONS_INFO_EXT);
++    assert_null(info->pNext);
++    ++sample_locations_info_count;
++    arguments_size = rex::align(arguments_size, alignof(ArgsSampleLocationsInfo));
++    arguments_size += sizeof(ArgsSampleLocationsInfo);
++    arguments_size = rex::align(arguments_size, alignof(VkSampleLocationEXT));
++    arguments_size += sizeof(VkSampleLocationEXT) * info->sampleLocationsCount;
++  }
+   uint8_t* args_ptr =
+       reinterpret_cast<uint8_t*>(WriteCommand(Command::kVkPipelineBarrier, arguments_size));
+   auto& args = *reinterpret_cast<ArgsVkPipelineBarrier*>(args_ptr);
+@@ -358,6 +423,7 @@ void DeferredCommandBuffer::CmdVkPipelineBarrier(
+   args.memory_barrier_count = memory_barrier_count;
+   args.buffer_memory_barrier_count = buffer_memory_barrier_count;
+   args.image_memory_barrier_count = image_memory_barrier_count;
++  args.sample_locations_info_count = sample_locations_info_count;
+   if (memory_barrier_count) {
+     std::memcpy(args_ptr + memory_barriers_offset, memory_barriers,
+                 sizeof(VkMemoryBarrier) * memory_barrier_count);
+@@ -370,6 +436,26 @@ void DeferredCommandBuffer::CmdVkPipelineBarrier(
+     std::memcpy(args_ptr + image_memory_barriers_offset, image_memory_barriers,
+                 sizeof(VkImageMemoryBarrier) * image_memory_barrier_count);
+   }
++  for (uint32_t i = 0; i < image_memory_barrier_count; ++i) {
++    const auto* info = static_cast<const VkSampleLocationsInfoEXT*>(image_memory_barriers[i].pNext);
++    if (!info) {
++      continue;
++    }
++    reinterpret_cast<VkImageMemoryBarrier*>(args_ptr + image_memory_barriers_offset)[i].pNext =
++        nullptr;
++    sample_locations_offset = rex::align(sample_locations_offset, alignof(ArgsSampleLocationsInfo));
++    auto& locations_args =
++        *reinterpret_cast<ArgsSampleLocationsInfo*>(args_ptr + sample_locations_offset);
++    locations_args.image_memory_barrier_index = i;
++    locations_args.samples_per_pixel = info->sampleLocationsPerPixel;
++    locations_args.grid_size = info->sampleLocationGridSize;
++    locations_args.count = info->sampleLocationsCount;
++    sample_locations_offset += sizeof(ArgsSampleLocationsInfo);
++    sample_locations_offset = rex::align(sample_locations_offset, alignof(VkSampleLocationEXT));
++    std::memcpy(args_ptr + sample_locations_offset, info->pSampleLocations,
++                sizeof(VkSampleLocationEXT) * info->sampleLocationsCount);
++    sample_locations_offset += sizeof(VkSampleLocationEXT) * info->sampleLocationsCount;
++  }
+ }
+ 
+ void DeferredCommandBuffer::CmdVkBeginRendering(const VkRenderingInfo* rendering_info) {
+diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeline_cache.cpp
+index cc107b1..740f918 100644
+--- a/src/graphics/vulkan/pipeline_cache.cpp
++++ b/src/graphics/vulkan/pipeline_cache.cpp
+@@ -3309,6 +3309,22 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
+     multisample_state.minSampleShading = 1.0f;
+   }
+ 
++  // Xenos sample locations (Xenia Canary commit cc4981a465). Unlike Xenia,
++  // draws without attachments and with rasterizer discard run at 1x here, so
++  // the locations are only attached when the sample count matches.
++  VkPipelineSampleLocationsStateCreateInfoEXT sample_locations_state;
++  const VkSampleLocationsInfoEXT* sample_locations_info = render_target_cache_.GetSampleLocationsInfo(
++      description.render_pass_key.msaa_samples, subpass_has_attachments);
++  if (sample_locations_info &&
++      sample_locations_info->sampleLocationsPerPixel == multisample_state.rasterizationSamples) {
++    sample_locations_state.sType =
++        VK_STRUCTURE_TYPE_PIPELINE_SAMPLE_LOCATIONS_STATE_CREATE_INFO_EXT;
++    sample_locations_state.pNext = nullptr;
++    sample_locations_state.sampleLocationsEnable = VK_TRUE;
++    sample_locations_state.sampleLocationsInfo = *sample_locations_info;
++    multisample_state.pNext = &sample_locations_state;
++  }
++
+   VkPipelineDepthStencilStateCreateInfo depth_stencil_state = {};
+   depth_stencil_state.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+   depth_stencil_state.pNext = nullptr;
+diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
+index 4f8581a..ae61d98 100644
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -388,6 +388,55 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
+     msaa_2x_attachments_supported_ = false;
+     msaa_2x_no_attachments_supported_ = false;
+   }
++
++  // Set up Xenos MSAA sample locations for sample counts the device supports.
++  // (Xenia Canary commit cc4981a465.)
++  if (vulkan_device->extensions().ext_EXT_sample_locations) {
++    for (uint32_t i = 0; i < 2; ++i) {
++      bool subpass_has_attachments = i != 0;
++      // FSI always uses Xenos' MSAA sample positions.
++      if (subpass_has_attachments && !REXCVAR_GET(xenos_sample_positions)) {
++        continue;
++      }
++      // Draws without attachments can change sample counts within a render
++      // pass, so they need variable sample locations.
++      if (!subpass_has_attachments && !device_properties.variableSampleLocations) {
++        continue;
++      }
++      for (uint32_t j = 0; j < 2; ++j) {
++        // Use interlock sample mapping for subpasses without attachments.
++        int8_t positions[4][2];
++        uint32_t host_sample_count = draw_util::GetHostSampleXenosPositions(
++            j ? xenos::MsaaSamples::k4X : xenos::MsaaSamples::k2X,
++            IsMsaa2xSupported(subpass_has_attachments), !subpass_has_attachments, positions);
++        if (!(device_properties.sampleLocationSampleCounts &
++              VkSampleCountFlags(host_sample_count))) {
++          continue;
++        }
++        VkSampleLocationEXT* locations = sample_locations_[i][j];
++        for (uint32_t k = 0; k < host_sample_count; ++k) {
++          locations[k].x = 0.5f + float(positions[k][0]) * (1.0f / 16.0f);
++          locations[k].y = 0.5f + float(positions[k][1]) * (1.0f / 16.0f);
++        }
++        VkSampleLocationsInfoEXT& info = sample_locations_info_[i][j];
++        info.sType = VK_STRUCTURE_TYPE_SAMPLE_LOCATIONS_INFO_EXT;
++        info.pNext = nullptr;
++        info.sampleLocationsPerPixel = VkSampleCountFlagBits(host_sample_count);
++        info.sampleLocationGridSize.width = 1;
++        info.sampleLocationGridSize.height = 1;
++        info.sampleLocationsCount = host_sample_count;
++        info.pSampleLocations = locations;
++      }
++    }
++  }
++  REXGPU_INFO(
++      "VulkanRenderTargetCache: Xenos sample locations: requested={}, extension={}, "
++      "2x={}, 4x={}, no-attachment 2x={}, 4x={}",
++      REXCVAR_GET(xenos_sample_positions), vulkan_device->extensions().ext_EXT_sample_locations,
++      sample_locations_info_[1][0].sampleLocationsCount,
++      sample_locations_info_[1][1].sampleLocationsCount,
++      sample_locations_info_[0][0].sampleLocationsCount,
++      sample_locations_info_[0][1].sampleLocationsCount);
+   bool integer_transfer_sample_1x_supported =
+       (device_properties.framebufferColorSampleCounts & VK_SAMPLE_COUNT_1_BIT) != 0 &&
+       (device_properties.sampledImageIntegerSampleCounts & VK_SAMPLE_COUNT_1_BIT) != 0;
+@@ -1518,14 +1567,7 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
+         VkImageLayout rt_new_layout;
+         VulkanRenderTarget::GetDrawUsage(i == 0, &rt_dst_stage_mask, &rt_dst_access_mask,
+                                          &rt_new_layout);
+-        command_processor_.PushImageMemoryBarrier(
+-            vulkan_rt.image(),
+-            ui::vulkan::util::InitializeSubresourceRange(
+-                i ? VK_IMAGE_ASPECT_COLOR_BIT
+-                  : (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)),
+-            vulkan_rt.current_stage_mask(), rt_dst_stage_mask, vulkan_rt.current_access_mask(),
+-            rt_dst_access_mask, vulkan_rt.current_layout(), rt_new_layout);
+-        vulkan_rt.SetUsage(rt_dst_stage_mask, rt_dst_access_mask, rt_new_layout);
++        TransitionRenderTarget(vulkan_rt, rt_dst_stage_mask, rt_dst_access_mask, rt_new_layout);
+       }
+     } break;
+ 
+@@ -1931,6 +1973,11 @@ RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(Ren
+     image_create_info.format = GetDepthVulkanFormat(key.GetDepthFormat());
+     transfer_format = image_create_info.format;
+     image_create_info.usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
++    if (GetSampleLocationsInfo(key.msaa_samples, true)) {
++      // Allow depth rendering at Xenos sample locations.
++      // Transitions must use the same locations to preserve compressed depth.
++      image_create_info.flags |= VK_IMAGE_CREATE_SAMPLE_LOCATIONS_COMPATIBLE_DEPTH_BIT_EXT;
++    }
+   } else {
+     xenos::ColorRenderTargetFormat color_format = key.GetColorFormat();
+     image_create_info.format = GetColorVulkanFormat(color_format);
+@@ -2217,6 +2264,27 @@ void VulkanRenderTargetCache::MarkEdramBufferModified(
+   }
+ }
+ 
++void VulkanRenderTargetCache::TransitionRenderTarget(VulkanRenderTarget& render_target,
++                                                     VkPipelineStageFlags dst_stage_mask,
++                                                     VkAccessFlags dst_access_mask,
++                                                     VkImageLayout new_layout) {
++  RenderTargetKey key = render_target.key();
++
++  // Use the depth's sample locations for all transitions, including those
++  // between read-only layouts. (Xenia Canary commit cc4981a465.)
++  command_processor_.PushImageMemoryBarrier(
++      render_target.image(),
++      ui::vulkan::util::InitializeSubresourceRange(
++          key.is_depth ? (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)
++                       : VK_IMAGE_ASPECT_COLOR_BIT),
++      render_target.current_stage_mask(), dst_stage_mask, render_target.current_access_mask(),
++      dst_access_mask, render_target.current_layout(), new_layout, VK_QUEUE_FAMILY_IGNORED,
++      VK_QUEUE_FAMILY_IGNORED, true,
++      key.is_depth ? GetSampleLocationsInfo(key.msaa_samples, true) : nullptr);
++
++  render_target.SetUsage(dst_stage_mask, dst_access_mask, new_layout);
++}
++
+ void VulkanRenderTargetCache::CommitEdramBufferShaderWrites(
+     EdramBufferModificationStatus commit_status) {
+   assert_true(commit_status != EdramBufferModificationStatus::kUnmodified);
+@@ -2333,7 +2401,7 @@ VulkanRenderTargetCache::GetHostRenderTargetsFramebuffer(
+   // Creates at a persistent location - safe to use pointers.
+   return &framebuffers_
+               .emplace(std::piecewise_construct, std::forward_as_tuple(key),
+-                       std::forward_as_tuple(framebuffer, host_extent))
++                       std::forward_as_tuple(framebuffer, host_extent, render_pass_key))
+               .first->second;
+ }
+ 
+@@ -4440,6 +4508,18 @@ VkPipeline const* VulkanRenderTargetCache::GetTransferPipelines(TransferPipeline
+       multisample_state.pSampleMask = &sample_mask;
+     }
+   }
++  // The destination's sample locations. (Xenia Canary commit cc4981a465.)
++  VkPipelineSampleLocationsStateCreateInfoEXT sample_locations_state;
++  const VkSampleLocationsInfoEXT* sample_locations_info =
++      GetSampleLocationsInfo(key.shader_key.dest_msaa_samples, true);
++  if (sample_locations_info) {
++    sample_locations_state.sType =
++        VK_STRUCTURE_TYPE_PIPELINE_SAMPLE_LOCATIONS_STATE_CREATE_INFO_EXT;
++    sample_locations_state.pNext = nullptr;
++    sample_locations_state.sampleLocationsEnable = VK_TRUE;
++    sample_locations_state.sampleLocationsInfo = *sample_locations_info;
++    multisample_state.pNext = &sample_locations_state;
++  }
+ 
+   // Whether the depth / stencil state is used depends on the presence of a
+   // depth attachment in the render pass - but not making assumptions about
+@@ -4662,15 +4742,7 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+         UseEdramBuffer(EdramBufferUsage::kComputeWrite);
+         // Always transitioning both depth and stencil, not storing separate
+         // usage flags for depth and stencil.
+-        command_processor_.PushImageMemoryBarrier(
+-            dest_vulkan_rt.image(),
+-            ui::vulkan::util::InitializeSubresourceRange(VK_IMAGE_ASPECT_DEPTH_BIT |
+-                                                         VK_IMAGE_ASPECT_STENCIL_BIT),
+-            dest_vulkan_rt.current_stage_mask(), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+-            dest_vulkan_rt.current_access_mask(), VK_ACCESS_SHADER_READ_BIT,
+-            dest_vulkan_rt.current_layout(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+-        dest_vulkan_rt.SetUsage(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
+-                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
++        TransitionRenderTarget(dest_vulkan_rt, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+         host_depth_store_set_up = true;
+       }
+       Transfer::Rectangle transfer_rectangles[Transfer::kMaxRectanglesWithCutout];
+@@ -4733,16 +4805,7 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+       VkAccessFlags dest_dst_access_mask;
+       VkImageLayout dest_new_layout;
+       dest_vulkan_rt.GetDrawUsage(&dest_dst_stage_mask, &dest_dst_access_mask, &dest_new_layout);
+-      command_processor_.PushImageMemoryBarrier(
+-          dest_vulkan_rt.image(),
+-          ui::vulkan::util::InitializeSubresourceRange(
+-              dest_vulkan_rt.key().is_depth
+-                  ? (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)
+-                  : VK_IMAGE_ASPECT_COLOR_BIT),
+-          dest_vulkan_rt.current_stage_mask(), dest_dst_stage_mask,
+-          dest_vulkan_rt.current_access_mask(), dest_dst_access_mask,
+-          dest_vulkan_rt.current_layout(), dest_new_layout);
+-      dest_vulkan_rt.SetUsage(dest_dst_stage_mask, dest_dst_access_mask, dest_new_layout);
++      TransitionRenderTarget(dest_vulkan_rt, dest_dst_stage_mask, dest_dst_access_mask, dest_new_layout);
+     }
+     // Transition the sources, only if not going to be used as destinations
+     // earlier.
+@@ -4763,16 +4826,7 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+       }
+       if (!source_previously_used_as_dest) {
+         auto& source_vulkan_rt = *static_cast<VulkanRenderTarget*>(transfer.source);
+-        command_processor_.PushImageMemoryBarrier(
+-            source_vulkan_rt.image(),
+-            ui::vulkan::util::InitializeSubresourceRange(
+-                source_vulkan_rt.key().is_depth
+-                    ? (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)
+-                    : VK_IMAGE_ASPECT_COLOR_BIT),
+-            source_vulkan_rt.current_stage_mask(), kSourceStageMask,
+-            source_vulkan_rt.current_access_mask(), kSourceAccessMask,
+-            source_vulkan_rt.current_layout(), kSourceLayout);
+-        source_vulkan_rt.SetUsage(kSourceStageMask, kSourceAccessMask, kSourceLayout);
++        TransitionRenderTarget(source_vulkan_rt, kSourceStageMask, kSourceAccessMask, kSourceLayout);
+       }
+       // transfer.host_depth_source == dest_rt means the EDRAM buffer will be
+       // used instead, no need to transition.
+@@ -4780,14 +4834,7 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+           !host_depth_source_previously_used_as_dest) {
+         auto& host_depth_source_vulkan_rt =
+             *static_cast<VulkanRenderTarget*>(transfer.host_depth_source);
+-        command_processor_.PushImageMemoryBarrier(
+-            host_depth_source_vulkan_rt.image(),
+-            ui::vulkan::util::InitializeSubresourceRange(VK_IMAGE_ASPECT_DEPTH_BIT |
+-                                                         VK_IMAGE_ASPECT_STENCIL_BIT),
+-            host_depth_source_vulkan_rt.current_stage_mask(), kSourceStageMask,
+-            host_depth_source_vulkan_rt.current_access_mask(), kSourceAccessMask,
+-            host_depth_source_vulkan_rt.current_layout(), kSourceLayout);
+-        host_depth_source_vulkan_rt.SetUsage(kSourceStageMask, kSourceAccessMask, kSourceLayout);
++        TransitionRenderTarget(host_depth_source_vulkan_rt, kSourceStageMask, kSourceAccessMask, kSourceLayout);
+       }
+     }
+   }
+@@ -4829,15 +4876,7 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+       VkAccessFlags dest_dst_access_mask;
+       VkImageLayout dest_new_layout;
+       dest_vulkan_rt.GetDrawUsage(&dest_dst_stage_mask, &dest_dst_access_mask, &dest_new_layout);
+-      command_processor_.PushImageMemoryBarrier(
+-          dest_vulkan_rt.image(),
+-          ui::vulkan::util::InitializeSubresourceRange(
+-              dest_rt_key.is_depth ? (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)
+-                                   : VK_IMAGE_ASPECT_COLOR_BIT),
+-          dest_vulkan_rt.current_stage_mask(), dest_dst_stage_mask,
+-          dest_vulkan_rt.current_access_mask(), dest_dst_access_mask,
+-          dest_vulkan_rt.current_layout(), dest_new_layout);
+-      dest_vulkan_rt.SetUsage(dest_dst_stage_mask, dest_dst_access_mask, dest_new_layout);
++      TransitionRenderTarget(dest_vulkan_rt, dest_dst_stage_mask, dest_dst_access_mask, dest_new_layout);
+     }
+ 
+     // Get the objects needed for transfers to the destination.
+@@ -4969,16 +5008,7 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+            it != current_transfer_invocations_.cend(); ++it) {
+         assert_not_null(it->transfer.source);
+         auto& source_vulkan_rt = *static_cast<VulkanRenderTarget*>(it->transfer.source);
+-        command_processor_.PushImageMemoryBarrier(
+-            source_vulkan_rt.image(),
+-            ui::vulkan::util::InitializeSubresourceRange(
+-                source_vulkan_rt.key().is_depth
+-                    ? (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)
+-                    : VK_IMAGE_ASPECT_COLOR_BIT),
+-            source_vulkan_rt.current_stage_mask(), kSourceStageMask,
+-            source_vulkan_rt.current_access_mask(), kSourceAccessMask,
+-            source_vulkan_rt.current_layout(), kSourceLayout);
+-        source_vulkan_rt.SetUsage(kSourceStageMask, kSourceAccessMask, kSourceLayout);
++        TransitionRenderTarget(source_vulkan_rt, kSourceStageMask, kSourceAccessMask, kSourceLayout);
+         auto host_depth_source_vulkan_rt =
+             static_cast<VulkanRenderTarget*>(it->transfer.host_depth_source);
+         if (host_depth_source_vulkan_rt) {
+@@ -4989,15 +5019,7 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+             UseEdramBuffer(EdramBufferUsage::kFragmentRead);
+           } else {
+             // Reading host depth from the texture.
+-            command_processor_.PushImageMemoryBarrier(
+-                host_depth_source_vulkan_rt->image(),
+-                ui::vulkan::util::InitializeSubresourceRange(VK_IMAGE_ASPECT_DEPTH_BIT |
+-                                                             VK_IMAGE_ASPECT_STENCIL_BIT),
+-                host_depth_source_vulkan_rt->current_stage_mask(), kSourceStageMask,
+-                host_depth_source_vulkan_rt->current_access_mask(), kSourceAccessMask,
+-                host_depth_source_vulkan_rt->current_layout(), kSourceLayout);
+-            host_depth_source_vulkan_rt->SetUsage(kSourceStageMask, kSourceAccessMask,
+-                                                  kSourceLayout);
++            TransitionRenderTarget(*host_depth_source_vulkan_rt, kSourceStageMask, kSourceAccessMask, kSourceLayout);
+           }
+         }
+       }
+@@ -6069,8 +6091,7 @@ void VulkanRenderTargetCache::DiagnosticHostAfterDraw(uint64_t vs,uint64_t ps,bo
+   const auto key=rt->key();
+   if(key.GetPitchTiles()!=16 || key.msaa_samples!=xenos::MsaaSamples::k2X)return;
+   if(probe_depth && !key.is_depth)return;
+-  command_processor_.PushImageMemoryBarrier(rt->image(),ui::vulkan::util::InitializeSubresourceRange(probe_depth?(VK_IMAGE_ASPECT_DEPTH_BIT|VK_IMAGE_ASPECT_STENCIL_BIT):VK_IMAGE_ASPECT_COLOR_BIT),rt->current_stage_mask(),VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,rt->current_access_mask(),VK_ACCESS_SHADER_READ_BIT,rt->current_layout(),VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+-  rt->SetUsage(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_ACCESS_SHADER_READ_BIT,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
++  TransitionRenderTarget(*rt, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+   if(probe_depth && host_probe.count<4)REXGPU_INFO("external_host_depth_source key={:08X} frame={} vs={:016X} ps={:016X}",key.key,command_processor_.GetCurrentFrame(),vs,ps);
+   host_probe.after_draw=true;host_probe.vs=vs;host_probe.ps=ps;host_probe.depth=register_file().Get<reg::RB_DEPTHCONTROL>().value;
+       const auto* vd=command_processor_.GetVulkanDevice();const auto& df=vd->functions();const auto dev=vd->device();
+@@ -6145,16 +6166,7 @@ bool VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base, uint32_t dum
+   for (const ResolveCopyDumpRectangle& rectangle : dump_rectangles_) {
+     auto& vulkan_rt = *static_cast<VulkanRenderTarget*>(rectangle.render_target);
+     RenderTargetKey rt_key = vulkan_rt.key();
+-    command_processor_.PushImageMemoryBarrier(
+-        vulkan_rt.image(),
+-        ui::vulkan::util::InitializeSubresourceRange(
+-            rt_key.is_depth ? (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)
+-                            : VK_IMAGE_ASPECT_COLOR_BIT),
+-        vulkan_rt.current_stage_mask(), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+-        vulkan_rt.current_access_mask(), VK_ACCESS_SHADER_READ_BIT, vulkan_rt.current_layout(),
+-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+-    vulkan_rt.SetUsage(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
+-                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
++    TransitionRenderTarget(vulkan_rt, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+     if (vulkan_rt.temporary_sort_index() == UINT32_MAX) {
+       vulkan_rt.SetTemporarySortIndex(rt_sort_index++);
+     }
+diff --git a/src/ui/vulkan/vulkan_device.cpp b/src/ui/vulkan/vulkan_device.cpp
+index 8197bb4..de413ff 100644
+--- a/src/ui/vulkan/vulkan_device.cpp
++++ b/src/ui/vulkan/vulkan_device.cpp
+@@ -220,6 +220,8 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+     // #148.
+     XE_UI_VULKAN_STRUCT_PROMOTED_EXTENSION(KHR_image_format_list, 1, 2)
+     if (get_physical_device_properties2_supported) {
++      // #144.
++      XE_UI_VULKAN_STRUCT_EXTENSION(EXT_sample_locations)
+       // #157.
+       XE_UI_VULKAN_STRUCT_PROMOTED_EXTENSION(KHR_sampler_ycbcr_conversion, 1, 1)
+       // #198. Also must be enabled for VK_KHR_spirv_1_4.
+@@ -313,6 +315,8 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+       features_KHR_portability_subset;
+   VkPhysicalDeviceDriverPropertiesKHR properties_1_2_KHR_driver_properties = {
+       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
++  VkPhysicalDeviceSampleLocationsPropertiesEXT properties_EXT_sample_locations = {
++      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLE_LOCATIONS_PROPERTIES_EXT};
+   VkPhysicalDeviceFloatControlsProperties properties_1_2_KHR_shader_float_controls = {
+       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT_CONTROLS_PROPERTIES};
+   VulkanFeatures<VkPhysicalDeviceFragmentShaderInterlockFeaturesEXT,
+@@ -362,6 +366,10 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+       properties_1_2_KHR_shader_float_controls.pNext = properties_2.pNext;
+       properties_2.pNext = &properties_1_2_KHR_shader_float_controls;
+     }
++    if (device->extensions_.ext_EXT_sample_locations) {
++      properties_EXT_sample_locations.pNext = properties_2.pNext;
++      properties_2.pNext = &properties_EXT_sample_locations;
++    }
+     if (ext_EXT_fragment_shader_interlock) {
+       features_EXT_fragment_shader_interlock.Link(supported_features_2, device_create_info);
+     }
+@@ -711,6 +719,11 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+     }
+   }
+ 
++  if (device->extensions_.ext_EXT_sample_locations) {
++    XE_UI_VULKAN_PROPERTY_2(properties_EXT_sample_locations, sampleLocationSampleCounts);
++    XE_UI_VULKAN_PROPERTY_2(properties_EXT_sample_locations, variableSampleLocations);
++  }
++
+   if (ext_EXT_non_seamless_cube_map) {
+     if (with_gpu_emulation) {
+       XE_UI_VULKAN_FEATURE_2(features_EXT_non_seamless_cube_map, nonSeamlessCubeMap)

@@ -1,12 +1,17 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="org.mirrorsedge.research">
   <uses-permission android:name="android.permission.INTERNET" />
-  <uses-permission android:name="android.permission.INTERNET" />
   <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="35" />
   <uses-feature android:name="android.hardware.gamepad" android:required="false" />
   <application android:label="Mirror’s Edge — стенд" android:theme="@android:style/Theme.Material.NoActionBar" android:allowBackup="false" android:debuggable="true" android:extractNativeLibs="false" android:supportsRtl="true">
     <activity android:name=".PreviewActivity" android:screenOrientation="sensorLandscape" android:exported="false" />
-    <activity android:name=".PreviewActivity" android:screenOrientation="sensorLandscape" android:exported="false" />
-    <activity android:name=".MainActivity" android:screenOrientation="sensorLandscape" android:exported="true">
+    <!-- Game process of its own: the runtime cannot restart in-process; leaving the game ends
+         that process only. Exported for adb-driven tests (am start with env extras). -->
+    <activity android:name=".GameActivity" android:process=":game" android:screenOrientation="sensorLandscape" android:exported="true"
+      android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen"
+      android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density" />
+    <!-- Research stand (input/save tests, live preview); exported for play.ps1 (am start). -->
+    <activity android:name=".MainActivity" android:screenOrientation="sensorLandscape" android:exported="true" />
+    <activity android:name=".LauncherActivity" android:screenOrientation="sensorLandscape" android:exported="true">
       <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
     </activity>
   </application>

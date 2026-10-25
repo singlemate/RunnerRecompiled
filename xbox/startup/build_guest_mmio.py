@@ -6,7 +6,7 @@ h=r/'outputs/mirrors-edge-native/xbox/startup/guest_memory_access.h'
 files=sorted(g.glob('*.cpp'));start=time.monotonic()
 def build(p):
  obj=out/(p.stem+'.o')
- q=subprocess.run([str(cc),'--target=aarch64-linux-android35','-std=c++17','-DSIMDE_ENABLE_NATIVE_ALIASES','-I'+str(r/'work/references/XenonRecomp/thirdparty/simde'),'-O1','-fPIC','-Werror=asm-operand-widths','-include',str(h),'-c',str(p),'-o',str(obj)],capture_output=True)
+ q=subprocess.run([str(cc),'--target=aarch64-linux-android35','-std=c++17','-DSIMDE_ENABLE_NATIVE_ALIASES','-I'+str(r/'work/references/XenonRecomp/thirdparty/simde'),'-O2','-fPIC','-Werror=asm-operand-widths','-include',str(h),'-c',str(p),'-o',str(obj)],capture_output=True)
  return dict(file=p.name,exit=q.returncode,error=q.stderr.decode(errors='replace')[-1500:] if q.returncode else '')
 with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:rows=list(pool.map(build,files))
 report=dict(units=len(rows),passed=sum(x['exit']==0 for x in rows),elapsed_seconds=round(time.monotonic()-start,1),results=rows)

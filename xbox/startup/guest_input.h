@@ -43,8 +43,12 @@ class MeGuestInput {
  if(me_decode_player(packet,size_t(n),identity)){if(!player_.xuid){player_=identity;std::puts("{\"event\":\"local_player_identity_received\"}");}continue;}
  if(!me_decode_input(packet,size_t(n),next))continue;if(next.buttons!=state_.buttons || next.connected!=state_.connected){if(changes_.size()>=32)changes_.pop_front();changes_.push_back(next);}
  state_=next;received_=std::chrono::steady_clock::now();}
- if(std::chrono::steady_clock::now()-received_>std::chrono::milliseconds(600)){changes_.clear();return {};}
+ // Unconsumed press/release changes survive a slow guest poll (menus can run at
+ // ~0.5 fps here) for up to 5 s; the held state itself still expires after 600 ms.
+ const auto age=std::chrono::steady_clock::now()-received_;
+ if(age>std::chrono::seconds(5))changes_.clear();
  if(consume && !changes_.empty()){auto value=changes_.front();changes_.pop_front();return value;}
+ if(age>std::chrono::milliseconds(600))return {};
  return state_;}
 };
 inline MeGuestInput& me_guest_input(){static MeGuestInput input;return input;}

@@ -15,7 +15,9 @@ def main():
     ap.add_argument('container', type=Path)
     ap.add_argument('--private', type=Path, required=True)
     ap.add_argument('--report', type=Path, required=True)
-    ap.add_argument('--extract-path', required=True)
+    ap.add_argument('--extract-path', action='append', default=[],
+                    help='repeatable; or use --extract-all')
+    ap.add_argument('--extract-all', action='store_true', help='every file in the inventory')
     args = ap.parse_args()
     header = args.container.read_bytes()
     assert len(header) >= 0x3AD and header[:4] in (b'LIVE', b'PIRS', b'CON ')
@@ -92,17 +94,23 @@ def main():
     directory(root, root_size, '')
     args.private.mkdir(parents=True,exist_ok=True)
     (args.private / 'inventory.txt').write_text('\n'.join(sorted(e['path'].lower() for e in entries))+'\n',encoding='ascii')
-    match = [e for e in entries if e['path'].lower() == args.extract_path.replace('\\','/').lower() and not e['directory']]
-    assert len(match) == 1, 'File absent or ambiguous'
-    item = match[0]
-    dest = args.private / item['path'].lower()
-    dest.parent.mkdir(parents=True,exist_ok=True)
-    data = read(item['block'],0,item['size'])
-    if dest.exists(): assert dest.read_bytes()==data, 'Existing file differs'
-    else:
-        with dest.open('xb') as output: output.write(data)
-    args.report.write_text(json.dumps({'path':item['path'],'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest()},indent=2))
-    print('extracted',item['path'],len(data),'bytes')
+    files = [e for e in entries if not e['directory']]
+    wanted = {p.replace('\\', '/').lower() for p in args.extract_path}
+    assert args.extract_all or wanted, 'Nothing to extract'
+    reports = []
+    for want in (sorted(e['path'].lower() for e in files) if args.extract_all else sorted(wanted)):
+        match = [e for e in files if e['path'].lower() == want]
+        assert len(match) == 1, f'File absent or ambiguous: {want}'
+        item = match[0]
+        dest = args.private / item['path'].lower()
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        data = read(item['block'], 0, item['size'])
+        if dest.exists(): assert dest.read_bytes() == data, f'Existing file differs: {want}'
+        else:
+            with dest.open('xb') as output: output.write(data)
+        reports.append({'path': item['path'], 'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest()})
+        print('extracted', item['path'], len(data), 'bytes')
+    args.report.write_text(json.dumps(reports[0] if len(reports) == 1 else reports, indent=2))
     for handle in handles: handle.close()
 
 if __name__ == '__main__': main()

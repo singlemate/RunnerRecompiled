@@ -68,5 +68,9 @@ struct MeReadOnlyFiles {
         if(n>=0)f->position=offset+uint64_t(n);
         return n;
     }
+    // For reads outside the caller's lock: an independent descriptor, so a concurrent
+    // close of the handle cannot redirect the read to a reused fd number.
+    int duplicate(uint32_t handle){auto* f=find(handle);return f?fcntl(f->fd,F_DUPFD_CLOEXEC,0):(errno=EBADF,-1);}
+    void set_position(uint32_t handle,uint64_t position){if(auto* f=find(handle))f->position=position;}
     bool close(uint32_t handle){auto* f=find(handle);if(!f)return false;int fd=f->fd;f->fd=-1;return ::close(fd)==0;}
 };

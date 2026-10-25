@@ -1,0 +1,37 @@
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -43,6 +43,11 @@
+ 
+ REXCVAR_DEFINE_STRING(render_target_path_vulkan, "", "GPU/Vulkan",
+                       "Vulkan render target implementation path")
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++REXCVAR_DEFINE_BOOL(vulkan_depth_unorm24_on_qualcomm, false, "GPU/Vulkan",
++                    "Use VK_FORMAT_D24_UNORM_S8_UINT for guest D24S8 depth on the Qualcomm "
++                    "proprietary driver. Off by default: the round trip through it is not "
++                    "bit-exact there, which loses depth precision in ownership transfers.")
+     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+ 
+ // DEFINE_string(
+@@ -258,6 +263,22 @@
+                                           &depth_unorm24_properties);
+   depth_unorm24_vulkan_format_supported_ = (depth_unorm24_properties.optimalTilingFeatures &
+                                             kUsedDepthFormatFeatures) == kUsedDepthFormatFeatures;
++  // On the Qualcomm proprietary driver, writing a 24-bit value to
++  // VK_FORMAT_D24_UNORM_S8_UINT through the fragment depth and reading it back
++  // is not bit-exact (+1 in the lowest bit measured on Adreno 830). Ownership
++  // transfers rely on an exact round trip to recognize unchanged depth and
++  // restore the float32 host depth, so the precision of D24FS8 depth moved
++  // through a D24S8 render target is lost (in 45410850, predicated tiling then
++  // fails depth tests against the prepass in the first tile). Store guest
++  // D24S8 as float32 there, the path already used on GPUs without D24.
++  if (depth_unorm24_vulkan_format_supported_ &&
++      device_properties.driverID == VK_DRIVER_ID_QUALCOMM_PROPRIETARY &&
++      !REXCVAR_GET(vulkan_depth_unorm24_on_qualcomm)) {
++    depth_unorm24_vulkan_format_supported_ = false;
++    REXGPU_INFO(
++        "VulkanRenderTargetCache: Qualcomm driver, storing guest D24S8 depth as "
++        "D32_SFLOAT_S8_UINT for exact ownership transfers");
++  }
+   if (std::getenv("ME_DIAGNOSTIC_D32_FOR_D24")) {
+     depth_unorm24_vulkan_format_supported_ = false;
+     REXGPU_WARN("me_diagnostic_d32_for_d24 not_a_fix=true");

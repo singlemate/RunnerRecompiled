@@ -1,3 +1,4 @@
+#include "../audio/context_merge.h"
 // Incremental ARM64 startup runtime; unsupported Xbox services stop with diagnostics.
 #include "guest_memory_access.h"
 #include "ppc_recomp_shared.h"
@@ -22,6 +23,7 @@
 #include "readonly_files.h"
 #include "pcm_frame.h"
 #include <limits>
+#include <source_location>
 #include <cmath>
 #include <rex/graphics/host_worker.h>
 #include <rex/graphics/guest_execution_guard.h>
@@ -82,19 +84,55 @@ static bool gpu_explore_mode = false;
 static uint32_t gpu_identifier_address = 0;
 static uint32_t timestamp_bundle_address=0;
 static uint64_t timestamp_origin_ns=0;
+static MeExecutionGate execution_gate;
+// Parallel guest execution: guest code runs on its own host thread without the gate,
+// as on the console's six hardware threads. The gate is a big kernel lock: every
+// kernel/XAM import, MMIO handler and loader hook that touches loader state holds it
+// (MeKernelLock; nested calls reuse the caller's hold), and blocking waits release it.
+// ME_GUEST_SERIAL=1 keeps the former fully serialized mode for A/B comparison.
+static bool guest_parallel = true;
+struct MeKernelLock {
+    bool took = false;
+    MeKernelLock() { if (!execution_gate.owned()) { execution_gate.lock(); took = true; } }
+    ~MeKernelLock() { if (took && execution_gate.owned()) execution_gate.unlock(); }
+    MeKernelLock(const MeKernelLock&) = delete;
+    MeKernelLock& operator=(const MeKernelLock&) = delete;
+};
+// Per-import call counters (diagnostics: which imports load the kernel lock).
+struct MeImportCounter {
+    const char* name; std::atomic<uint64_t> calls{0}; MeImportCounter* next;
+    static inline std::atomic<MeImportCounter*> head{nullptr};
+    explicit MeImportCounter(const char* n) : name(n), next(head.load()) { while (!head.compare_exchange_weak(next, this)) {} }
+};
+#define ME_IMPORT(name) \
+    static void name##_locked(PPCContext& __restrict ctx, uint8_t* base); \
+    static MeImportCounter name##_counter(#name); \
+    PPC_FUNC(name) { name##_counter.calls.fetch_add(1, std::memory_order_relaxed); MeKernelLock kernel_lock; name##_locked(ctx, base); } \
+    static void name##_locked(PPCContext& __restrict ctx, uint8_t* base)
+// Sleeps without holding the gate (releases and reacquires it if held).
+template <class D> static void me_diagnostic_sleep(D duration) {
+    const bool held = execution_gate.owned();
+    if (held) execution_gate.unlock();
+    std::this_thread::sleep_for(duration);
+    if (held) execution_gate.lock();
+}
 static unsigned gpu_mmio_writes = 0;
 static uint32_t gpu_last_write_index = 0, gpu_read_pointer_physical = 0;
 static void gpu_publication_window();
 uint64_t me_gpu_mmio_load(uint64_t address, unsigned size) {
+    static MeImportCounter counter("hook_gpu_mmio_load"); counter.calls.fetch_add(1, std::memory_order_relaxed);
+    MeKernelLock kernel_lock;
     uint64_t value = 0;
     if (gpu_mmio.load(address, size, value)) return value;
     std::fprintf(stderr, "{\"event\":\"gpu_mmio_unavailable\",\"write\":false,\"address\":\"%llx\",\"size\":%u}\n", (unsigned long long)address, size);
     std::_Exit(95);
 }
 void me_gpu_mmio_store(uint64_t address, unsigned size, uint64_t value) {
+    static MeImportCounter counter("hook_gpu_mmio_store"); counter.calls.fetch_add(1, std::memory_order_relaxed);
+    MeKernelLock kernel_lock;
     if (gpu_mmio.store(address, size, value)) {
         if (address == 0x7fc80714 && size == 4) gpu_last_write_index = uint32_t(value);
-        if (gpu_explore_mode && (++gpu_mmio_writes <= 24 || address == 0x7fc80714))
+        if (gpu_explore_mode && (++gpu_mmio_writes <= 24 || !(gpu_mmio_writes & (gpu_mmio_writes - 1))))
             std::printf("{\"event\":\"game_mmio_write\",\"address\":\"%08llx\",\"value\":\"%08llx\"}\n",(unsigned long long)address,(unsigned long long)value);
         if (address == 0x7fc80714 && size == 4) gpu_publication_window();
         return;
@@ -104,7 +142,6 @@ void me_gpu_mmio_store(uint64_t address, unsigned size, uint64_t value) {
 }
 // Guest code runs under one gate and yields it at blocking kernel calls.
 // This provides kernel-boundary scheduling, not preemption of guest spin loops.
-static MeExecutionGate execution_gate;
 static bool polling_yield_experiment=false;
 static bool pool_scan_experiment=false;
 bool me_pool_scan_enabled(){
@@ -122,7 +159,7 @@ static void diagnostic_stream_poll(PPCContext& ctx,uint8_t* base) {
     // to run when the observed nonblocking poll returns not-ready.
     original_stream_poll(ctx,base);
     static thread_local uint32_t polls=0;
-    if(ctx.r3.u32==0 && ++polls%256==0){
+    if(!guest_parallel && ctx.r3.u32==0 && ++polls%256==0){
         if(polls==256)std::puts("{\"event\":\"stream_poll_scheduling_window\"}");
         std::unique_lock<MeExecutionGate> gate(execution_gate,std::adopt_lock);
         gate.unlock();std::this_thread::sleep_for(std::chrono::milliseconds(1));gate.lock();gate.release();
@@ -135,8 +172,8 @@ static void diagnostic_worker_poll(PPCContext& ctx,uint8_t* base) {
     original_worker_poll(ctx,base);
     trace_worker_poll(object,ctx.r3.u32,ctx.r30.u32,ctx.r27.u32);
     static thread_local uint32_t polls=0;
-    if(ctx.r3.u32!=0 && ++polls%256==0){
-        if(polls==256)std::puts("{\"event\":\"worker_poll_scheduling_window\"}");
+    if(!guest_parallel && ctx.r3.u32!=0 && ++polls%16==0){
+        if(polls==16)std::puts("{\"event\":\"worker_poll_scheduling_window\"}");
         std::unique_lock<MeExecutionGate> gate(execution_gate,std::adopt_lock);
         gate.unlock();std::this_thread::sleep_for(std::chrono::milliseconds(1));gate.lock();gate.release();
     }
@@ -154,7 +191,32 @@ double me_frsqrte_diagnostic(double value,uint32_t instruction) {
     return result;
 }
 static bool game_gpu_ready = false;
+// Adaptive backoff for guest spin-waits (heat/battery). On the console a thread
+// spinning on Sleep(0) or on a memory flag costs nothing; here it holds a big core at
+// 100 %. ME_SPIN_BACKOFF_US (default 100, 0 = off) is slept instead of a yield once a
+// thread has made 32 consecutive zero-length delays (no gap > 2 ms between them), and
+// after 256 consecutive reads of the same physical address returning the same value.
+static int64_t me_spin_backoff_us() {
+    static const int64_t us = [] { const char* v = std::getenv("ME_SPIN_BACKOFF_US"); return v ? std::max<int64_t>(0, std::min<int64_t>(2000, std::atoll(v))) : 100; }();
+    return us;
+}
+static void me_zero_delay_yield() {
+    static thread_local uint32_t streak = 0; static thread_local int64_t last_ns = 0;
+    const int64_t now = int64_t(me_gate_now_ns());
+    if (now - last_ns > 2000000) streak = 0;
+    last_ns = now;
+    const int64_t us = me_spin_backoff_us();
+    if (us && ++streak > 32) std::this_thread::sleep_for(std::chrono::microseconds(us));
+    else std::this_thread::yield();
+}
 void me_guest_poll_window(uint64_t address) {
+    {   // spin detection on the same physical word (see me_spin_backoff_us)
+        static thread_local uint64_t last_address = 0; static thread_local uint32_t last_value = 0, same = 0;
+        uint32_t value; std::memcpy(&value, guest + (address & ~3ull), 4);
+        if (address == last_address && value == last_value) {
+            if (++same >= 256) { same = 0; if (const int64_t us = me_spin_backoff_us()) me_diagnostic_sleep(std::chrono::microseconds(us)); }
+        } else { last_address = address; last_value = value; same = 0; }
+    }
     if(timestamp_bundle_address && address>=timestamp_bundle_address && address<uint64_t(timestamp_bundle_address)+24){
         timespec now{};clock_gettime(CLOCK_MONOTONIC,&now);
         const uint64_t ns=uint64_t(now.tv_sec)*1000000000ull+uint64_t(now.tv_nsec);
@@ -179,19 +241,19 @@ void me_guest_poll_window(uint64_t address) {
             std::printf("{\"event\":\"gpu_cpu_poll_memory\",\"sample\":%u,\"physical\":\"%08x\",\"words\":[\"%08x\",\"%08x\",\"%08x\",\"%08x\",\"%08x\",\"%08x\"],\"ring_wptr\":%u,\"guest_lr\":\"%08llx\"}\n",sample,base,MeXexHeaders::be32(p),MeXexHeaders::be32(p+4),MeXexHeaders::be32(p+8),MeXexHeaders::be32(p+12),MeXexHeaders::be32(p+16),MeXexHeaders::be32(p+20),gpu_last_write_index,(unsigned long long)(active_context?active_context->lr:0));
         }
     }
-    // Bounded cooperative scheduling at the observed GPU shared-state polling
-    // page. This changes no guest values and does not synthesize completion.
-    std::unique_lock<MeExecutionGate> gate(execution_gate, std::adopt_lock);
-    gate.unlock(); std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    gate.lock(); gate.release();
+    // Diagnostic toggle (bisecting a stall): ME_POLL_SLEEP=1 restores the former
+    // 1 ms window, releasing the gate only if this thread holds it.
+    static const bool poll_sleep = std::getenv("ME_POLL_SLEEP") != nullptr;
+    if (poll_sleep) me_diagnostic_sleep(std::chrono::milliseconds(1));
 }
 static void gpu_publication_window() {
     if (!gpu_explore_mode || !game_gpu_ready) return;
-    // Explicit diagnostic scheduling boundary, not preemption or fence completion.
-    std::unique_lock<MeExecutionGate> gate(execution_gate, std::adopt_lock);
-    gate.unlock();
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    gate.lock(); gate.release();
+    // Former 10 ms sleep per ring write-pointer update removed (it ran on the
+    // submitting guest thread for every kick). Snapshot logging is throttled.
+    static const bool publication_sleep = std::getenv("ME_PUBLICATION_SLEEP") != nullptr;
+    if (publication_sleep) me_diagnostic_sleep(std::chrono::milliseconds(10));
+    static unsigned publications = 0;
+    if (++publications > 16 && (publications & (publications - 1))) return;
     if (gpu_read_pointer_physical) {
         auto* pointer = gpu_physical.resolve(gpu_read_pointer_physical, 4);
         if (pointer) {
@@ -214,7 +276,7 @@ static void initialize_thread(PPCContext&, unsigned, uint32_t);
 static void create_guest_thread(PPCContext&);
 static void register_audio_client(PPCContext&);
 static bool audio_output_is_ready();
-PPC_FUNC(__imp__XAudioRegisterRenderDriverClient) { register_audio_client(ctx); }
+ME_IMPORT(__imp__XAudioRegisterRenderDriverClient) { register_audio_client(ctx); }
 static std::shared_ptr<ThreadRecord> find_thread(uint32_t handle) {
     if (handle == 0xfffffffe) for (auto& t : threads) if (t->kthread == thread_address) return t;
     for (auto& t : threads) if (t->handle == handle && !t->closed) return t;
@@ -229,8 +291,8 @@ static void wait_for_change(const std::function<bool()>& ready) {
 
 // This loader runs one user-title process; no system/DPC execution is supported.
 static constexpr uint32_t process_type = 1; // X_PROCTYPE_USER, kernel_state.h
-PPC_FUNC(__imp__KeQueryPerformanceFrequency) { ctx.r3.u64 = 50000000; }
-PPC_FUNC(__imp__FscSetCacheElementCount) {
+ME_IMPORT(__imp__KeQueryPerformanceFrequency) { ctx.r3.u64 = 50000000; }
+ME_IMPORT(__imp__FscSetCacheElementCount) {
     // No file-cache implementation is installed yet. Exercise the caller's
     // real NTSTATUS failure path rather than claiming the requested cache exists.
     std::printf("{\"event\":\"file_cache_unavailable\",\"selector\":%u,\"requested_elements\":%u,\"status\":\"c0000002\"}\n", ctx.r3.u32, ctx.r4.u32);
@@ -240,37 +302,39 @@ static bool word_writable(uint32_t);
 static void put_word(uint32_t, uint32_t);
 static bool image_span_mapped(uint32_t, uint32_t);
 static constexpr uint32_t guest_console_language = 1; // XConfig setting 9: English.
-PPC_FUNC(__imp__XexGetModuleHandle) {
+ME_IMPORT(__imp__XexGetModuleHandle) {
     if (ctx.r3.u32) me_stop_import("named_module_lookup_not_implemented", ctx);
     if (!word_writable(ctx.r4.u32)) me_stop_import("module_handle_output_invalid", ctx);
     put_word(ctx.r4.u32, 0x60001000); ctx.r3.u64 = 0;
 }
 
-PPC_FUNC(__imp__XamGetSystemVersion) {
+ME_IMPORT(__imp__XamGetSystemVersion) {
     if(!gpu_explore_mode)me_stop_import("xam_version_requires_legacy_compat_profile",ctx);
     std::puts("{\"event\":\"xam_version_compatibility\",\"value\":0,\"actual_console_version\":false}");
     ctx.r3.u64=0;
 }
 
-PPC_FUNC(__imp__KeEnableFpuExceptions) {
+ME_IMPORT(__imp__KeEnableFpuExceptions) {
     if (ctx.r3.u32) me_stop_import("guest_fpu_trap_delivery_not_implemented", ctx);
     // ARM FPCR IOE/DZE/OFE/UFE/IXE/IDE: mask traps, preserve rounding/FZ.
     ctx.fpscr.csr = ctx.fpscr.getcsr() & ~uint32_t(0x9f00);
     ctx.fpscr.setcsr(ctx.fpscr.csr);
 }
-PPC_FUNC(__imp__RtlNtStatusToDosError) {
+ME_IMPORT(__imp__RtlNtStatusToDosError) {
     const auto status = ctx.r3.u32;
     if (!status || (status & 0x20000000)) return;
     if (status == 0xc000000e || status == 0xc000000f) { ctx.r3.u64 = 2; return; } // ERROR_FILE_NOT_FOUND, pinned SDK error table.
+    if (status == 0xc0000008) { ctx.r3.u64 = 6; return; } // SDK error table: ERROR_INVALID_HANDLE.
+    if (status == 0xc0000035) { ctx.r3.u64 = 183; return; } // SDK error table: ERROR_ALREADY_EXISTS.
     if (status == 0xc0000002) { ctx.r3.u64 = 1; return; } // Xbox ERROR_INVALID_FUNCTION
     me_stop_import("RtlNtStatusToDosError_unmapped_status", ctx);
 }
-PPC_FUNC(__imp__ExCreateThread) { create_guest_thread(ctx); }
-PPC_FUNC(__imp__ExTerminateThread) {
+ME_IMPORT(__imp__ExCreateThread) { create_guest_thread(ctx); }
+ME_IMPORT(__imp__ExTerminateThread) {
     if (thread_address == 0x61001000) me_stop_import("main_thread_exit_requires_process_lifetime_model", ctx);
     throw ThreadExit{ctx.r3.u32};
 }
-PPC_FUNC(__imp__KeSetBasePriorityThread) {
+ME_IMPORT(__imp__KeSetBasePriorityThread) {
     std::shared_ptr<ThreadRecord> target;
     for (const auto& record : threads) if (record->kthread == ctx.r3.u32) target = record;
     if (!target) me_stop_import("set_priority_unknown_thread", ctx);
@@ -280,7 +344,7 @@ PPC_FUNC(__imp__KeSetBasePriorityThread) {
     ctx.r3.u64 = uint32_t(previous);
     std::printf("{\"event\":\"guest_priority_hint\",\"thread\":\"%08x\",\"requested\":%d,\"previous\":%d,\"host_priority_changed\":false}\n",target->kthread,requested,previous);
 }
-PPC_FUNC(__imp__KeGetCurrentProcessType) {
+ME_IMPORT(__imp__KeGetCurrentProcessType) {
     if (ctx.r13.u32 != pcr_address || guest[pcr_address + 0x150])
         me_stop_import("KeGetCurrentProcessType_unsupported_thread_or_dpc", ctx);
     ctx.r3.u64 = guest[thread_address + 0x73];
@@ -288,7 +352,7 @@ PPC_FUNC(__imp__KeGetCurrentProcessType) {
     if(++calls<=8 || !(calls&(calls-1)))std::printf("{\"event\":\"process_type\",\"value\":%u,\"call\":%llu}\n",process_type,(unsigned long long)calls);
 }
 
-PPC_FUNC(__imp__RtlImageXexHeaderField) {
+ME_IMPORT(__imp__RtlImageXexHeaderField) {
     if (ctx.r3.u32 != module_headers.guest_base || !module_headers.valid())
         me_stop_import("RtlImageXexHeaderField_invalid_module_header", ctx);
     const uint32_t key = ctx.r4.u32;
@@ -298,7 +362,7 @@ PPC_FUNC(__imp__RtlImageXexHeaderField) {
         key, found ? "true" : "false", value);
     ctx.r3.u64 = value;
 }
-PPC_FUNC(__imp__XexCheckExecutablePrivilege) {
+ME_IMPORT(__imp__XexCheckExecutablePrivilege) {
     const uint32_t bit = ctx.r3.u32;
     if (bit >= 32) me_stop_import("XexCheckExecutablePrivilege_invalid_bit", ctx);
     uint32_t flags = 0;
@@ -307,6 +371,30 @@ PPC_FUNC(__imp__XexCheckExecutablePrivilege) {
     std::printf("{\"event\":\"executable_privilege\",\"bit\":%u,\"enabled\":%u}\n", bit, ctx.r3.u32);
 }
 
+// End (exclusive) of the contiguous interval of words accepted by word_writable that
+// contains this aligned address, or 0 if the word is not writable.
+static uint64_t writable_extent(uint32_t address) {
+    if (address & 3) return 0;
+    if (address == 0x60003000 || address == 0x60003020) return uint64_t(address) + 4;
+    if (address >= 0x60003080 && address <= 0x60003080 + 24) return 0x60003080 + 28;
+    if (address >= 0x70000000 && address <= 0x70100000 - 4) return 0x70100000;
+    for (unsigned i = 0; i < image_range_count; ++i)
+        if (address >= image_ranges[i].address && uint64_t(address) + 4 <= uint64_t(image_ranges[i].address) + image_ranges[i].size)
+            return (uint64_t(image_ranges[i].address) + image_ranges[i].size) & ~uint64_t(3);
+    if (const auto* a = physical_memory.find(address))
+        return uint64_t(address) + (uint64_t(a->physical) + a->size - MePhysicalMemory::physical(address));
+    for (const auto& t : threads) {
+        if (address >= t->low && uint64_t(address) + 4 <= t->high) return t->high;
+        if (address >= t->pcr && uint64_t(address) + 4 <= uint64_t(t->pcr) + 0x2000) return uint64_t(t->pcr) + 0x2000;
+        if (address >= t->tls && uint64_t(address) + 4 <= uint64_t(t->tls) + tls_slots * 4) return uint64_t(t->tls) + tls_slots * 4;
+    }
+    for (const auto& r : virtual_memory.regions)
+        if (address >= r.base && uint64_t(address) + 4 <= uint64_t(r.base) + r.size) {
+            const uint64_t page = (address - r.base) / r.page;
+            return r.committed[page] ? std::min(uint64_t(r.base) + (page + 1) * r.page, uint64_t(r.base) + r.size) : 0;
+        }
+    return 0;
+}
 static bool word_writable(uint32_t address) {
     if (address & 3) return false;
     if (address == 0x60003000 || address == 0x60003020) return true;
@@ -334,7 +422,7 @@ static std::shared_ptr<ThreadRecord> thread_by_pointer(uint32_t pointer) {
     for (auto& t : threads) if (t->kthread == pointer) return t;
     return {};
 }
-PPC_FUNC(__imp__ObReferenceObjectByHandle) {
+ME_IMPORT(__imp__ObReferenceObjectByHandle) {
     auto t = find_thread(ctx.r3.u32);
     if (!t) { ctx.r3.u64 = 0xc0000008; return; }
     const auto type = ctx.r4.u32, output = ctx.r5.u32;
@@ -348,12 +436,12 @@ PPC_FUNC(__imp__ObReferenceObjectByHandle) {
     ++t->references; if (output) put_word(output, t->kthread);
     ctx.r3.u64 = 0;
 }
-PPC_FUNC(__imp__ObDereferenceObject) {
+ME_IMPORT(__imp__ObDereferenceObject) {
     auto t = thread_by_pointer(ctx.r3.u32);
     if (!t || !t->references) me_stop_import("ObDereferenceObject_invalid_reference", ctx);
     --t->references; ctx.r3.u64 = 0;
 }
-PPC_FUNC(__imp__KeSetAffinityThread) {
+ME_IMPORT(__imp__KeSetAffinityThread) {
     auto t = thread_by_pointer(ctx.r3.u32);
     if (!t) { ctx.r3.u64 = 0xc0000008; return; }
     const auto mask = ctx.r4.u32, output = ctx.r5.u32;
@@ -366,7 +454,7 @@ PPC_FUNC(__imp__KeSetAffinityThread) {
     put_word(t->pcr + 0x110, 1u << cpu);
     ctx.r3.u64 = 0;
 }
-PPC_FUNC(__imp__XamLoaderGetLaunchDataSize) {
+ME_IMPORT(__imp__XamLoaderGetLaunchDataSize) {
     // Standalone cold launch: no title-to-title launch payload was supplied.
     if (!ctx.r3.u32) { ctx.r3.u64 = 87; return; }
     if (!word_writable(ctx.r3.u32)) me_stop_import("launch_data_size_invalid_pointer", ctx);
@@ -377,13 +465,19 @@ static bool checked_span(uint32_t address, uint32_t size, bool reading = false) 
     if (reading && address >= 0x60002000 && uint64_t(address) + size <= 0x60002400) return true;
     if (reading && address >= 0x60003100 && uint64_t(address) + size <= 0x60003108) return true;
     if (reading && address >= 0x60003120 && uint64_t(address) + size <= 0x60003124) return true;
-    for (uint64_t at = address & ~3u; at < uint64_t(address) + size; at += 4)
-        if (!word_writable(uint32_t(at))) return false;
+    // Walk contiguous writable intervals instead of single words (same result as
+    // word_writable on every word; a 128 KiB read buffer is a few steps, not 32768).
+    const uint64_t end = uint64_t(address) + size;
+    for (uint64_t at = address & ~3u; at < end;) {
+        const uint64_t next = writable_extent(uint32_t(at));
+        if (next <= at) return false;
+        at = next;
+    }
     return true;
 }
 // Initial guest-console configuration: English, 720p, fixed UTC timezone.
 // These are runtime defaults, not settings extracted from the user's console.
-PPC_FUNC(__imp__ExGetXConfigSetting) {
+ME_IMPORT(__imp__ExGetXConfigSetting) {
     const uint16_t category = ctx.r3.u16, setting = ctx.r4.u16, capacity = ctx.r6.u16;
     const auto output = ctx.r5.u32, required = ctx.r7.u32;
     if (category != 3 || !((setting>=1 && setting<=7) || setting==9 || setting==10 || setting==12)) me_stop_import("XConfig_setting_not_implemented", ctx);
@@ -420,7 +514,7 @@ static void query_video_mode(PPCContext& ctx) {
 }
 struct TitleTerminateNotification { uint32_t routine, priority; };
 static std::vector<TitleTerminateNotification> title_terminate_notifications;
-PPC_FUNC(__imp__ExRegisterTitleTerminateNotification) {
+ME_IMPORT(__imp__ExRegisterTitleTerminateNotification) {
     const auto registration = ctx.r3.u32;
     if (!checked_span(registration, 16, true)) me_stop_import("title_termination_registration_invalid", ctx);
     const auto routine = load_word(registration), priority = load_word(registration + 4);
@@ -436,21 +530,21 @@ PPC_FUNC(__imp__ExRegisterTitleTerminateNotification) {
     }
     std::printf("{\"event\":\"title_termination_registration\",\"create\":%s,\"routine\":\"%08x\",\"priority\":%u,\"count\":%zu}\n",ctx.r4.u32 ? "true":"false",routine,priority,title_terminate_notifications.size());
 }
-PPC_FUNC(__imp__VdCallGraphicsNotificationRoutines) {
+ME_IMPORT(__imp__VdCallGraphicsNotificationRoutines) {
     // RegisterGraphicsNotification remains a stop import: no subscribers can exist.
     if (ctx.r3.u32 != 1 || !checked_span(ctx.r4.u32, 8, true))
         me_stop_import("graphics_notification_request_invalid", ctx);
     std::printf("{\"event\":\"graphics_notifications\",\"subscribers\":0,\"scaling0\":\"%08x\",\"scaling1\":\"%08x\"}\n",load_word(ctx.r4.u32),load_word(ctx.r4.u32+4));
     ctx.r3.u64 = 0;
 }
-PPC_FUNC(__imp__VdRetrainEDRAMWorker) {
+ME_IMPORT(__imp__VdRetrainEDRAMWorker) {
     if (!gpu_explore_mode || !game_gpu_ready || ctx.r3.u32)
         me_stop_import("EDRAM_worker_requires_known_explore_case", ctx);
     // Compatibility probe only: pinned SDK also returns zero here. No hardware training.
     std::puts("{\"event\":\"edram_worker_compat\",\"hardware_training\":false,\"result\":0}");
     ctx.r3.u64 = 0;
 }
-PPC_FUNC(__imp__VdRetrainEDRAM) {
+ME_IMPORT(__imp__VdRetrainEDRAM) {
     if (!gpu_explore_mode || !game_gpu_ready || ctx.r5.u32 != 4096 || ctx.r8.u32 != 2048 ||
         !checked_span(ctx.r4.u32, 4) || !checked_span(ctx.r6.u32, 4) || !checked_span(ctx.r7.u32, 8))
         me_stop_import("EDRAM_retrain_requires_known_explore_case", ctx);
@@ -460,54 +554,86 @@ PPC_FUNC(__imp__VdRetrainEDRAM) {
 }
 static MeXmaRegisters xma_registers;
 static MeXmaContextPool xma_context_pool;
+// XMA decoder contexts (xbox/audio/xma_bridge.cpp: RexGlue XmaContext + FFmpeg).
+extern "C" int me_xma_bridge_setup(uint8_t* guest_base,uint32_t context_physical);
+extern "C" void me_xma_bridge_allocate(unsigned id);
+extern "C" void me_xma_bridge_release(unsigned id);
+extern "C" int me_xma_bridge_kick(unsigned id);
+extern "C" void me_xma_bridge_lock(unsigned id);
+extern "C" void me_xma_bridge_clear(unsigned id);
+extern "C" int me_xma_bridge_enabled(unsigned id);
+extern "C" bool me_xma_trace_release(uint32_t physical,uint32_t size);
 static bool ensure_xma_context_memory(){
     if(xma_registers.context_physical)return true;
     const auto alias=physical_memory.allocate(MeXmaContextPool::context_count*MeXmaContextPool::context_bytes,0x204,0,UINT32_MAX,256);
     if(!alias)return false;
-    xma_registers.context_physical=MePhysicalMemory::physical(alias);
-    std::printf("{\"event\":\"xma_context_memory\",\"physical\":\"%08x\",\"contexts\":320,\"bytes_per_context\":64,\"decoder_ready\":false}\n",xma_registers.context_physical);
+    const auto physical=MePhysicalMemory::physical(alias);
+    if(!me_xma_bridge_setup(guest,physical))return false;
+    xma_registers.context_physical=physical;
+    std::printf("{\"event\":\"xma_context_memory\",\"physical\":\"%08x\",\"contexts\":320,\"bytes_per_context\":64,\"decoder_ready\":true}\n",xma_registers.context_physical);
     return true;
 }
-PPC_FUNC(__imp__XMACreateContext) {
+ME_IMPORT(__imp__XMACreateContext) {
     if(!gpu_explore_mode || !word_writable(ctx.r3.u32))me_stop_import("xma_create_context_output_invalid",ctx);
     uint32_t physical=0;
     if(ensure_xma_context_memory())physical=xma_context_pool.acquire(xma_registers.context_physical);
     const uint32_t address=physical?0xa0000000u+physical:0;
-    if(address)std::memset(guest+address,0,MeXmaContextPool::context_bytes);
+    if(address){std::memset(guest+address,0,MeXmaContextPool::context_bytes);me_xma_bridge_allocate((physical-xma_registers.context_physical)/MeXmaContextPool::context_bytes);}
     put_word(ctx.r3.u32,address);ctx.r3.u64=address?0:0xc0000017;
-    static unsigned calls=0;if(++calls<=8 || !address)std::printf("{\"event\":\"xma_context_created\",\"address\":\"%08x\",\"status\":\"%08x\",\"decoder_ready\":false}\n",address,ctx.r3.u32);
+    static unsigned calls=0;if(++calls<=8 || !address)std::printf("{\"event\":\"xma_context_created\",\"address\":\"%08x\",\"status\":\"%08x\",\"decoder_ready\":true}\n",address,ctx.r3.u32);
 }
-PPC_FUNC(__imp__XMAReleaseContext) {
+ME_IMPORT(__imp__XMAReleaseContext) {
     if(!gpu_explore_mode)me_stop_import("xma_release_context_requires_explore",ctx);
     const auto physical=MePhysicalMemory::physical(ctx.r3.u32);
     if(!xma_context_pool.release(xma_registers.context_physical,physical))me_stop_import("xma_release_context_invalid_or_not_allocated",ctx);
-    std::memset(guest+0xa0000000u+physical,0,MeXmaContextPool::context_bytes);ctx.r3.u64=0;
+    // XmaContext::Release resets the decoder stream and zeroes the 64-byte context.
+    me_xma_bridge_release((physical-xma_registers.context_physical)/MeXmaContextPool::context_bytes);ctx.r3.u64=0;
 }
 uint64_t me_xma_load(uint64_t address, unsigned size) {
+    static MeImportCounter counter("hook_xma_load"); counter.calls.fetch_add(1, std::memory_order_relaxed);
+    MeKernelLock kernel_lock;
     if (!gpu_explore_mode || !MeXmaRegisters::valid(address, size))
         me_stop_import("XMA_requires_known_explore_access", *active_context);
     if (!xma_registers.context_physical && address == 0x7fea1800) {
         if(!ensure_xma_context_memory())me_stop_import("XMA_context_memory_unavailable", *active_context);
     }
     uint64_t value;
-    if (!xma_registers.read(address, size, value)) me_stop_import("XMA_register_read_not_implemented", *active_context);
+    if (!xma_registers.read(address, size, value)) {
+        std::printf("{\"event\":\"xma_unsupported_read\",\"address\":\"%08x\",\"size\":%u}\n", uint32_t(address), size);
+        me_stop_import("XMA_register_read_not_implemented", *active_context);
+    }
+    static unsigned reads=0;if(++reads>16 && (reads&(reads-1)))return value;
     std::printf("{\"event\":\"xma_register_read\",\"address\":\"%08x\",\"value\":\"%08x\"}\n", uint32_t(address), uint32_t(value));
     return value;
 }
 void me_xma_store(uint64_t address, unsigned size, uint64_t value) {
+    static MeImportCounter counter("hook_xma_store"); counter.calls.fetch_add(1, std::memory_order_relaxed);
+    MeKernelLock kernel_lock;
     if(gpu_explore_mode && MeXmaRegisters::valid(address,size) && address>=0x7fea1a80 && address<=0x7fea1aa4){
         const uint32_t mask=__builtin_bswap32(uint32_t(value));
         const unsigned first=unsigned(address-0x7fea1a80)/4*32;
         for(unsigned i=0;i<32;++i)if((mask&(1u<<i)) && !xma_context_pool.allocated[first+i])
             me_stop_import("XMA_clear_requires_owned_idle_context",*active_context);
+        // XmaContext::Clear: input/output valid flags and offsets reset, decoder stream reset.
+        for(unsigned i=0;i<32;++i)if(mask&(1u<<i))me_xma_bridge_clear(first+i);
+        static unsigned calls=0;if(++calls<=8)std::printf("{\"event\":\"xma_context_clear\",\"first_index\":%u,\"mask\":\"%08x\",\"decoder_ready\":true}\n",first,mask);
+        return;
+    }
+    // Kick (0x1940..0x1964): enable and decode inline; Lock (0x1A40..0x1A64): disable and
+    // wait for an active decode. Same semantics as RexGlue XmaDecoder::WriteRegister.
+    const bool kick=address>=0x7fea1940 && address<=0x7fea1964, lock=address>=0x7fea1a40 && address<=0x7fea1a64;
+    if(gpu_explore_mode && MeXmaRegisters::valid(address,size) && (kick || lock)){
+        const uint32_t mask=__builtin_bswap32(uint32_t(value));
+        const unsigned first=unsigned(address-(kick?0x7fea1940:0x7fea1a40))/4*32;
+        for(unsigned i=0;i<32;++i)if((mask&(1u<<i)) && !xma_context_pool.allocated[first+i])
+            me_stop_import(kick?"XMA_kick_requires_owned_context":"XMA_lock_requires_owned_context",*active_context);
+        unsigned decoded=0;
         for(unsigned i=0;i<32;++i)if(mask&(1u<<i)){
-            const uint32_t context=0xa0000000u+xma_registers.context_physical+(first+i)*64;
-            put_word(context,load_word(context)&~((3u<<20)|(31u<<27)));
-            put_word(context+4,load_word(context+4)&~(1u<<31));
-            put_word(context+8,(load_word(context+8)&~0x03ffffffu)|32u);
-            put_word(context+36,load_word(context+36)&~31u);
+            if(kick)decoded+=me_xma_bridge_kick(first+i);else me_xma_bridge_lock(first+i);
         }
-        static unsigned calls=0;if(++calls<=8)std::printf("{\"event\":\"xma_context_clear\",\"first_index\":%u,\"mask\":\"%08x\",\"decoder_ready\":false}\n",first,mask);
+        static unsigned kicks=0,locks=0;
+        unsigned& calls=kick?kicks:locks;++calls;
+        if(calls<=8 || !(calls&(calls-1)))std::printf("{\"event\":\"xma_context_%s\",\"first_index\":%u,\"mask\":\"%08x\",\"worked\":%u,\"calls\":%u}\n",kick?"kick":"lock",first,mask,decoded,calls);
         return;
     }
     if (!gpu_explore_mode || !xma_registers.write(address, size, value)) {
@@ -515,54 +641,64 @@ void me_xma_store(uint64_t address, unsigned size, uint64_t value) {
         me_stop_import("XMA_register_write_not_implemented", *active_context);
     }
 }
+// Spinlocks and IRQL without the kernel lock. IRQL is a byte in the calling thread's
+// own PCR; a spinlock is one guest word taken by CAS 0 -> PCR address, as the Xbox
+// kernel does. Spinners yield; a spinner that holds the execution gate (serialized
+// mode) releases it while waiting so the owner can run.
+static uint32_t* sl_word(uint32_t address) { return reinterpret_cast<uint32_t*>(guest + address); }
+static bool sl_try(uint32_t address, uint32_t owner) {
+    uint32_t expected = 0;
+    return __atomic_compare_exchange_n(sl_word(address), &expected, __builtin_bswap32(owner), false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED);
+}
+static uint32_t sl_owner(uint32_t address) { return __builtin_bswap32(__atomic_load_n(sl_word(address), __ATOMIC_ACQUIRE)); }
+static void sl_acquire(uint32_t address, uint32_t owner) {
+    for (unsigned spin = 0; !sl_try(address, owner); ++spin) {
+        if (spin < 64) { asm volatile("yield" ::: "memory"); continue; }
+        if (execution_gate.owned()) { execution_gate.unlock(); std::this_thread::yield(); execution_gate.lock(); }
+        else std::this_thread::yield();
+    }
+}
+static bool sl_log(uint64_t& calls) { return ++calls <= 8 || !(calls & (calls - 1)); }
 PPC_FUNC(__imp__KfAcquireSpinLock) {
     const auto address = ctx.r3.u32;
-    if ((address & 3) || !word_writable(address) || ctx.r13.u32 != pcr_address ||
-        !word_writable(pcr_address + 0x18) || guest[pcr_address + 0x18] > 2)
+    if ((address & 3) || address > 0xfffffffcu || ctx.r13.u32 != pcr_address || guest[pcr_address + 0x18] > 2)
         me_stop_import("spinlock_invalid_context_or_address", ctx);
-    if (load_word(address) == pcr_address) me_stop_import("spinlock_recursive_acquire", ctx);
+    if (sl_owner(address) == pcr_address) me_stop_import("spinlock_recursive_acquire", ctx);
     const auto old_irql = guest[pcr_address + 0x18];
     guest[pcr_address + 0x18] = 2;
-    // All guest accesses are serialized by execution_gate. Release it while
-    // contended so the owner can run; no host pointers enter the guest lock.
-    std::unique_lock<MeExecutionGate> gate(execution_gate, std::adopt_lock);
-    while (load_word(address)) state_changed.wait_for(gate, std::chrono::milliseconds(1));
-    put_word(address, pcr_address);
-    gate.release();
+    sl_acquire(address, pcr_address);
     ctx.r3.u64 = old_irql;
-    std::printf("{\"event\":\"spinlock_acquired\",\"address\":\"%08x\",\"owner\":\"%08x\",\"old_irql\":%u}\n", address, pcr_address, old_irql);
+    static thread_local uint64_t calls = 0;
+    if (sl_log(calls)) std::printf("{\"event\":\"spinlock_acquired\",\"address\":\"%08x\",\"owner\":\"%08x\",\"old_irql\":%u,\"call\":%llu}\n", address, pcr_address, old_irql, (unsigned long long)calls);
 }
 PPC_FUNC(__imp__KfReleaseSpinLock) {
     const auto address = ctx.r3.u32, old_irql = ctx.r4.u32;
-    if ((address & 3) || !word_writable(address) || ctx.r13.u32 != pcr_address ||
-        load_word(address) != pcr_address || old_irql > 2 || guest[pcr_address + 0x18] != 2)
+    if ((address & 3) || address > 0xfffffffcu || ctx.r13.u32 != pcr_address ||
+        sl_owner(address) != pcr_address || old_irql > 2 || guest[pcr_address + 0x18] != 2)
         me_stop_import("spinlock_release_invalid_owner_or_irql", ctx);
-    put_word(address, 0); guest[pcr_address + 0x18] = uint8_t(old_irql);
-    state_changed.notify_all();
-    std::printf("{\"event\":\"spinlock_released\",\"address\":\"%08x\",\"restored_irql\":%u}\n", address, old_irql);
+    __atomic_store_n(sl_word(address), 0u, __ATOMIC_RELEASE); guest[pcr_address + 0x18] = uint8_t(old_irql);
+    static thread_local uint64_t calls = 0;
+    if (sl_log(calls)) std::printf("{\"event\":\"spinlock_released\",\"address\":\"%08x\",\"restored_irql\":%u,\"call\":%llu}\n", address, old_irql, (unsigned long long)calls);
 }
 PPC_FUNC(__imp__KeAcquireSpinLockAtRaisedIrql) {
     const auto address = ctx.r3.u32;
-    if ((address & 3) || !word_writable(address) || ctx.r13.u32 != pcr_address ||
-        !word_writable(pcr_address + 0x18) || guest[pcr_address + 0x18] < 2 ||
-        load_word(address) == pcr_address)
+    if ((address & 3) || address > 0xfffffffcu || ctx.r13.u32 != pcr_address ||
+        guest[pcr_address + 0x18] < 2 || sl_owner(address) == pcr_address)
         me_stop_import("raised_spinlock_invalid_context_or_recursive", ctx);
-    std::unique_lock<MeExecutionGate> gate(execution_gate, std::adopt_lock);
-    while (load_word(address)) state_changed.wait_for(gate, std::chrono::milliseconds(1));
-    put_word(address, pcr_address); gate.release();
-    static thread_local uint64_t calls=0;
-    if(++calls<=8 || !(calls&(calls-1)))std::printf("{\"event\":\"raised_spinlock_acquired\",\"address\":\"%08x\",\"owner\":\"%08x\",\"irql\":%u,\"call\":%llu}\n",address,pcr_address,guest[pcr_address+0x18],(unsigned long long)calls);
+    sl_acquire(address, pcr_address);
+    static thread_local uint64_t calls = 0;
+    if (sl_log(calls)) std::printf("{\"event\":\"raised_spinlock_acquired\",\"address\":\"%08x\",\"owner\":\"%08x\",\"irql\":%u,\"call\":%llu}\n", address, pcr_address, guest[pcr_address + 0x18], (unsigned long long)calls);
 }
 PPC_FUNC(__imp__KeReleaseSpinLockFromRaisedIrql) {
     const auto address = ctx.r3.u32;
-    if ((address & 3) || !word_writable(address) || ctx.r13.u32 != pcr_address ||
-        load_word(address) != pcr_address || guest[pcr_address + 0x18] < 2)
+    if ((address & 3) || address > 0xfffffffcu || ctx.r13.u32 != pcr_address ||
+        sl_owner(address) != pcr_address || guest[pcr_address + 0x18] < 2)
         me_stop_import("raised_spinlock_invalid_release", ctx);
-    put_word(address, 0); state_changed.notify_all();
-    static thread_local uint64_t calls=0;
-    if(++calls<=8 || !(calls&(calls-1)))std::printf("{\"event\":\"raised_spinlock_released\",\"address\":\"%08x\",\"irql\":%u,\"call\":%llu}\n",address,guest[pcr_address+0x18],(unsigned long long)calls);
+    __atomic_store_n(sl_word(address), 0u, __ATOMIC_RELEASE);
+    static thread_local uint64_t calls = 0;
+    if (sl_log(calls)) std::printf("{\"event\":\"raised_spinlock_released\",\"address\":\"%08x\",\"irql\":%u,\"call\":%llu}\n", address, guest[pcr_address + 0x18], (unsigned long long)calls);
 }
-PPC_FUNC(__imp__VdGetSystemCommandBuffer) {
+ME_IMPORT(__imp__VdGetSystemCommandBuffer) {
     const auto buffer = ctx.r3.u32, identifier = ctx.r4.u32;
     if (!gpu_explore_mode || !game_gpu_ready || ctx.lr != 0x82815008 ||
         !checked_span(buffer, 0x94) || !checked_span(identifier, 4) ||
@@ -575,7 +711,7 @@ PPC_FUNC(__imp__VdGetSystemCommandBuffer) {
     put_word(identifier, 0xbeef0001);
     std::printf("{\"event\":\"system_command_buffer_metadata\",\"buffer\":\"%08x\",\"identifier_output\":\"%08x\",\"compatibility_markers\":true,\"gpu_buffer_created\":false}\n", buffer, identifier);
 }
-PPC_FUNC(__imp__VdPersistDisplay) {
+ME_IMPORT(__imp__VdPersistDisplay) {
     const auto request=ctx.r3.u32,output=ctx.r4.u32;
     if(!gpu_explore_mode || !game_gpu_ready || ctx.lr!=0x82815458 ||
        !checked_span(request,12,true) || !word_writable(output))me_stop_import("persist_display_unknown_request",ctx);
@@ -586,7 +722,7 @@ PPC_FUNC(__imp__VdPersistDisplay) {
     std::puts("{\"event\":\"display_persistence_unavailable\",\"presenter\":false,\"result\":0,\"allocation_created\":false}");
     ctx.r3.u64=0;
 }
-PPC_FUNC(__imp__VdInitializeScalerCommandBuffer) {
+ME_IMPORT(__imp__VdInitializeScalerCommandBuffer) {
     if(!gpu_explore_mode || !game_gpu_ready || !checked_span(ctx.r1.u32+100,12,true))me_stop_import("scaler_requires_gpu_and_stack",ctx);
     const auto destination=load_word(ctx.r1.u32+100),count=load_word(ctx.r1.u32+108);
     std::printf("{\"event\":\"scaler_request\",\"source_xy\":\"%08x\",\"source_wh\":\"%08x\",\"output_xy\":\"%08x\",\"output_wh\":\"%08x\",\"front_wh\":\"%08x\",\"destination\":\"%08x\",\"count\":%u}\n",ctx.r3.u32,ctx.r4.u32,ctx.r5.u32,ctx.r6.u32,ctx.r7.u32,destination,count);
@@ -597,7 +733,7 @@ PPC_FUNC(__imp__VdInitializeScalerCommandBuffer) {
     for(uint32_t i=0;i<count;++i)put_word(destination+i*4,0x80000000);
     ctx.r3.u64=count;
 }
-PPC_FUNC(__imp__VdSetDisplayMode) {
+ME_IMPORT(__imp__VdSetDisplayMode) {
     // Only the existing 720p RGB guest profile; Android display is unchanged.
     if (!gpu_explore_mode || !game_gpu_ready || ctx.r3.u32 != 0x40000000)
         me_stop_import("VdSetDisplayMode_unsupported_profile", ctx);
@@ -622,7 +758,7 @@ PPC_FUNC(sub_828138E0) {
     __imp__sub_828138E0(ctx,base);
     if(trace)trace_gpu_submission("flush_end",device,call);
 }
-PPC_FUNC(__imp__VdSwap) {
+ME_IMPORT(__imp__VdSwap) {
     if (!gpu_explore_mode || !game_gpu_ready || ctx.lr != 0x8281506c ||
         !checked_span(ctx.r3.u32, 256) || !checked_span(ctx.r4.u32, 24, true) ||
         !checked_span(ctx.r6.u32, 0x94, true) || ctx.r7.u32 != 0xbeef0001 ||
@@ -649,7 +785,7 @@ PPC_FUNC(__imp__VdSwap) {
     if(call<=8 || !(call&(call-1)))trace_gpu_submission("swap_generated",ctx.r31.u32,call);
     std::printf("{\"event\":\"swap_commands_generated\",\"buffer\":\"%08x\",\"frontbuffer_physical\":\"%08x\",\"width\":%u,\"height\":%u,\"dwords\":64,\"identifier_completion_emulated\":false}\n", ctx.r3.u32, physical, width, height);
 }
-PPC_FUNC(__imp__MmSetAddressProtect) {
+ME_IMPORT(__imp__MmSetAddressProtect) {
     const auto address = ctx.r3.u32, size = ctx.r4.u32, protection = ctx.r5.u32;
     const auto* allocation = physical_memory.find(address);
     const uint64_t start = uint64_t(address) & ~uint64_t(page_size - 1);
@@ -661,12 +797,12 @@ PPC_FUNC(__imp__MmSetAddressProtect) {
     if (!allocation || !size || (protection != 4 && protection != 0x204 && protection != 0x404) ||
         uint64_t(physical) + size > uint64_t(allocation->physical) + allocation->size ||
         end > 0x100000000ull || start < address - (physical - allocation->physical) ||
-        mprotect(guest + start, end - start, PROT_READ | PROT_WRITE))
+        (me_gpu_write_watch.host_write(uint32_t(start), uint32_t(end - start)), mprotect(guest + start, end - start, PROT_READ | PROT_WRITE)))
         me_stop_import("MmSetAddressProtect_unsupported_or_invalid_range", ctx);
     std::printf("{\"event\":\"physical_address_protect\",\"address\":\"%08x\",\"size\":%u,\"protection\":\"%08x\",\"host_access\":\"rw\",\"xbox_cache_policy_emulated\":false}\n", address, size, protection);
     // Void kernel export: preserve registers rather than inventing a status.
 }
-PPC_FUNC(__imp__VdIsHSIOTrainingSucceeded) {
+ME_IMPORT(__imp__VdIsHSIOTrainingSucceeded) {
     if (!gpu_explore_mode || !game_gpu_ready)
         me_stop_import("HSIO_query_requires_gpu_explore", ctx);
     // Virtual GPU compatibility: SetupExternalGpu must already have succeeded.
@@ -675,18 +811,18 @@ PPC_FUNC(__imp__VdIsHSIOTrainingSucceeded) {
     std::puts("{\"event\":\"hsio_training_query\",\"hardware_training\":false,\"backend_ready\":true,\"compatibility_result\":1}");
     ctx.r3.u64 = 1;
 }
-PPC_FUNC(__imp__VdQueryVideoFlags) {
+ME_IMPORT(__imp__VdQueryVideoFlags) {
     // Pinned SDK derives these bits from the guest display profile.
     ctx.r3.u64 = 1 | 2; // widescreen and width >= 1024, width < 1920.
 }
-PPC_FUNC(__imp__VdGetCurrentDisplayGamma) {
+ME_IMPORT(__imp__VdGetCurrentDisplayGamma) {
     const auto type = ctx.r3.u32, power = ctx.r4.u32;
     if (!checked_span(type, 4) || !checked_span(power, 4)) me_stop_import("display_gamma_output_invalid", ctx);
     const float gamma = 2.22222233f;
     uint32_t bits; std::memcpy(&bits, &gamma, 4);
     put_word(type, 2); put_word(power, bits); // SDK guest BT.709 profile, not tablet calibration.
 }
-PPC_FUNC(__imp__VdGetCurrentDisplayInformation) {
+ME_IMPORT(__imp__VdGetCurrentDisplayInformation) {
     const auto output = ctx.r3.u32;
     if (!checked_span(output, 0x58)) me_stop_import("display_information_output_invalid", ctx);
     std::memset(guest + output, 0, 0x58);
@@ -701,14 +837,14 @@ PPC_FUNC(__imp__VdGetCurrentDisplayInformation) {
     half(0x48, 1280); half(0x4a, 720); put_word(output + 0x4c, 0x42700000);
     half(0x56, 1280);
 }
-PPC_FUNC(__imp__XGetVideoMode) { query_video_mode(ctx); }
-PPC_FUNC(__imp__VdQueryVideoMode) { query_video_mode(ctx); }
-PPC_FUNC(__imp__VdInitializeEngines) {
+ME_IMPORT(__imp__XGetVideoMode) { query_video_mode(ctx); }
+ME_IMPORT(__imp__VdQueryVideoMode) { query_video_mode(ctx); }
+ME_IMPORT(__imp__VdInitializeEngines) {
     std::printf("{\"event\":\"gpu_engine_request\",\"parameter\":\"%08x\",\"callback\":\"%08x\",\"argument\":\"%08x\",\"pfp\":\"%08x\",\"me\":\"%08x\",\"gpu_initialized\":false}\n",
         ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32);
     start_game_gpu(ctx);
 }
-PPC_FUNC(__imp__VdSetGraphicsInterruptCallback) {
+ME_IMPORT(__imp__VdSetGraphicsInterruptCallback) {
     if (!game_gpu_ready) me_stop_import("GPU_interrupt_before_initialization", ctx);
     const auto callback = ctx.r3.u32;
     if (callback && ((callback & 3) || callback < PPC_CODE_BASE || callback >= PPC_CODE_BASE + PPC_CODE_SIZE || !PPC_LOOKUP_FUNC(guest, callback)))
@@ -716,7 +852,7 @@ PPC_FUNC(__imp__VdSetGraphicsInterruptCallback) {
     me_gpu_irq_callback(callback, ctx.r4.u32);
     std::printf("{\"event\":\"game_gpu_interrupt_callback\",\"callback\":\"%08x\"}\n",callback);
 }
-PPC_FUNC(__imp__VdSetSystemCommandBufferGpuIdentifierAddress) {
+ME_IMPORT(__imp__VdSetSystemCommandBufferGpuIdentifierAddress) {
     const auto address = ctx.r3.u32;
     if (address) {
         if (!gpu_explore_mode) me_stop_import("GPU_system_buffer_identifier_nonnull_unsupported", ctx);
@@ -727,42 +863,72 @@ PPC_FUNC(__imp__VdSetSystemCommandBufferGpuIdentifierAddress) {
     gpu_identifier_address = address;
     std::printf("{\"event\":\"gpu_identifier_registration\",\"address\":\"%08x\",\"registration_only\":true,\"completion_emulated\":false}\n",address);
 }
-PPC_FUNC(__imp__KiApcNormalRoutineNop) {
+ME_IMPORT(__imp__KiApcNormalRoutineNop) {
     // This exported routine itself does nothing; APC queue/dispatch remains unsupported.
     ctx.r3.u64 = 0;
 }
 
-PPC_FUNC(__imp__VdInitializeRingBuffer) {
+ME_IMPORT(__imp__VdInitializeRingBuffer) {
     if (!game_gpu_ready || !gpu_physical.bind_ring(ctx.r3.u32, ctx.r4.u32))
         me_stop_import("GPU_ring_invalid_or_uninitialized", ctx);
     me_gpu_ring(ctx.r3.u32, ctx.r4.u32);
     std::printf("{\"event\":\"game_gpu_ring\",\"physical\":\"%08x\",\"size_log2\":%u}\n",ctx.r3.u32,ctx.r4.u32);
 }
-PPC_FUNC(__imp__VdEnableRingBufferRPtrWriteBack) {
+ME_IMPORT(__imp__VdEnableRingBufferRPtrWriteBack) {
     if (!game_gpu_ready || ctx.r4.u32 > 19 || (ctx.r3.u32 & 3) || !gpu_physical.resolve(ctx.r3.u32, 4))
         me_stop_import("GPU_read_pointer_invalid_or_uninitialized", ctx);
     me_gpu_readback(ctx.r3.u32, ctx.r4.u32);
     gpu_read_pointer_physical = ctx.r3.u32;
     std::printf("{\"event\":\"game_gpu_read_pointer\",\"physical\":\"%08x\"}\n",ctx.r3.u32);
 }
-PPC_FUNC(__imp__MmAllocatePhysicalMemoryEx) {
+ME_IMPORT(__imp__MmAllocatePhysicalMemoryEx) {
     if (!MePhysicalMemory::supports(ctx.r3.u32, ctx.r5.u32)) me_stop_import("physical_memory_unsupported_flags", ctx);
     const auto size = ctx.r4.u32, protection = ctx.r5.u32;
     ctx.r3.u64 = physical_memory.allocate(size, protection, ctx.r6.u32, ctx.r7.u32, ctx.r8.u32);
     std::printf("{\"event\":\"physical_allocate\",\"requested_size\":%u,\"protection\":\"%08x\",\"address\":\"%08x\"}\n", size, protection, ctx.r3.u32);
 }
-PPC_FUNC(__imp__MmGetPhysicalAddress) {
+ME_IMPORT(__imp__MmGetPhysicalAddress) {
     if (!physical_memory.find(ctx.r3.u32)) me_stop_import("MmGetPhysicalAddress_unknown_allocation", ctx);
     ctx.r3.u64 = MePhysicalMemory::physical(ctx.r3.u32);
 }
-PPC_FUNC(__imp__MmQueryAllocationSize) {
+ME_IMPORT(__imp__MmQueryAllocationSize) {
     auto* allocation = physical_memory.find(ctx.r3.u32);
     ctx.r3.u64 = allocation ? allocation->size : 0;
 }
-PPC_FUNC(__imp__MmFreePhysicalMemory) {
+ME_IMPORT(__imp__MmFreePhysicalMemory) {
+    if(const auto* a=physical_memory.find(ctx.r4.u32)){
+        if(me_xma_trace_release(a->physical,a->size)){
+            uint32_t sp=ctx.r1.u32;
+            for(unsigned depth=0;depth<12 && checked_span(sp,4,true);++depth){
+                const uint32_t caller=load_word(sp);
+                if(caller<=sp || !checked_span(caller-8,8,true))break;
+                std::printf("{\"event\":\"xma_free_stack\",\"depth\":%u,\"lr\":\"%08x\"}\n",depth,load_word(caller-8));
+                sp=caller;
+            }
+        }
+        std::printf("{\"event\":\"physical_free\",\"address\":\"%08x\",\"physical\":\"%08x\",\"size\":%u,\"lr\":\"%08llx\"}\n",ctx.r4.u32,a->physical,a->size,(unsigned long long)ctx.lr);
+    }
     if (ctx.r3.u32 || !physical_memory.free(ctx.r4.u32)) me_stop_import("MmFreePhysicalMemory_unknown_type_or_allocation", ctx);
 }
+// Zero/short delays are frequent polling yields: in parallel mode they run without
+// the kernel lock (interval read directly from guest memory).
+static PPC_FUNC(me_delay_execution_locked);
 PPC_FUNC(__imp__KeDelayExecutionThread) {
+    static MeImportCounter counter("__imp__KeDelayExecutionThread"); counter.calls.fetch_add(1, std::memory_order_relaxed);
+    const auto pointer = ctx.r5.u32;
+    if (!guest_parallel || execution_gate.owned() || ctx.r3.u32 > 1 || ctx.r4.u32 || (pointer & 3) || pointer > 0xfffffff8u) {
+        me_delay_execution_locked(ctx, base); return;
+    }
+    uint64_t raw; std::memcpy(&raw, guest + pointer, 8); raw = __builtin_bswap64(raw);
+    if (int64_t(raw) > 0 || (0 - raw) > 600000000ull) { me_delay_execution_locked(ctx, base); return; }
+    static thread_local uint32_t fast_calls = 0;
+    if (++fast_calls <= 8 || !(fast_calls & (fast_calls - 1)))
+        std::printf("{\"event\":\"guest_delay\",\"thread\":\"%08x\",\"call\":%u,\"relative_100ns\":%llu,\"lr\":\"%08llx\",\"kernel_lock\":false}\n",thread_address,fast_calls,(unsigned long long)(0-raw),(unsigned long long)ctx.lr);
+    if (raw) std::this_thread::sleep_for(std::chrono::nanoseconds((0 - raw) * 100));
+    else me_zero_delay_yield();
+    ctx.r3.u64 = 0;
+}
+ME_IMPORT(me_delay_execution_locked) {
     if (ctx.r3.u32 > 1 || ctx.r4.u32) me_stop_import("KeDelayExecutionThread_unsupported_mode_or_apc", ctx);
     const auto pointer = ctx.r5.u32;
     if (!checked_span(pointer, 8, true)) me_stop_import("KeDelayExecutionThread_invalid_interval", ctx);
@@ -780,10 +946,10 @@ PPC_FUNC(__imp__KeDelayExecutionThread) {
     std::unique_lock<MeExecutionGate> lock(execution_gate, std::adopt_lock);
     lock.unlock();
     if (raw) std::this_thread::sleep_for(std::chrono::nanoseconds((0 - raw) * 100));
-    else std::this_thread::yield();
+    else me_zero_delay_yield();
     lock.lock(); lock.release(); ctx.r3.u64 = 0;
 }
-PPC_FUNC(__imp__NtCreateEvent) {
+ME_IMPORT(__imp__NtCreateEvent) {
     const auto output = ctx.r3.u32, attributes = ctx.r4.u32, type = ctx.r5.u32, state = ctx.r6.u32;
 
     std::string name;bool insensitive=false;
@@ -810,7 +976,7 @@ PPC_FUNC(__imp__NtCreateEvent) {
     std::printf("{\"event\":\"event_create\",\"handle\":\"%08x\",\"type\":%u,\"state\":%u,\"status\":\"%08x\"}\n", handle, type, state, status);
     ctx.r3.u64 = status;
 }
-PPC_FUNC(__imp__NtSetEvent) {
+ME_IMPORT(__imp__NtSetEvent) {
     const auto output = ctx.r4.u32;
     if (output && !word_writable(output)) me_stop_import("NtSetEvent_invalid_output_pointer", ctx);
     uint32_t previous = 0; const auto status = events.set(ctx.r3.u32, previous);
@@ -818,7 +984,7 @@ PPC_FUNC(__imp__NtSetEvent) {
     state_changed.notify_all();
     ctx.r3.u64 = status;
 }
-PPC_FUNC(__imp__NtClearEvent) { ctx.r3.u64 = events.clear(ctx.r3.u32); }
+ME_IMPORT(__imp__NtClearEvent) { ctx.r3.u64 = events.clear(ctx.r3.u32); }
 extern "C" void __imp__sub_82255468(PPCContext&,uint8_t*);
 PPC_FUNC(sub_82255468) {
     const auto caller=ctx.lr;const auto before=load_word(0x830dd060);
@@ -848,8 +1014,8 @@ PPC_FUNC(sub_8223CF38) {
 }
 static void trace_worker_poll(uint32_t object,uint32_t state,uint32_t index,uint32_t cs) {
     static thread_local uint32_t last_object=0,last_state=0,calls=0;
-    ++calls;if(calls>4 && object==last_object && state==last_state && (calls&(calls-1)))return;
-    last_object=object;last_state=state;
+    ++calls;if(calls>4 && (calls&(calls-1)))return; // count-throttled (state changes alternate constantly on the level)
+    last_object=object;last_state=state;MeKernelLock kernel_lock; // checked_span reads loader maps
     if(!checked_span(object,40,true))return;
     std::printf("{\"event\":\"worker_state_poll\",\"object\":\"%08x\",\"state\":%u,\"vtable\":\"%08x\",\"field4\":\"%08x\",\"field8\":\"%08x\",\"field12\":\"%08x\",\"field16\":\"%08x\",\"field20\":\"%08x\",\"field24\":\"%08x\",\"field28\":\"%08x\",\"field36\":\"%08x\"}\n",object,state,load_word(object),load_word(object+4),load_word(object+8),load_word(object+12),load_word(object+16),load_word(object+20),load_word(object+24),load_word(object+28),load_word(object+36));
     if(checked_span(cs,28,true))std::printf("{\"event\":\"worker_selection_lock\",\"index\":%u,\"critical_section\":\"%08x\",\"owner\":\"%08x\",\"thread\":\"%08x\",\"recursion\":%u}\n",index,cs,load_word(cs+24),thread_address,load_word(cs+20));
@@ -904,7 +1070,7 @@ static bool local_player_setting(uint32_t id,uint32_t& value,bool& unset){
  default:return false;
  }
 }
-PPC_FUNC(__imp__XamShowSigninUI) {
+ME_IMPORT(__imp__XamShowSigninUI) {
  if(!gpu_explore_mode)me_stop_import("signin_ui_outside_game_mode",ctx);
  if(ctx.r3.u32!=1){ctx.r3.u64=87;return;}
  const auto profile=me_guest_input().player();
@@ -916,13 +1082,13 @@ PPC_FUNC(__imp__XamShowSigninUI) {
  state_changed.notify_all();ctx.r3.u64=0;
  std::printf("{\"event\":\"local_signin_completed\",\"user\":0,\"name\":\"%s\",\"online\":false,\"notifications\":%d}\n",selected_local_player.name,shown+changed+hidden);
 }
-PPC_FUNC(__imp__XamUserGetSigninInfo) {
+ME_IMPORT(__imp__XamUserGetSigninInfo) {
  const auto user=ctx.r3.u32,out=ctx.r5.u32;
  if(!out || !checked_span(out,40,true)){ctx.r3.u64=0x80070057;return;}
  if(!local_player_signed_in || user){ctx.r3.u64=user>=4?0x80070057:0x80070525;return;}
  std::memset(guest+out,0,40);put_word(out,uint32_t(selected_local_player.xuid>>32));put_word(out+4,uint32_t(selected_local_player.xuid));put_word(out+12,1);std::memcpy(guest+out+24,selected_local_player.name,16);ctx.r3.u64=0;
 }
-PPC_FUNC(__imp__XamUserReadProfileSettings) {
+ME_IMPORT(__imp__XamUserReadProfileSettings) {
     if(!gpu_explore_mode)me_stop_import("profile_read_service_unavailable",ctx);
     const auto title=ctx.r3.u32,user=ctx.r4.u32,xuid_count=ctx.r5.u32,xuids=ctx.r6.u32;
     const auto count=ctx.r7.u32,ids=ctx.r8.u32,size_ptr=ctx.r9.u32,output=ctx.r10.u32;
@@ -951,14 +1117,14 @@ PPC_FUNC(__imp__XamUserReadProfileSettings) {
     std::printf("{\"event\":\"profile_settings_absent_user\",\"title\":\"%08x\",\"user\":%u,\"setting_count\":%u,\"capacity\":%u,\"result\":1317}\n",title,user,count,capacity);
     ctx.r3.u64=1317;
 }
-PPC_FUNC(__imp__XamInputSetState) {
+ME_IMPORT(__imp__XamInputSetState) {
     if(!gpu_explore_mode)me_stop_import("input_vibration_bridge_not_connected",ctx);
     if(!ctx.r5.u32){ctx.r3.u64=160;return;}
     if(!checked_span(ctx.r5.u32,4,true))me_stop_import("input_vibration_buffer_invalid",ctx);
     const auto user=ctx.r3.u32;ctx.r3.u64=1167;
     static unsigned calls=0;if(++calls<=8)std::printf("{\"event\":\"input_vibration_provider_absent\",\"user\":%u,\"result\":1167,\"vibration_sent\":false}\n",user);
 }
-PPC_FUNC(__imp__XamUserGetName) {
+ME_IMPORT(__imp__XamUserGetName) {
     if(!gpu_explore_mode)me_stop_import("user_name_profile_service_unavailable",ctx);
     const auto user=ctx.r3.u32,output=ctx.r4.u32,capacity=ctx.r5.u32;
     if(user>=4 || !output || !capacity || !checked_span(output,std::min(capacity,16u))){ctx.r3.u64=0x80070057;return;}
@@ -966,7 +1132,7 @@ PPC_FUNC(__imp__XamUserGetName) {
     std::printf("{\"event\":\"user_name_absent_profile\",\"user\":%u,\"capacity\":%u,\"result\":\"80070525\"}\n",user,capacity);
     ctx.r3.u64=0x80070525;
 }
-PPC_FUNC(__imp__XamUserGetXUID) {
+ME_IMPORT(__imp__XamUserGetXUID) {
     if(!gpu_explore_mode)me_stop_import("xuid_profile_not_configured",ctx);
     const auto user=ctx.r3.u32,mask=ctx.r4.u32,output=ctx.r5.u32;
     if(mask!=1 && mask!=2 && mask!=3 && mask!=4 && mask!=7)me_stop_import("xuid_type_mask_unsupported",ctx);
@@ -974,7 +1140,7 @@ PPC_FUNC(__imp__XamUserGetXUID) {
     if(local_player_signed_in && user==0){put_word(output,uint32_t(selected_local_player.xuid>>32));put_word(output+4,uint32_t(selected_local_player.xuid));ctx.r3.u64=0;return;}
     put_word(output,0);put_word(output+4,0);ctx.r3.u64=user<4?0x80070525:0x80070057;
 }
-PPC_FUNC(__imp__XamUserGetSigninState) {
+ME_IMPORT(__imp__XamUserGetSigninState) {
     if(!gpu_explore_mode)me_stop_import("signin_profile_not_configured",ctx);
     static unsigned calls=0;if(++calls<=4)std::printf("{\"event\":\"signin_profile_absent\",\"user\":%u,\"state\":0}\n",ctx.r3.u32);
     ctx.r3.u64=local_player_signed_in && ctx.r3.u32==0 ? 1 : 0; // Local only, never Xbox Live.
@@ -1004,7 +1170,7 @@ static bool load_title_achievements(){
 // XUserSetContextEx values of the signed-in local user: session presence state,
 // kept in memory only and never sent anywhere.
 static std::vector<std::pair<uint32_t,uint32_t>> local_player_contexts;
-PPC_FUNC(__imp__XMsgStartIORequest) {
+ME_IMPORT(__imp__XMsgStartIORequest) {
     const auto app=ctx.r3.u32,message=ctx.r4.u32,overlapped=ctx.r5.u32,buffer=ctx.r6.u32,length=ctx.r7.u32;
     if(!gpu_explore_mode || app!=0xfb || message!=0xb0006)me_stop_import("xmsg_io_app_or_message_unsupported",ctx);
     if(overlapped)me_stop_import("xgi_set_context_overlapped_not_implemented",ctx);
@@ -1025,7 +1191,7 @@ PPC_FUNC(__imp__XMsgStartIORequest) {
     put_word(thread_address+0x160,0);ctx.r3.u64=0;
     static unsigned calls=0;if(++calls<=16)std::printf("{\"event\":\"user_context_set\",\"user\":0,\"context\":\"%08x\",\"value\":%u}\n",id,value);
 }
-PPC_FUNC(__imp__XamUserCreateAchievementEnumerator) {
+ME_IMPORT(__imp__XamUserCreateAchievementEnumerator) {
     if(!gpu_explore_mode)me_stop_import("achievement_profile_service_unavailable",ctx);
     const auto title=ctx.r3.u32,user=ctx.r4.u32,flags=ctx.r6.u32,offset=ctx.r7.u32,count=ctx.r8.u32,size_out=ctx.r9.u32,handle_out=ctx.r10.u32;
     const uint64_t xuid=ctx.r5.u64;
@@ -1044,9 +1210,11 @@ PPC_FUNC(__imp__XamUserCreateAchievementEnumerator) {
     put_word(size_out,count*MeAchievementEnumerators::item_size(flags));put_word(handle_out,handle);ctx.r3.u64=0;
     std::printf("{\"event\":\"achievement_enumerator_created\",\"handle\":\"%08x\",\"flags\":%u,\"offset\":%u,\"count\":%u,\"available\":%zu}\n",handle,flags,offset,count,title_achievements.size());
 }
-PPC_FUNC(__imp__XamEnumerate) {
-    if(!gpu_explore_mode)me_stop_import("enumerate_service_unavailable",ctx);
+#include "save_content.h"
+ME_IMPORT(__imp__XamEnumerate) {
     const auto handle=ctx.r3.u32,flags=ctx.r4.u32,buffer=ctx.r5.u32,capacity=ctx.r6.u32,returned=ctx.r7.u32,overlapped=ctx.r8.u32;
+    if(auto* content=save_enumerator(handle)){enumerate_save_content(ctx,*content);return;}
+    if(!gpu_explore_mode)me_stop_import("enumerate_service_unavailable",ctx);
     auto* e=achievement_enumerators.find(handle);
     if(!e){ctx.r3.u64=6;return;} // No other enumerator kinds are created by this runtime.
     if(flags)me_stop_import("enumerate_flags_unsupported",ctx);
@@ -1064,7 +1232,7 @@ PPC_FUNC(__imp__XamEnumerate) {
     static unsigned calls=0;if(++calls<=16)std::printf("{\"event\":\"achievement_enumerate\",\"handle\":\"%08x\",\"written\":%u,\"result\":%u}\n",handle,written,result);
 }
 static bool me_input_user(uint32_t user,uint32_t flags){return ((user&255)==255 || user==0 || (flags&0x40000000u)) && (!(flags&255) || (flags&1));}
-PPC_FUNC(__imp__XamInputGetCapabilities) {
+ME_IMPORT(__imp__XamInputGetCapabilities) {
  if(!gpu_explore_mode)me_stop_import("input_capabilities_provider_not_connected",ctx);
  const auto out=ctx.r5.u32;if(!out){ctx.r3.u64=160;return;}
  auto state=me_guest_input().poll();
@@ -1075,7 +1243,7 @@ PPC_FUNC(__imp__XamInputGetCapabilities) {
  for(unsigned i=8;i<16;i+=2){guest[out+i]=0x7f;guest[out+i+1]=0xff;}
  ctx.r3.u64=0;
 }
-PPC_FUNC(__imp__XamInputGetState) {
+ME_IMPORT(__imp__XamInputGetState) {
  if(!gpu_explore_mode)me_stop_import("xam_input_provider_not_connected",ctx);
  if(!me_input_user(ctx.r3.u32,ctx.r4.u32)){ctx.r3.u64=1167;return;}
  auto state=me_guest_input().poll(true);
@@ -1089,17 +1257,24 @@ PPC_FUNC(__imp__XamInputGetState) {
  ctx.r3.u64=0;
 }
 void me_dcbst_diagnostic(uint32_t address) {
+    static MeImportCounter counter("hook_dcbst"); counter.calls.fetch_add(1, std::memory_order_relaxed);
     const uint32_t line=address&~127u;
-    if(!polling_yield_experiment || !virtual_memory.committed_cache_line(line)){
+    // Mapping check without the kernel lock where possible: physical aliases use the
+    // atomic committed-page map; virtual lines are checked under the lock only when
+    // serialized (parallel mode: unchecked, the fence is all dcbst needs here).
+    bool mapped=polling_yield_experiment;
+    if(mapped && line>=0xa0000000u)mapped=me_gpu_write_watch.range_committed(MePhysicalMemory::physical(line),128);
+    else if(mapped && (!guest_parallel || execution_gate.owned())){MeKernelLock kernel_lock;mapped=virtual_memory.committed_cache_line(line);}
+    if(!mapped){
         std::fprintf(stderr,"{\"event\":\"dcbst_mapping_unsupported\",\"address\":\"%08x\"}\n",address);std::_Exit(98);
     }
     // Only coherent ordinary CPU VM is accepted. No Vulkan/device cache,
     // instruction cache, or GPU completion semantics are claimed here.
     std::atomic_thread_fence(std::memory_order_seq_cst);
-    static unsigned lines=0;if(++lines<=4)std::printf("{\"event\":\"dcbst_coherent_vm\",\"line\":\"%08x\",\"bytes\":128}\n",line);
+    static std::atomic<unsigned> lines{0};if(++lines<=4)std::printf("{\"event\":\"dcbst_coherent_vm\",\"line\":\"%08x\",\"bytes\":128}\n",line);
 }
 static uint32_t xmp_playback_client=1; // SDK default: title.
-PPC_FUNC(__imp__XMsgStartIORequestEx) {
+ME_IMPORT(__imp__XMsgStartIORequestEx) {
     if(!gpu_explore_mode || ctx.r3.u32!=0xfa || ctx.r4.u32!=0x7001a || ctx.r5.u32 || ctx.r7.u32!=12)
         me_stop_import("xmp_set_message_or_overlapped_unsupported",ctx);
     const auto args=ctx.r6.u32,extra=ctx.r8.u32;
@@ -1113,7 +1288,7 @@ PPC_FUNC(__imp__XMsgStartIORequestEx) {
     put_word(thread_address+0x160,0);ctx.r3.u64=0;state_changed.notify_all();
     std::printf("{\"event\":\"xmp_playback_changed\",\"previous\":%u,\"client\":%u,\"notification\":\"0a000003\",\"data\":%u,\"listeners\":%d,\"overlapped\":false}\n",previous,playback,!playback,recipients);
 }
-PPC_FUNC(__imp__XMsgInProcessCall) {
+ME_IMPORT(__imp__XMsgInProcessCall) {
     if(!gpu_explore_mode || ctx.r3.u32!=0xfa || ctx.r4.u32!=0x7001b ||
        (ctx.r6.u32 && ctx.r6.u32!=12))me_stop_import("xmsg_app_or_message_unsupported",ctx);
     const auto args=ctx.r5.u32;
@@ -1128,12 +1303,12 @@ PPC_FUNC(__imp__XMsgInProcessCall) {
         gate.unlock();std::this_thread::sleep_for(std::chrono::milliseconds(10));gate.lock();gate.release();
     }
 }
-PPC_FUNC(__imp__XamNotifyCreateListener) {
+ME_IMPORT(__imp__XamNotifyCreateListener) {
     if(ctx.r4.u32>10)me_stop_import("notification_version_unsupported",ctx);
     const auto mask=ctx.r3.u64;ctx.r3.u64=notifications.create(mask,ctx.r4.u32);
     std::printf("{\"event\":\"notification_listener_created\",\"mask\":\"%016llx\",\"handle\":\"%08x\"}\n",(unsigned long long)mask,ctx.r3.u32);
 }
-PPC_FUNC(__imp__XNotifyGetNext) {
+ME_IMPORT(__imp__XNotifyGetNext) {
     const auto handle=ctx.r3.u32,match=ctx.r4.u32,id_out=ctx.r5.u32,data_out=ctx.r6.u32;
     if((id_out && !word_writable(id_out)) || (data_out && !word_writable(data_out)))me_stop_import("notification_outputs_invalid",ctx);
     if(data_out)put_word(data_out,0);
@@ -1141,7 +1316,7 @@ PPC_FUNC(__imp__XNotifyGetNext) {
     uint32_t id=0,data=0;const bool found=notifications.pop(handle,match,id,data);
     if(found){put_word(id_out,id);if(data_out)put_word(data_out,data);}ctx.r3.u64=found;
 }
-PPC_FUNC(__imp__NtCreateMutant) {
+ME_IMPORT(__imp__NtCreateMutant) {
     if(ctx.r4.u32)me_stop_import("named_mutant_attributes_not_implemented",ctx);
     if(!word_writable(ctx.r3.u32) || ctx.r5.u32>1)me_stop_import("mutant_create_invalid_parameters",ctx);
     const auto output=ctx.r3.u32;uint32_t handle=0;
@@ -1149,11 +1324,13 @@ PPC_FUNC(__imp__NtCreateMutant) {
     if(!status)put_word(output,handle);ctx.r3.u64=status;
     std::printf("{\"event\":\"mutant_create\",\"handle\":\"%08x\",\"status\":\"%08x\"}\n",handle,status);
 }
-PPC_FUNC(__imp__NtReleaseMutant) {
+ME_IMPORT(__imp__NtReleaseMutant) {
     if(ctx.r4.u32)me_stop_import("mutant_release_flags_unsupported",ctx);
     ctx.r3.u64=mutants.release(ctx.r3.u32,thread_address);state_changed.notify_all();
 }
-PPC_FUNC(__imp__NtClose) {
+ME_IMPORT(__imp__NtClose) {
+    if(save_storage.find(ctx.r3.u32)){ctx.r3.u64=save_storage.close(ctx.r3.u32);return;}
+    if(auto* content=save_enumerator(ctx.r3.u32)){content->live=false;ctx.r3.u64=0;return;}
     if(notifications.find(ctx.r3.u32)){ctx.r3.u64=notifications.close(ctx.r3.u32)?0:0xc0000008;return;}
     if(achievement_enumerators.find(ctx.r3.u32)){achievement_enumerators.close(ctx.r3.u32);ctx.r3.u64=0;return;}
     if(auto* m=mutants.find(ctx.r3.u32)){if(m->owner)me_stop_import("mutant_close_while_owned_not_implemented",ctx);ctx.r3.u64=mutants.close(ctx.r3.u32);return;}
@@ -1169,13 +1346,13 @@ static uint32_t checked_kernel_event(uint32_t address, PPCContext& ctx) {
     if (load_word(address + 4) > 1) me_stop_import("kernel_event_invalid_signal_state", ctx);
     return address;
 }
-PPC_FUNC(__imp__KeEnterCriticalRegion) {
+ME_IMPORT(__imp__KeEnterCriticalRegion) {
     if (ctx.r13.u32 != pcr_address) me_stop_import("critical_region_context_invalid", ctx);
     const int32_t count = int32_t(load_word(thread_address + 0xb0));
     if (count == INT32_MIN) me_stop_import("critical_region_nesting_overflow", ctx);
     put_word(thread_address + 0xb0, uint32_t(count - 1));
 }
-PPC_FUNC(__imp__KeLeaveCriticalRegion) {
+ME_IMPORT(__imp__KeLeaveCriticalRegion) {
     if (ctx.r13.u32 != pcr_address) me_stop_import("critical_region_context_invalid", ctx);
     const int32_t count = int32_t(load_word(thread_address + 0xb0));
     if (count >= 0) me_stop_import("critical_region_unbalanced_leave", ctx);
@@ -1189,7 +1366,7 @@ static uint32_t checked_kernel_semaphore(uint32_t address, PPCContext& ctx) {
         me_stop_import("kernel_semaphore_invalid", ctx);
     return address;
 }
-PPC_FUNC(__imp__KeInitializeSemaphore) {
+ME_IMPORT(__imp__KeInitializeSemaphore) {
     const auto address = ctx.r3.u32, count = ctx.r4.u32, limit = ctx.r5.u32;
     if ((address & 3) || !checked_span(address, 20) || !limit || limit > INT32_MAX || count > limit)
         me_stop_import("kernel_semaphore_initialize_invalid", ctx);
@@ -1197,7 +1374,7 @@ PPC_FUNC(__imp__KeInitializeSemaphore) {
     guest[address] = 5; put_word(address + 4, count); put_word(address + 16, limit);
     std::printf("{\"event\":\"kernel_semaphore_initialized\",\"address\":\"%08x\",\"count\":%u,\"limit\":%u}\n", address, count, limit);
 }
-PPC_FUNC(__imp__KeReleaseSemaphore) {
+ME_IMPORT(__imp__KeReleaseSemaphore) {
     const auto address = checked_kernel_semaphore(ctx.r3.u32, ctx);
     const auto previous = load_word(address + 4), adjustment = ctx.r5.u32;
     if (ctx.r6.u32 || !adjustment || adjustment > INT32_MAX ||
@@ -1207,27 +1384,27 @@ PPC_FUNC(__imp__KeReleaseSemaphore) {
     put_word(address + 4, previous + adjustment);
     state_changed.notify_all(); ctx.r3.u64 = previous;
 }
-PPC_FUNC(__imp__KeInitializeEvent) {
+ME_IMPORT(__imp__KeInitializeEvent) {
     const auto address = ctx.r3.u32;
     if ((address & 3) || !checked_span(address, 16) || ctx.r4.u32 > 1)
         me_stop_import("kernel_event_initialize_invalid", ctx);
     std::memset(guest + address, 0, 16);
     guest[address] = uint8_t(ctx.r4.u32); put_word(address + 4, ctx.r5.u32 ? 1 : 0);
 }
-PPC_FUNC(__imp__KeSetEvent) {
+ME_IMPORT(__imp__KeSetEvent) {
     if (ctx.r5.u32) me_stop_import("kernel_event_set_wait_handoff_unsupported", ctx);
     const auto address = checked_kernel_event(ctx.r3.u32, ctx);
     const auto previous = load_word(address + 4);
     put_word(address + 4, 1); state_changed.notify_all(); ctx.r3.u64 = previous;
 }
-PPC_FUNC(__imp__KeResetEvent) {
+ME_IMPORT(__imp__KeResetEvent) {
     const auto address = checked_kernel_event(ctx.r3.u32, ctx);
     const auto previous = load_word(address + 4); put_word(address + 4, 0); ctx.r3.u64 = previous;
 }
-PPC_FUNC(__imp__KeClearEvent) {
+ME_IMPORT(__imp__KeClearEvent) {
     const auto address = checked_kernel_event(ctx.r3.u32, ctx); put_word(address + 4, 0);
 }
-PPC_FUNC(__imp__KeWaitForSingleObject) {
+ME_IMPORT(__imp__KeWaitForSingleObject) {
     const auto address = ctx.r3.u32, timeout = ctx.r7.u32;
     if (ctx.r5.u32 > 1 || ctx.r6.u32) me_stop_import("kernel_wait_mode_or_apc_unsupported", ctx);
     if (timeout && !checked_span(timeout, 8, true)) me_stop_import("kernel_wait_timeout_invalid", ctx);
@@ -1265,7 +1442,7 @@ PPC_FUNC(__imp__KeWaitForSingleObject) {
     }
     ctx.r3.u64 = status;
 }
-PPC_FUNC(__imp__KeWaitForMultipleObjects) {
+ME_IMPORT(__imp__KeWaitForMultipleObjects) {
     const auto count = ctx.r3.u32, array = ctx.r4.u32, type = ctx.r5.u32, timeout = ctx.r9.u32;
     if (!count || count > 64 || type > 1 || ctx.r7.u32 > 1 || ctx.r8.u32 ||
         !checked_span(array, count * 4, true) || (timeout && !checked_span(timeout, 8, true)))
@@ -1324,7 +1501,7 @@ PPC_FUNC(__imp__KeWaitForMultipleObjects) {
 }
 
 
-PPC_FUNC(__imp__NetDll_WSAStartup) {
+ME_IMPORT(__imp__NetDll_WSAStartup) {
     if(!gpu_explore_mode || ctx.r3.u32!=1)me_stop_import("wsa_startup_requires_offline_explore",ctx);
     // WSASYSNOTREADY: no sockets backend was initialized. Failed startup
     // leaves WSADATA and thread last-error unchanged.
@@ -1332,7 +1509,7 @@ PPC_FUNC(__imp__NetDll_WSAStartup) {
     std::puts("{\"event\":\"wsa_unavailable\",\"host_sockets_created\":false}");
 }
 
-PPC_FUNC(__imp__InterlockedPopEntrySList) {
+ME_IMPORT(__imp__InterlockedPopEntrySList) {
     const auto header=ctx.r3.u32;
     if((header&7) || !checked_span(header,8))me_stop_import("slist_header_invalid",ctx);
     auto* cell=reinterpret_cast<uint64_t*>(guest+header);
@@ -1348,14 +1525,14 @@ PPC_FUNC(__imp__InterlockedPopEntrySList) {
         }
     }
 }
-PPC_FUNC(__imp__InterlockedFlushSList) {
+ME_IMPORT(__imp__InterlockedFlushSList) {
     const auto header=ctx.r3.u32;
     if((header&7) || !checked_span(header,8))me_stop_import("slist_flush_header_invalid",ctx);
     // The pinned Xbox SDK implementation resets next/depth/sequence together.
     const auto raw=__atomic_exchange_n(reinterpret_cast<uint64_t*>(guest+header),uint64_t(0),__ATOMIC_SEQ_CST);
     ctx.r3.u64=uint32_t(__builtin_bswap64(raw)>>32);
 }
-PPC_FUNC(__imp__NetDll_XNetGetTitleXnAddr) {
+ME_IMPORT(__imp__NetDll_XNetGetTitleXnAddr) {
     if(!gpu_explore_mode || ctx.r3.u32!=1)me_stop_import("title_address_caller_unsupported",ctx);
     const auto output=ctx.r4.u32;
     if(!output || !checked_span(output,36))me_stop_import("title_address_output_invalid",ctx);
@@ -1364,14 +1541,14 @@ PPC_FUNC(__imp__NetDll_XNetGetTitleXnAddr) {
     std::memset(guest+output,0,36);ctx.r3.u64=1; // XNET_GET_XNADDR_NONE
     static unsigned calls=0;if(++calls<=8)std::puts("{\"event\":\"guest_title_address_unavailable\",\"status\":1,\"pending\":false,\"online\":false}");
 }
-PPC_FUNC(__imp__NetDll_XNetGetEthernetLinkStatus) {
+ME_IMPORT(__imp__NetDll_XNetGetEthernetLinkStatus) {
     if(!gpu_explore_mode || ctx.r3.u32!=1)me_stop_import("ethernet_status_caller_unsupported",ctx);
     // The guest network backend only owns loopback. No external guest link,
     // speed or duplex flags exist, independently of Android Wi-Fi/Bluetooth.
     ctx.r3.u64=0;
     static unsigned calls=0;if(++calls<=8)std::puts("{\"event\":\"guest_ethernet_status\",\"flags\":0,\"backend\":\"offline_loopback\",\"xbox_live\":false}");
 }
-PPC_FUNC(__imp__NetDll_XNetStartup) {
+ME_IMPORT(__imp__NetDll_XNetStartup) {
     if(!gpu_explore_mode || ctx.r3.u32!=1)me_stop_import("xnet_startup_requires_offline_explore",ctx);
     const auto params=ctx.r4.u32;
     if(params && (!checked_span(params,13,true) || guest[params]!=13)){ctx.r3.u64=10022;return;}
@@ -1380,7 +1557,10 @@ PPC_FUNC(__imp__NetDll_XNetStartup) {
     std::printf("{\"event\":\"xnet_local_service\",\"ready\":%s,\"loopback_port\":%u,\"external_connection\":false,\"xbox_live\":false}\n",ready?"true":"false",offline_network.port);
 }
 
-PPC_FUNC(__imp__NtCreateFile) {
+#include "save_file_io.h"
+ME_IMPORT(__imp__NtCreateFile) {
+    if(!checked_span(ctx.r1.u32+84,4,true))me_stop_import("file_create_stack_invalid",ctx);
+    if(save_open_guest(ctx,ctx.r10.u32,load_word(ctx.r1.u32+84)))return;
     const auto attributes = ctx.r5.u32;
     if (!checked_span(attributes,12,true) || !checked_span(ctx.r1.u32+84,4,true)) me_stop_import("create_file_attributes_invalid",ctx);
     const auto name = load_word(attributes+4);
@@ -1422,7 +1602,8 @@ PPC_FUNC(__imp__NtCreateFile) {
 }
 
 
-PPC_FUNC(__imp__NtSetInformationFile) {
+ME_IMPORT(__imp__NtSetInformationFile) {
+    if(save_set_guest(ctx))return;
     auto* file=readonly_files.find(ctx.r3.u32);
     const auto iosb=ctx.r4.u32, input=ctx.r5.u32, length=ctx.r6.u32, kind=ctx.r7.u32;
     if(!file || !checked_span(iosb,8))me_stop_import("file_set_invalid_handle_or_iosb",ctx);
@@ -1438,7 +1619,8 @@ PPC_FUNC(__imp__NtSetInformationFile) {
     std::printf("{\"event\":\"file_position_set\",\"position\":%llu,\"status\":\"%08x\"}\n",(unsigned long long)file->position,status);
 }
 
-PPC_FUNC(__imp__NtQueryInformationFile) {
+ME_IMPORT(__imp__NtQueryInformationFile) {
+    if(save_query_guest(ctx))return;
     const auto file=readonly_files.find(ctx.r3.u32);
     const auto iosb=ctx.r4.u32,output=ctx.r5.u32,length=ctx.r6.u32,kind=ctx.r7.u32;
     if(!file || !checked_span(iosb,8))me_stop_import("file_query_invalid_handle_or_iosb",ctx);
@@ -1467,7 +1649,7 @@ static bool checked_file_buffer(uint32_t address,uint32_t size) {
 }
 
 
-PPC_FUNC(__imp__MmQueryAddressProtect) {
+ME_IMPORT(__imp__MmQueryAddressProtect) {
     const auto address=ctx.r3.u32;
     for(const auto& region:virtual_memory.regions)if(address>=region.base && uint64_t(address)<uint64_t(region.base)+region.size){
         ctx.r3.u64=region.committed[(address-region.base)/region.page]?4:1;return;
@@ -1475,7 +1657,8 @@ PPC_FUNC(__imp__MmQueryAddressProtect) {
     me_stop_import("query_address_protect_outside_virtual_allocations",ctx);
 }
 
-PPC_FUNC(__imp__NtReadFile) {
+ME_IMPORT(__imp__NtReadFile) {
+    if(save_read_guest(ctx))return;
     const auto handle=ctx.r3.u32,iosb=ctx.r7.u32,buffer=ctx.r8.u32,length=ctx.r9.u32,offset_ptr=ctx.r10.u32;
     auto* file=readonly_files.find(handle);
     if(!file || ctx.r4.u32 || ctx.r5.u32 || ctx.r6.u32 || !checked_span(iosb,8) || !checked_file_buffer(buffer,length) ||
@@ -1483,13 +1666,36 @@ PPC_FUNC(__imp__NtReadFile) {
     uint64_t offset=offset_ptr?(uint64_t(load_word(offset_ptr))<<32)|load_word(offset_ptr+4):UINT64_MAX;
     if(offset==UINT64_MAX || offset==UINT64_MAX-1)offset=file->position;
     if(offset>INT64_MAX)me_stop_import("file_read_offset_unsupported",ctx);
-    const auto count=readonly_files.read(handle,guest+buffer,length,offset);
+    // The storage read runs without the execution gate, as a console disc/HDD read
+    // does not stop other threads. If the GPU re-protects part of the buffer while the
+    // gate is released (EFAULT), the remainder is read under the gate.
+    me_gpu_write_watch.host_write(buffer,length);
+    int64_t count=-1;
+    if(const int fd=readonly_files.duplicate(handle);fd>=0){
+        std::unique_lock<MeExecutionGate> gate(execution_gate,std::adopt_lock);
+        gate.unlock();
+        uint64_t total=0;bool locked=false;
+        for(;;){
+            if(total==length){count=int64_t(total);break;}
+            const ssize_t n=pread(fd,guest+buffer+total,length-total,off_t(offset+total));
+            if(n<0 && errno==EINTR)continue;
+            if(n<0 && errno==EFAULT && !locked){gate.lock();locked=true;me_gpu_write_watch.host_write(uint32_t(buffer+total),uint32_t(length-total));continue;}
+            if(n<0){count=total?int64_t(total):-1;break;}
+            if(n==0){count=int64_t(total);break;}
+            total+=uint64_t(n);
+        }
+        ::close(fd);
+        if(!locked)gate.lock();
+        gate.release();
+        if(count>=0)readonly_files.set_position(handle,offset+uint64_t(count));
+    }
     const uint32_t status=count<0?0xc0000001:(length && !count?0xc0000011:0);
     put_word(iosb,status);put_word(iosb+4,count<0?0:uint32_t(count));ctx.r3.u64=status;
     std::printf("{\"event\":\"file_read\",\"handle\":\"%08x\",\"offset\":%llu,\"requested\":%u,\"read\":%lld,\"status\":\"%08x\"}\n",handle,(unsigned long long)offset,length,(long long)count,status);
 }
 
-PPC_FUNC(__imp__NtQueryFullAttributesFile) {
+ME_IMPORT(__imp__NtQueryFullAttributesFile) {
+    if(save_full_attributes(ctx))return;
     const auto attributes = ctx.r3.u32, output = ctx.r4.u32;
     if (!checked_span(attributes, 12, true) || !checked_span(output, 56))
         me_stop_import("file_attributes_invalid_outputs", ctx);
@@ -1519,7 +1725,7 @@ PPC_FUNC(__imp__NtQueryFullAttributesFile) {
     me_stop_import("file_query_mapping_not_implemented", ctx);
 }
 
-PPC_FUNC(__imp__MmQueryStatistics) {
+ME_IMPORT(__imp__MmQueryStatistics) {
     const auto output=ctx.r3.u32;
     if(!output){ctx.r3.u64=0xc000000d;return;}
     if(!word_writable(output))me_stop_import("memory_statistics_pointer_invalid",ctx);
@@ -1564,7 +1770,7 @@ static bool image_span_mapped(uint32_t address, uint32_t size) {
     }
     return size && end <= 0x100000000ull && cursor >= end;
 }
-PPC_FUNC(__imp__XexGetModuleSection) {
+ME_IMPORT(__imp__XexGetModuleSection) {
     if (ctx.r3.u32 != 0x60001000) { ctx.r3.u64 = 0xc0000008; return; }
     if (!word_writable(ctx.r5.u32) || !word_writable(ctx.r6.u32)) me_stop_import("module_section_outputs_invalid", ctx);
     std::string name;
@@ -1589,7 +1795,7 @@ PPC_FUNC(__imp__XexGetModuleSection) {
     }
     ctx.r3.u64=0xc0000225; // STATUS_NOT_FOUND; leave outputs untouched.
 }
-PPC_FUNC(__imp__RtlInitAnsiString) {
+ME_IMPORT(__imp__RtlInitAnsiString) {
     const auto destination = ctx.r3.u32, source = ctx.r4.u32;
     if (!checked_span(destination, 8)) me_stop_import("ansi_string_destination_invalid", ctx);
     uint32_t length = 0;
@@ -1604,13 +1810,13 @@ PPC_FUNC(__imp__RtlInitAnsiString) {
     std::memcpy(guest + destination, &encoded_length, 2);
     std::memcpy(guest + destination + 2, &encoded_max, 2); put_word(destination + 4, source);
 }
-PPC_FUNC(__imp__XAudioGetVoiceCategoryVolumeChangeMask) {
+ME_IMPORT(__imp__XAudioGetVoiceCategoryVolumeChangeMask) {
     // No category-volume setter is implemented, so no change notifications exist.
     if (!audio_output_is_ready() || ctx.r3.u32 != 0x41550000 || !word_writable(ctx.r4.u32))
         me_stop_import("audio_volume_mask_invalid_client_or_output", ctx);
     put_word(ctx.r4.u32, 0); ctx.r3.u64 = 0;
 }
-PPC_FUNC(__imp__NtWaitForSingleObjectEx) {
+ME_IMPORT(__imp__NtWaitForSingleObjectEx) {
     if (ctx.r4.u32 > 1 || ctx.r5.u32) me_stop_import("NtWaitForSingleObjectEx_unsupported_mode_or_apc", ctx);
     const auto timeout = ctx.r6.u32;
     if (timeout && !checked_span(timeout, 8, true)) me_stop_import("NtWaitForSingleObjectEx_invalid_timeout", ctx);
@@ -1639,7 +1845,7 @@ PPC_FUNC(__imp__NtWaitForSingleObjectEx) {
     std::printf("{\"event\":\"object_wait\",\"handle\":\"%08x\",\"status\":\"%08x\"}\n", handle, status);
     ctx.r3.u64 = status;
 }
-PPC_FUNC(__imp__NtWaitForMultipleObjectsEx) {
+ME_IMPORT(__imp__NtWaitForMultipleObjectsEx) {
     const auto count=ctx.r3.u32,array=ctx.r4.u32,type=ctx.r5.u32;
     const auto mode=ctx.r6.u32,alertable=ctx.r7.u32,timeout=ctx.r8.u32;
     if(!count || count>64 || type>1 || mode>1 || alertable)me_stop_import("handle_multiwait_mode_unsupported",ctx);
@@ -1701,7 +1907,7 @@ PPC_FUNC(__imp__NtWaitForMultipleObjectsEx) {
     if(trace)std::printf("{\"event\":\"handle_multiwait_done\",\"count\":%u,\"status\":\"%08x\"}\n",count,status);
     ctx.r3.u64=status;
 }
-PPC_FUNC(__imp__NetDll_WSAWaitForMultipleEvents) {
+ME_IMPORT(__imp__NetDll_WSAWaitForMultipleEvents) {
     const auto count=ctx.r3.u32,array=ctx.r4.u32,all=ctx.r5.u32,ms=ctx.r6.u32,alertable=ctx.r7.u32;
     auto fail=[&](uint32_t error){put_word(thread_address+0x160,error);ctx.r3.u64=0xffffffff;};
     if(!count || count>64 || all>1 || !checked_span(array,count*4,true)){fail(87);return;}
@@ -1736,7 +1942,7 @@ PPC_FUNC(__imp__NetDll_WSAWaitForMultipleEvents) {
     }
     if(status==0xffffffff)fail(6);else ctx.r3.u64=status;
 }
-PPC_FUNC(__imp__RtlTimeToTimeFields) {
+ME_IMPORT(__imp__RtlTimeToTimeFields) {
     const auto input=ctx.r3.u32,output=ctx.r4.u32;
     if(!checked_span(input,8,true) || !checked_span(output,16))me_stop_import("time_fields_invalid_buffer",ctx);
     const uint64_t ticks=(uint64_t(load_word(input))<<32)|load_word(input+4);
@@ -1745,7 +1951,7 @@ PPC_FUNC(__imp__RtlTimeToTimeFields) {
     for(unsigned i=0;i<fields.size();++i){uint16_t value=__builtin_bswap16(fields[i]);std::memcpy(guest+output+2*i,&value,2);}
     static unsigned calls=0;if(gpu_explore_mode && ++calls<=4)std::printf("{\"event\":\"time_fields_decoded\",\"year\":%u,\"month\":%u,\"day\":%u,\"weekday\":%u}\n",fields[0],fields[1],fields[2],fields[7]);
 }
-PPC_FUNC(__imp__RtlTimeFieldsToTime) {
+ME_IMPORT(__imp__RtlTimeFieldsToTime) {
     const auto input=ctx.r3.u32,output=ctx.r4.u32;
     if(!checked_span(input,16,true) || !checked_span(output,8))me_stop_import("time_fields_encode_invalid_buffer",ctx);
     MeTimeFields::Fields fields{};
@@ -1754,7 +1960,7 @@ PPC_FUNC(__imp__RtlTimeFieldsToTime) {
     if(!MeTimeFields::encode(fields,ticks)){ctx.r3.u64=0;return;}
     put_word(output,uint32_t(ticks>>32));put_word(output+4,uint32_t(ticks));ctx.r3.u64=1;
 }
-PPC_FUNC(__imp__KeQuerySystemTime) {
+ME_IMPORT(__imp__KeQuerySystemTime) {
     const auto output=ctx.r3.u32;if(!output)return;
     if(!checked_span(output,8))me_stop_import("system_time_output_invalid",ctx);
     timespec now{};
@@ -1763,14 +1969,14 @@ PPC_FUNC(__imp__KeQuerySystemTime) {
     put_word(output,uint32_t(ticks>>32));put_word(output+4,uint32_t(ticks));
     static unsigned calls=0;if(gpu_explore_mode && ++calls<=4)std::printf("{\"event\":\"system_time_utc\",\"filetime_100ns\":%llu}\n",(unsigned long long)ticks);
 }
-PPC_FUNC(__imp__RtlFillMemoryUlong) {
+ME_IMPORT(__imp__RtlFillMemoryUlong) {
     const auto destination=ctx.r3.u32,length=ctx.r4.u32,pattern=ctx.r5.u32;
     if(!length)return;
     if((destination&3) || (length&3) || !checked_span(destination,length))me_stop_import("fill_ulong_invalid_or_unsupported_span",ctx);
     for(uint32_t offset=0;offset<length;offset+=4)put_word(destination+offset,pattern);
     // Void export; preserve guest argument registers.
 }
-PPC_FUNC(__imp__RtlMultiByteToUnicodeN) {
+ME_IMPORT(__imp__RtlMultiByteToUnicodeN) {
     const auto dst = ctx.r3.u32, out = ctx.r5.u32, src = ctx.r6.u32;
     const auto count = std::min(ctx.r4.u32 / 2, ctx.r7.u32);
     if (!checked_span(dst, count * 2) || !checked_span(src, count, true) || (out && !word_writable(out)))
@@ -1782,7 +1988,7 @@ PPC_FUNC(__imp__RtlMultiByteToUnicodeN) {
     if (out) put_word(out, count * 2);
     ctx.r3.u64 = 0;
 }
-PPC_FUNC(__imp__RtlUnicodeToMultiByteN) {
+ME_IMPORT(__imp__RtlUnicodeToMultiByteN) {
     const auto destination = ctx.r3.u32, written = ctx.r5.u32, source = ctx.r6.u32;
     const auto count = std::min(ctx.r4.u32, ctx.r7.u32 / 2);
     if ((ctx.r7.u32 & 1) || !checked_span(destination,count) || !checked_span(source,count*2,true) || (written && !word_writable(written)))
@@ -1796,7 +2002,7 @@ PPC_FUNC(__imp__RtlUnicodeToMultiByteN) {
     if (count) std::memcpy(guest+destination,converted.data(),count);
     if (written) put_word(written,count); ctx.r3.u64=0;
 }
-PPC_FUNC(__imp__KeTlsAlloc) {
+ME_IMPORT(__imp__KeTlsAlloc) {
     ctx.r3.u64 = UINT32_MAX;
     for (unsigned i = 0; i < 256 && i < tls_slots; ++i) {
         if (tls_used[i]) continue;
@@ -1805,15 +2011,15 @@ PPC_FUNC(__imp__KeTlsAlloc) {
         break;
     }
 }
-PPC_FUNC(__imp__KeTlsGetValue) {
+ME_IMPORT(__imp__KeTlsGetValue) {
     if (ctx.r3.u32 >= tls_slots) me_stop_import("tls_get_index_out_of_range", ctx);
     ctx.r3.u64 = load_word(tls_dynamic + ctx.r3.u32 * 4);
 }
-PPC_FUNC(__imp__KeTlsSetValue) {
+ME_IMPORT(__imp__KeTlsSetValue) {
     if (ctx.r3.u32 >= tls_slots) me_stop_import("tls_set_index_out_of_range", ctx);
     put_word(tls_dynamic + ctx.r3.u32 * 4, ctx.r4.u32); ctx.r3.u64 = 1;
 }
-PPC_FUNC(__imp__KeTlsFree) {
+ME_IMPORT(__imp__KeTlsFree) {
     const auto slot = ctx.r3.u32;
     if (slot >= 256 || slot >= tls_slots) { ctx.r3.u64 = 0; return; }
     tls_used[slot] = false;
@@ -1827,36 +2033,88 @@ static uint32_t checked_cs(PPCContext& ctx) {
         if (!word_writable(a + i)) me_stop_import("critical_section_unwritable", ctx);
     return a;
 }
-// LockCount includes recursive owners and queued waiters, as in the guest ABI.
-PPC_FUNC(__imp__RtlEnterCriticalSection) {
-    const auto a = checked_cs(ctx);
-    auto owner = load_word(a + 24), count = load_word(a + 20), lock = load_word(a + 16);
-    if (count == UINT32_MAX) me_stop_import("critical_section_recursion_overflow", ctx);
-    put_word(a + 16, lock + 1);
-    if (owner && owner != thread_address) {
-        wait_for_change([&] { return load_word(a + 24) == 0; });
-        count = 0;
-    } else if (!owner && lock != UINT32_MAX) {
-        wait_for_change([&] { return load_word(a + 24) == 0; });
-        count = 0;
+// Critical sections follow the Xbox kernel's lock-free design so uncontended use
+// never touches the kernel lock: LockCount (+16, -1 = free) counts the owner's
+// recursion plus queued waiters and changes only by atomic CAS on guest memory;
+// RecursionCount (+20) and OwningThread (+24) are written by the owner. Only a
+// contended Enter takes the kernel lock to wait, and a Leave that sees waiters takes
+// it to wake them (so a waiter cannot miss the wake-up between check and sleep).
+static uint32_t* cs_word(uint32_t address) { return reinterpret_cast<uint32_t*>(guest + address); }
+static uint32_t cs_load(uint32_t address) { return __builtin_bswap32(__atomic_load_n(cs_word(address), __ATOMIC_ACQUIRE)); }
+static void cs_store(uint32_t address, uint32_t value) { __atomic_store_n(cs_word(address), __builtin_bswap32(value), __ATOMIC_RELEASE); }
+static bool cs_cas(uint32_t address, uint32_t expected, uint32_t desired) {
+    uint32_t raw = __builtin_bswap32(expected);
+    return __atomic_compare_exchange_n(cs_word(address), &raw, __builtin_bswap32(desired), false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+}
+static uint32_t cs_add(uint32_t address, int32_t delta) { // returns the new value
+    uint32_t raw = __atomic_load_n(cs_word(address), __ATOMIC_ACQUIRE);
+    for (;;) {
+        const uint32_t value = __builtin_bswap32(raw) + uint32_t(delta);
+        if (__atomic_compare_exchange_n(cs_word(address), &raw, __builtin_bswap32(value), false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return value;
     }
-    put_word(a + 20, count + 1); put_word(a + 24, thread_address);
+}
+static std::unordered_map<uint32_t, uint32_t> cs_handoffs; // CS address -> pending handoffs (kernel lock)
+static uint32_t checked_cs_fast(PPCContext& ctx) {
+    const auto a = ctx.r3.u32;
+    if ((a & 3) || a > UINT32_MAX - 28) me_stop_import("critical_section_invalid_address", ctx);
+    return a;
+}
+static void cs_enter(PPCContext& ctx, uint32_t a) {
+    const uint32_t self = thread_address;
+    if (cs_add(a + 16, 1) == 0) { cs_store(a + 24, self); cs_store(a + 20, 1); return; }
+    if (cs_load(a + 24) == self) {
+        const auto count = cs_load(a + 20);
+        if (count == UINT32_MAX) me_stop_import("critical_section_recursion_overflow", ctx);
+        cs_store(a + 20, count + 1); return;
+    }
+    // Contended: queued (counted in LockCount, so no fast-path acquire can overtake).
+    // Ownership passes by a handoff token that a Leave issues only when it sees
+    // queued waiters (the kernel's auto-reset event); exactly one waiter takes it.
+    {
+        MeKernelLock kernel_lock;
+        wait_for_change([&] { auto it = cs_handoffs.find(a); return it != cs_handoffs.end() && it->second; });
+        if (!--cs_handoffs[a]) cs_handoffs.erase(a);
+    }
+    cs_store(a + 24, self); cs_store(a + 20, 1);
+}
+PPC_FUNC(__imp__RtlEnterCriticalSection) { cs_enter(ctx, checked_cs_fast(ctx)); }
+// Time slice for the cooperative gate. On the console the title's threads run in
+// parallel, so a thread looping through uncontended critical sections (the UE3 tick
+// loop while a Bink movie plays) never blocks the audio callback or workers there.
+// After fully releasing a critical section, a thread that has run for 1 ms hands the
+// gate to queued guest threads (FIFO). Guest-visible results are unchanged.
+static std::atomic<uint64_t> time_slice_yields{0};
+static void me_time_slice_yield() {
+    if (!gpu_explore_mode || guest_parallel) return;
+    static thread_local uint32_t calls = 0;
+    static thread_local auto last = std::chrono::steady_clock::now();
+    if (++calls & 31) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last < std::chrono::milliseconds(1)) return;
+    if (!execution_gate.queued_waiters()) { last = now; return; }
+    { std::unique_lock<MeExecutionGate> gate(execution_gate, std::adopt_lock); gate.unlock(); gate.lock(); gate.release(); }
+    last = std::chrono::steady_clock::now();
+    const auto n = time_slice_yields.fetch_add(1) + 1;
+    if (n <= 4 || !(n & (n - 1)))
+        std::printf("{\"event\":\"time_slice_yield\",\"thread\":\"%08x\",\"count\":%llu}\n", thread_address, (unsigned long long)n);
 }
 PPC_FUNC(__imp__RtlLeaveCriticalSection) {
-    const auto a = checked_cs(ctx);
-    auto count = load_word(a + 20), lock = load_word(a + 16);
-    if (load_word(a + 24) != thread_address || !count)
-        me_stop_import("critical_section_invalid_owner", ctx);
-    put_word(a + 20, count - 1); put_word(a + 16, lock - 1);
-    if (count == 1) { put_word(a + 24, 0); state_changed.notify_all(); }
+    const auto a = checked_cs_fast(ctx);
+    const auto count = cs_load(a + 20);
+    if (cs_load(a + 24) != thread_address || !count) me_stop_import("critical_section_invalid_owner", ctx);
+    if (count > 1) { cs_store(a + 20, count - 1); cs_add(a + 16, -1); return; }
+    cs_store(a + 20, 0);
+    cs_store(a + 24, 0); // release ownership before LockCount, so no new owner is overwritten
+    if (cs_add(a + 16, -1) != UINT32_MAX) { MeKernelLock kernel_lock; ++cs_handoffs[a]; state_changed.notify_all(); }
+    if (!guest_parallel && execution_gate.owned()) me_time_slice_yield();
 }
 PPC_FUNC(__imp__RtlTryEnterCriticalSection) {
-    const auto a = checked_cs(ctx), owner = load_word(a + 24);
-    if (owner == thread_address || (!owner && load_word(a + 16) == UINT32_MAX)) {
-        __imp__RtlEnterCriticalSection(ctx, base); ctx.r3.u64 = 1;
-    } else ctx.r3.u64 = 0;
+    const auto a = checked_cs_fast(ctx);
+    if (cs_cas(a + 16, UINT32_MAX, 0)) { cs_store(a + 24, thread_address); cs_store(a + 20, 1); ctx.r3.u64 = 1; return; }
+    if (cs_load(a + 24) == thread_address) { cs_enter(ctx, a); ctx.r3.u64 = 1; return; }
+    ctx.r3.u64 = 0;
 }
-PPC_FUNC(__imp__RtlInitializeCriticalSection) {
+ME_IMPORT(__imp__RtlInitializeCriticalSection) {
     const uint32_t address = ctx.r3.u32;
     if (address > UINT32_MAX - 28) me_stop_import("critical_section_invalid_address", ctx);
     for (unsigned i = 0; i < 28; i += 4)
@@ -1871,7 +2129,7 @@ PPC_FUNC(__imp__RtlInitializeCriticalSection) {
     std::memcpy(base + address + 24, &zero, 4);
     std::printf("{\"event\":\"critical_section_initialized\",\"address\":\"%08x\"}\n", address);
 }
-PPC_FUNC(__imp__NtFreeVirtualMemory) {
+ME_IMPORT(__imp__NtFreeVirtualMemory) {
     auto ap = ctx.r3.u32, sp = ctx.r4.u32, type = ctx.r5.u32;
     if (ctx.r6.u32 || (type != 0x4000 && type != 0x8000)) me_stop_import("NtFreeVirtualMemory_unsupported_flags", ctx);
     if (!word_writable(ap) || !word_writable(sp) || ap == sp) me_stop_import("NtFreeVirtualMemory_invalid_pointers", ctx);
@@ -1881,7 +2139,7 @@ PPC_FUNC(__imp__NtFreeVirtualMemory) {
     std::printf("{\"event\":\"virtual_free\",\"base\":\"%08x\",\"size\":%u,\"type\":\"%08x\",\"status\":\"%08x\"}\n", address, size, type, status);
     ctx.r3.u64 = status;
 }
-PPC_FUNC(__imp__NtAllocateVirtualMemory) {
+ME_IMPORT(__imp__NtAllocateVirtualMemory) {
     const uint32_t base_pointer = ctx.r3.u32, size_pointer = ctx.r4.u32;
     const uint32_t type = ctx.r5.u32, protect = ctx.r6.u32, debug = ctx.r7.u32;
     if (!word_writable(base_pointer) || !word_writable(size_pointer) || base_pointer == size_pointer)
@@ -1920,6 +2178,7 @@ PPC_FUNC(__imp__NtAllocateVirtualMemory) {
 }
 
 static void fault(int signal, siginfo_t* info, void* raw_context) {
+    if (signal == SIGSEGV && info && me_gpu_write_watch.fault(uintptr_t(info->si_addr))) return;
     // The alarm is a bounded diagnostic stop, not a guest memory fault.
     // Capture host PC plus guest registers; LR alone is only a saved return site.
     auto* machine = static_cast<ucontext_t*>(raw_context);
@@ -1943,6 +2202,12 @@ static void fault(int signal, siginfo_t* info, void* raw_context) {
     const auto origin = reinterpret_cast<uintptr_t>(guest);
     const uint64_t address = host >= origin ? host - origin : UINT64_MAX;
     char line[512];
+    if(signal==SIGSEGV){
+        unsigned committed=0,watched=0;
+        MeGpuWriteWatch::pages_of(address,[&](uint32_t p){committed|=MeGpuWriteWatch::bit(me_gpu_write_watch.committed,p);watched|=MeGpuWriteWatch::bit(me_gpu_write_watch.watched,p);});
+        int n=std::snprintf(line,sizeof(line),"{\"event\":\"write_watch_fault_detail\",\"si_code\":%d,\"host_address\":\"%llx\",\"committed\":%u,\"watched\":%u,\"protect_failures\":%llu,\"protect_errno\":%d,\"protect_page\":%u}\n",info->si_code,(unsigned long long)host,committed,watched,(unsigned long long)me_gpu_write_watch.protect_failures.load(),me_gpu_write_watch.last_protect_errno.load(),me_gpu_write_watch.last_protect_page.load());
+        if(n>0)write(STDOUT_FILENO,line,std::min(size_t(n),sizeof(line)-1));
+    }
     for (unsigned i = 0; i < guard_count; ++i) {
         if (address >= guards[i].address && address < guards[i].address + 0x1000) {
             int n = std::snprintf(line, sizeof(line),
@@ -1977,6 +2242,34 @@ static bool commit_pages(uint32_t address, uint32_t size) {
     return mprotect(guest + address, size, PROT_READ | PROT_WRITE) == 0;
 }
 
+static uint32_t gate_label() { return active_context ? thread_address : 0xf0000000u | (uint32_t(syscall(SYS_gettid)) & 0xffff); }
+static void write_watch_fault(int signal, siginfo_t* info, void*) {
+    if (info && me_gpu_write_watch.fault(uintptr_t(info->si_addr))) return;
+    ::signal(signal, SIG_DFL); // re-executes and dies with the original fault
+}
+// Release semantics, matching the console and Xenia: MmFreePhysicalMemory is
+// pure bookkeeping and the physical pages stay mapped and readable in every
+// guest alias window until the next allocation re-commits and zeroes them.
+// Xenia's kernel never unmaps freed physical allocations, and the console
+// kernel behaves the same way, so titles legally race a deferred kick against a
+// just-freed buffer. Mirror's Edge's audio teardown does exactly that: the UE3
+// wave destructor frees the 2.5 MB XMA input buffer at 0x11c40000 while the
+// submission loop in sub_8282C598 still kicks context 0, the XMA bridge then
+// reads a packet header inside the now-freed buffer, and the fault is only
+// reachable here because a previous build detached freed aliases to an
+// anonymous PROT_NONE mapping (work/startup/xma-order-game.log, exit 43 with
+// committed=0, watched=0). Retaining the mapping is therefore not a workaround
+// that hides the fault: it is the platform contract, and the commit bitmap is
+// still cleared so MeGpuPhysicalView::resolve keeps rejecting the range for
+// every GPU consume. Set ME_STRICT_PHYSICAL_FREE=1 to restore the detaching
+// behavior when auditing who touches a freed allocation.
+static bool strict_physical_free() {
+    static const bool strict = [] {
+        const char* flag = std::getenv("ME_STRICT_PHYSICAL_FREE");
+        return flag && *flag && std::strcmp(flag, "0") != 0;
+    }();
+    return strict;
+}
 static bool map_physical(uint32_t physical, uint32_t length, bool commit) {
     if (page_size != 4096) return false;
     if (physical_fd < 0) {
@@ -1987,25 +2280,53 @@ static bool map_physical(uint32_t physical, uint32_t length, bool commit) {
         }
         auto* raw = static_cast<uint8_t*>(mmap(nullptr, 0x20000000, PROT_NONE, MAP_SHARED, physical_fd, 0));
         if (raw == MAP_FAILED) { close(physical_fd); physical_fd = -1; return false; }
-        gpu_physical = {raw, &physical_memory};
+        gpu_physical = {raw, &physical_memory, &me_gpu_write_watch};
+        me_gpu_write_watch.guest = guest;
+        // Write-watch faults must be handled before the game's own handler is installed
+        // (self-tests); fault() also forwards them once it replaces this one.
+        struct sigaction action{};
+        action.sa_sigaction = write_watch_fault; action.sa_flags = SA_SIGINFO | SA_NODEFER;
+        sigemptyset(&action.sa_mask);
+        sigaction(SIGSEGV, &action, nullptr);
     }
-    if (!commit) MeRexGpuMemory::InvalidateReleasedRange(physical, length);
+    static const bool alloc_invalidate = [] { const char* v = std::getenv("ME_GPU_ALLOC_INVALIDATE"); return !(v && !std::strcmp(v, "0")); }(); // default on (route A/B 2026-10-25)
+    if (!commit) {
+        me_gpu_write_watch.set_committed(physical, length, false);
+        if (alloc_invalidate) MeRexGpuMemory::InvalidateAllocatedRange(physical, length);
+        else MeRexGpuMemory::InvalidateReleasedRange(physical, length);
+    }
     const uint32_t aliases[] = {0xa0000000 + physical, 0xc0000000 + physical, 0xe0000000 + physical - 0x1000};
-    for (unsigned i = 0; i < 3; ++i) {
-        auto* target = guest + aliases[i];
-        void* result = commit ? mmap(target, length, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, physical_fd, physical) :
-            mmap(target, length, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED | MAP_NORESERVE, -1, 0);
-        if (result != target) {
-            // Roll back every view inside our own reserved guest mapping.
-            for (unsigned j = 0; j < i; ++j)
-                if (mmap(guest + aliases[j], length, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED | MAP_NORESERVE, -1, 0) == MAP_FAILED) std::exit(2);
-            return false;
+    // A release keeps the memfd attachment and only the strict audit mode
+    // detaches; the next commit overwrites all three windows in either case.
+    const bool detach = !commit && strict_physical_free();
+    if (commit) {
+        for (unsigned i = 0; i < 3; ++i) {
+            auto* target = guest + aliases[i];
+            void* result = mmap(target, length, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, physical_fd, physical);
+            if (result != target) {
+                // Roll back every view inside our own reserved guest mapping.
+                for (unsigned j = 0; j < i; ++j)
+                    if (mmap(guest + aliases[j], length, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED | MAP_NORESERVE, -1, 0) == MAP_FAILED) std::exit(2);
+                return false;
+            }
         }
+    } else if (detach) {
+        for (unsigned i = 0; i < 3; ++i) {
+            if (mmap(guest + aliases[i], length, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED | MAP_NORESERVE, -1, 0) == MAP_FAILED) std::exit(2);
+        }
+    } else {
+        for (unsigned i = 0; i < 3; ++i)
+            if (mprotect(guest + aliases[i], length, PROT_READ | PROT_WRITE)) std::exit(2);
     }
-    if (mprotect(gpu_physical.raw + physical, length, commit ? PROT_READ | PROT_WRITE : PROT_NONE)) {
+    // The raw view stays readable with the mapping retained; the GPU is kept
+    // out by the cleared commit bitmap, not these permissions.
+    if (mprotect(gpu_physical.raw + physical, length, detach ? PROT_NONE : PROT_READ | PROT_WRITE)) {
         std::perror("physical raw view protection"); std::exit(2);
     }
-    if (commit) std::memset(guest + aliases[0], 0, length);
+    if (commit) {
+        std::memset(guest + aliases[0], 0, length); me_gpu_write_watch.set_committed(physical, length, true);
+        if (alloc_invalidate) MeRexGpuMemory::InvalidateAllocatedRange(physical, length); // drop stale GPU copies
+    }
     return true;
 }
 
@@ -2184,6 +2505,23 @@ static uint64_t dispatch_gpu_interrupt_locked(PPCContext& context, const ThreadR
     if(trace)snapshot("end");
     return context.r3.u64;
 }
+// The GPU command processor runs beside guest threads, as on the console: after
+// setup it does not take the execution gate. CPU writes reach it through the page
+// write watch, interrupts through MeGpuInterruptWorker (which takes the gate), and
+// SharedMemory/texture state is guarded by RexGlue's own global critical region.
+// ME_GPU_GATE=1 restores the serialized behaviour for A/B comparison.
+static std::atomic<bool> gpu_gate_always{false}, gpu_cp_released{false};
+static thread_local std::vector<bool> gpu_gate_held;
+static void gpu_gate_enter() {
+    const bool take = gpu_gate_always.load() || !gpu_cp_released.load();
+    if (take) execution_gate.lock();
+    gpu_gate_held.push_back(take);
+}
+static void gpu_gate_leave() {
+    if (gpu_gate_held.empty()) return;
+    const bool held = gpu_gate_held.back(); gpu_gate_held.pop_back();
+    if (held) execution_gate.unlock();
+}
 static void start_game_gpu(PPCContext& ctx) {
     if (game_gpu_ready) { ctx.r3.u64 = 1; return; }
     if (!gpu_physical.raw || threads.size() >= max_guest_threads) me_stop_import("GPU_memory_or_thread_capacity_unavailable", ctx);
@@ -2202,7 +2540,7 @@ static void start_game_gpu(PPCContext& ctx) {
         std::unique_lock<MeExecutionGate> gate(execution_gate, std::adopt_lock);
         gate.unlock(); // SDK SetupContext acquires the same gate on its own worker.
         ready = me_gpu_start(&gpu_physical, &gpu_mmio,
-            +[] { execution_gate.lock(); }, +[] { execution_gate.unlock(); },
+            +[] { gpu_gate_enter(); }, +[] { gpu_gate_leave(); },
             +[](uint32_t callback, uint32_t argument, uint32_t source, uint32_t cpu) {
                 const bool accepted=game_gpu_irq_worker->submit({callback,argument,source,cpu});
                 static std::atomic<uint64_t> calls{0};const auto call=++calls;
@@ -2212,12 +2550,51 @@ static void start_game_gpu(PPCContext& ctx) {
         gate.lock(); gate.release();
     }
     if (!ready) me_stop_import("GPU_real_context_setup_failed", ctx);
-    game_gpu_ready = true;
+    if (const char* v = std::getenv("ME_GPU_GATE"); v && !std::strcmp(v, "1")) gpu_gate_always = true;
+    game_gpu_ready = true; gpu_cp_released = true;
+    std::printf("{\"event\":\"gpu_command_processor_gate\",\"serialized\":%s}\n", gpu_gate_always ? "true" : "false");
     if(gpu_explore_mode){
         auto* vblank=new MeGpuVblankWorker;
         if(!vblank->start([]{
+            // Diagnostics: delivered vblanks and the wait for the shared gate, every 2 s.
+            static auto window=std::chrono::steady_clock::now();
+            static uint64_t delivered=0,wait_total_us=0,wait_max_us=0,epoch_start=me_gate_epoch.load();
+            const auto requested=std::chrono::steady_clock::now();
             std::lock_guard<MeExecutionGate> lock(execution_gate);
+            const auto waited=uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-requested).count());
             me_gpu_vblank();
+            ++delivered;wait_total_us+=waited;wait_max_us=std::max(wait_max_us,waited);
+            const double seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-window).count();
+            if(seconds>=2){
+                const auto epoch=me_gate_epoch.load();
+                auto& stats=MeRexGpuMemory::scan_stats;
+                const auto calls=stats.calls.exchange(0),scans=stats.scans.exchange(0),pages=stats.pages.exchange(0);
+                std::printf("{\"event\":\"vblank_rate\",\"hz\":%.2f,\"gate_wait_avg_us\":%llu,\"gate_wait_max_us\":%llu,\"gate_handovers_per_s\":%.0f,\"gpu_sync_calls_per_s\":%.0f,\"gpu_scans_per_s\":%.0f,\"gpu_pages_per_scan\":%llu}\n",
+                    delivered/seconds,(unsigned long long)(wait_total_us/delivered),(unsigned long long)wait_max_us,(epoch-epoch_start)/seconds,
+                    calls/seconds,scans/seconds,(unsigned long long)(scans?pages/scans:0));
+                // Per-thread gate use over the window (host threads: 0xf000xxxx = host tid).
+                char line[2048];int n=std::snprintf(line,sizeof(line),"{\"event\":\"gate_threads\",\"seconds\":%.2f,\"threads\":[",seconds);
+                bool first=true;
+                for(uint32_t i=0;i<std::min<uint32_t>(me_gate_slots.load(),64);++i){
+                    auto& t=me_gate_stats[i];
+                    const auto acq=t.acquisitions.exchange(0),wait=t.wait_ns.exchange(0),hold=t.hold_ns.exchange(0);
+                    if(!acq || n>=int(sizeof(line))-128)continue;
+                    n+=std::snprintf(line+n,sizeof(line)-n,"%s{\"t\":\"%08x\",\"acq_s\":%.0f,\"wait_ms_s\":%.1f,\"hold_ms_s\":%.1f}",first?"":",",t.label.load(),acq/seconds,wait/1e6/seconds,hold/1e6/seconds);
+                    first=false;
+                }
+                std::printf("%s]}\n",line);
+                {   // Top kernel-lock imports over the window.
+                    MeImportCounter* top[6]{}; uint64_t counts[6]{};
+                    for (auto* c = MeImportCounter::head.load(); c; c = c->next) {
+                        const auto n = c->calls.exchange(0);
+                        for (int k = 0; k < 6; ++k) if (n > counts[k]) { for (int m = 5; m > k; --m) { counts[m] = counts[m-1]; top[m] = top[m-1]; } counts[k] = n; top[k] = c; break; }
+                    }
+                    std::printf("{\"event\":\"hot_imports\",\"per_s\":[");
+                    for (int k = 0; k < 6 && top[k]; ++k) std::printf("%s{\"%s\":%.0f}", k ? "," : "", top[k]->name, counts[k] / seconds);
+                    std::printf("]}\n");
+                }
+                window=std::chrono::steady_clock::now();delivered=wait_total_us=wait_max_us=0;epoch_start=epoch;
+            }
         }))me_stop_import("GPU_virtual_vblank_start_failed",ctx);
         // Probe process owns this worker until _exit; normal lifecycle is pending.
         std::puts("{\"event\":\"virtual_vblank_started\",\"hz\":60,\"clock\":\"monotonic\",\"physical_display_vsync\":false}");
@@ -2262,8 +2639,10 @@ static void create_guest_thread(PPCContext& ctx) {
             state_changed.wait(run, [&] { return !record->suspend_count; });
             child->fpscr.setcsr(child->fpscr.csr);
             std::printf("{\"event\":\"thread_begin\",\"id\":%u,\"entry\":\"%08x\"}\n", record->id, address);
+            if (guest_parallel) run.unlock(); // guest code runs beside other threads
             try { (PPC_LOOKUP_FUNC(guest, address))(*child, guest); record->exit_code = child->r3.u32; }
             catch (const ThreadExit& e) { record->exit_code = e.code; }
+            if (!execution_gate.owned()) { run.release(); execution_gate.lock(); run = std::unique_lock<MeExecutionGate>(execution_gate, std::adopt_lock); }
             mutants.abandon(record->kthread);
             record->done = true;
             std::printf("{\"event\":\"thread_exit\",\"id\":%u,\"code\":%u}\n", record->id, record->exit_code);
@@ -2276,17 +2655,17 @@ static void create_guest_thread(PPCContext& ctx) {
     std::printf("{\"event\":\"thread_created\",\"id\":%u,\"handle\":\"%08x\",\"stack_bytes\":%u,\"pcr\":\"%08x\",\"tls\":\"%08x\"}\n", record->id, record->handle, stack, record->pcr, record->tls);
 }
 
-PPC_FUNC(__imp__KeRaiseIrqlToDpcLevel) {
+PPC_FUNC(__imp__KeRaiseIrqlToDpcLevel) { // thread-local PCR byte: no kernel lock
     if (ctx.r13.u32 != pcr_address || guest[pcr_address + 0x18] > 2)
         me_stop_import("raise_irql_to_dispatch_invalid", ctx);
     ctx.r3.u64 = guest[pcr_address + 0x18]; guest[pcr_address + 0x18] = 2;
 }
-PPC_FUNC(__imp__KfLowerIrql) {
+PPC_FUNC(__imp__KfLowerIrql) { // thread-local PCR byte: no kernel lock
     if (ctx.r13.u32 != pcr_address || ctx.r3.u32 > guest[pcr_address + 0x18])
         me_stop_import("lower_irql_invalid", ctx);
     guest[pcr_address + 0x18] = uint8_t(ctx.r3.u32);
 }
-PPC_FUNC(__imp__NtResumeThread) {
+ME_IMPORT(__imp__NtResumeThread) {
     const auto output=ctx.r4.u32;
     if(output && !word_writable(output))me_stop_import("resume_thread_invalid_count_pointer",ctx);
     auto record=find_thread(ctx.r3.u32);uint32_t previous=0,status=0xc0000008;
@@ -2294,7 +2673,7 @@ PPC_FUNC(__imp__NtResumeThread) {
         guest[record->kthread+0xbc]=record->suspend_count;status=0;state_changed.notify_all();}
     if(output)put_word(output,previous);ctx.r3.u64=status;
 }
-PPC_FUNC(__imp__KeResumeThread) {
+ME_IMPORT(__imp__KeResumeThread) {
     for (const auto& record : threads) if (record->kthread == ctx.r3.u32 && !record->done) {
         if (record->suspend_count) --record->suspend_count;
         guest[record->kthread + 0xbc] = record->suspend_count;
@@ -2309,7 +2688,8 @@ static PPC_FUNC(suspended_thread_test_entry) {
 static MeAudioOutput* audio_output;
 static bool audio_output_is_ready() { return audio_output && audio_output->stream; }
 static std::mutex audio_write_mutex;
-PPC_FUNC(__imp__XAudioSubmitRenderDriverFrame) {
+static std::atomic<uint64_t> audio_frames_submitted{0};
+ME_IMPORT(__imp__XAudioSubmitRenderDriverFrame) {
     if (!gpu_explore_mode || ctx.r3.u32 != 0x41550000 || !audio_output_is_ready() ||
         !checked_span(ctx.r4.u32, 6 * 256 * 4, true))
         me_stop_import("audio_submit_invalid_client_or_frame", ctx);
@@ -2324,8 +2704,11 @@ PPC_FUNC(__imp__XAudioSubmitRenderDriverFrame) {
             return int(AAudioStream_write(audio_output->stream, data, frames, 20000000));
         }); }
       gate.lock(); gate.release(); }
-    std::printf("{\"event\":\"audio_pcm_submit\",\"accepted_frames\":%d,\"requested_frames\":256,\"error\":%d,\"playback_completion_claimed\":false}\n", result.frames, result.error);
-    ctx.r3.u64 = result.frames == 256 && !result.error ? 0 : 0x80004005;
+    const bool accepted = result.frames == 256 && !result.error;
+    const auto submitted = accepted ? audio_frames_submitted.fetch_add(1) + 1 : audio_frames_submitted.load();
+    if (!accepted || submitted <= 8 || !(submitted & (submitted - 1)))
+        std::printf("{\"event\":\"audio_pcm_submit\",\"accepted_frames\":%d,\"requested_frames\":256,\"error\":%d,\"submitted\":%llu,\"playback_completion_claimed\":false}\n", result.frames, result.error, (unsigned long long)submitted);
+    ctx.r3.u64 = accepted ? 0 : 0x80004005;
 }
 static void register_audio_client(PPCContext& ctx) {
     if (!gpu_explore_mode) me_stop_import("audio_client_requires_explore", ctx);
@@ -2356,25 +2739,74 @@ static void register_audio_client(PPCContext& ctx) {
             thread_address = record->kthread; tls_dynamic = record->tls;
             register_diagnostic_thread();
             std::unique_lock<MeExecutionGate> gate(execution_gate);
-            // Four startup queue credits, matching the lower bound of the SDK.
-            // No periodic timer and no invented consumed-frame notifications.
-            for (unsigned credit = 0; credit < 4; ++credit) {
+            if (guest_parallel) gate.unlock(); // the callback's imports take the kernel lock
+            // The render driver asks for one 256-sample frame per callback. Each
+            // submitted frame is a blocking AAudio write, so the callback rate
+            // follows real device consumption; no consumed-frame notification is
+            // invented. A callback that submits nothing waits one device period
+            // (256 / 48000 s) instead of spinning.
+            constexpr auto period = std::chrono::nanoseconds(5333333);
+            auto next = std::chrono::steady_clock::now();
+            for (uint64_t call = 0;; ++call) {
+                const auto before = audio_frames_submitted.load();
                 const auto stack = context->r1.u64;
                 context->r1.u64 -= 176; context->lr = 0xbcbcbcbc;
                 context->r3.u64 = wrapped; context->fpscr.setcsr(context->fpscr.csr);
-                std::printf("{\"event\":\"audio_callback_begin\",\"callback\":\"%08x\",\"wrapped_argument\":\"%08x\",\"credit\":%u}\n", callback, wrapped, credit);
+                const bool log = call < 4 || !(call & (call - 1));
+                if (log) std::printf("{\"event\":\"audio_callback_begin\",\"callback\":\"%08x\",\"wrapped_argument\":\"%08x\",\"call\":%llu}\n", callback, wrapped, (unsigned long long)call);
                 try { (PPC_LOOKUP_FUNC(guest, callback))(*context, guest); }
                 catch (...) { std::fprintf(stderr,"audio callback threw; stopping probe\n"); std::_Exit(96); }
                 context->r1.u64 = stack; context->lr = 0;
-                std::puts("{\"event\":\"audio_callback_returned\"}");
+                const bool submitted = audio_frames_submitted.load() != before;
+                if (log) std::printf("{\"event\":\"audio_callback_returned\",\"call\":%llu,\"submitted\":%s}\n", (unsigned long long)call, submitted ? "true" : "false");
+                next += period;
+                const auto now = std::chrono::steady_clock::now();
+                if (submitted) {
+                    // The blocking write already waited for space; resynchronize the idle clock.
+                    if (next < now) next = now;
+                } else {
+                    if (next < now) next = now + period;
+                    if (gate.owns_lock()) gate.unlock();
+                    std::this_thread::sleep_until(next);
+                    if (!guest_parallel) gate.lock();
+                }
             }
-            std::puts("{\"event\":\"audio_bootstrap_credits_exhausted\",\"pcm_completion_emulated\":false}");
-            record->done = true; state_changed.notify_all();
-            // This is a bounded diagnostic consumer, not a complete audio runtime.
         }).detach();
     } catch (const std::system_error&) { audio_output = nullptr; delete endpoint; threads.pop_back(); ctx.r3.u64 = 0x80004005; return; }
     put_word(output, 0x41550000); ctx.r3.u64 = 0;
     std::printf("{\"event\":\"audio_client_registered\",\"callback\":\"%08x\",\"argument\":\"%08x\",\"endpoint\":\"AAudio\",\"rate\":48000,\"channels\":2,\"pcm_submission_implemented\":true}\n", callback, argument);
+}
+// App pause (GameActivity.onStop/onStart): a host thread takes the big kernel lock and
+// keeps it until resume, so every guest thread stops at its next kernel import (waits,
+// critical sections, audio submit, GPU interrupts all take it); the AAudio stream is
+// paused so the device plays nothing. Guest time is host time: after a resume the game
+// sees the paused interval as one long frame.
+static std::mutex pause_mutex;
+static std::condition_variable pause_changed;
+static bool pause_requested = false, pause_holding = false;
+extern "C" void me_runtime_set_paused(bool paused) {
+    std::unique_lock<std::mutex> lock(pause_mutex);
+    if (paused == pause_requested) return;
+    pause_requested = paused;
+    if (paused) {
+        std::thread([] {
+            execution_gate.lock();   // may wait for the current owner's import to finish
+            if (audio_output_is_ready()) AAudioStream_requestPause(audio_output->stream);
+            std::unique_lock<std::mutex> lock(pause_mutex);
+            pause_holding = true; pause_changed.notify_all();
+            std::puts("{\"event\":\"runtime_paused\"}");
+            pause_changed.wait(lock, [] { return !pause_requested; });
+            if (audio_output_is_ready()) { AAudioStream_requestFlush(audio_output->stream); AAudioStream_requestStart(audio_output->stream); }
+            pause_holding = false;
+            execution_gate.unlock();
+            pause_changed.notify_all();
+            std::puts("{\"event\":\"runtime_resumed\"}");
+        }).detach();
+        // Bounded: the UI thread must not hang if a guest thread holds the lock for long.
+        pause_changed.wait_for(lock, std::chrono::seconds(2), [] { return pause_holding; });
+    } else {
+        pause_changed.notify_all();
+    }
 }
 static PPC_FUNC(thread_test_entry) {
     const auto event = ctx.r3.u32;
@@ -2400,7 +2832,8 @@ PPC_FUNC(me_test_gpu_interrupt) {
 }
 static int self_test(PPCContext& ctx) {
     unsigned checks = 0;
-    auto expect = [&](bool value) { ++checks; if (!value) { std::fprintf(stderr, "self-test check %u failed\n", checks); std::exit(1); } };
+    static const bool trace_checks = std::getenv("ME_TEST_TRACE") != nullptr; // prints every check line (hang hunting)
+    auto expect = [&](bool value, std::source_location where = std::source_location::current()) { ++checks; if (trace_checks) std::fprintf(stderr, "check %u line %u owned %d\n", checks, unsigned(where.line()), int(execution_gate.owned())); if (!value) { std::fprintf(stderr, "self-test check %u failed (line %u)\n", checks, unsigned(where.line())); std::exit(1); } };
     {
         char path[]="/data/local/tmp/me-position-test-XXXXXX";
         int fd=mkstemp(path); expect(fd>=0); unlink(path);
@@ -2755,7 +3188,9 @@ static int self_test(PPCContext& ctx) {
         expect(unlink((std::string(directory)+"/inventory.txt").c_str())==0 && rmdir(directory)==0);
     }
     {
+        if (trace_checks) std::fprintf(stderr, "gate owned before fpu test: %d\n", int(execution_gate.owned()));
         const auto old=ctx.fpscr.getcsr();ctx.r3.u64=0;__imp__KeEnableFpuExceptions(ctx,guest);
+        if (trace_checks) std::fprintf(stderr, "fpu test returned\n");
         expect(!(ctx.fpscr.getcsr()&0x9f00) && (ctx.fpscr.getcsr()&~0x9f00u)==(old&~0x9f00u));
         ctx.r3.u64=0;ctx.r4.u64=0x70001000;__imp__XexGetModuleHandle(ctx,guest);
         expect(!ctx.r3.u32 && load_word(0x70001000)==0x60001000);
@@ -2789,7 +3224,12 @@ static int self_test(PPCContext& ctx) {
     expect(!xma_test.read(0x7fea1800, 8, xma_value) && !xma_test.read(0x7fea1801, 4, xma_value));
     expect(xma_test.write(0x7fea1804, 4, 0x03000000) && xma_test.control == 3);
     expect(xma_test.read(0x7fea1804, 4, xma_value) && xma_value == 0x03000000);
-    expect(!xma_test.write(0x7fea1940, 4, 1) && !xma_test.read(0x7fea1818, 4, xma_value));
+    expect(!xma_test.write(0x7fea1940, 4, 1) && !xma_test.read(0x7fea1820, 4, xma_value));
+    expect(xma_test.read(0x7fea181c, 4, xma_value) && xma_value == 0x01000000);
+    expect(xma_test.read(0x7fea1818, 4, xma_value) && xma_value == 0x01000000 && xma_test.next_context_index == 2);
+    xma_test.next_context_index = 319;
+    expect(xma_test.read(0x7fea1818, 4, xma_value) && xma_value == 0x3f010000 && xma_test.next_context_index == 0);
+    expect(!xma_test.write(0x7fea1818, 4, 0));
     expect(!xma_test.write(0x7fea1804, 4, 0xffffffff) && xma_test.control == 3);
     // Test-only device callbacks. No register emulation is installed for game startup.
     struct MmioCapture { uint32_t address = 0, value = 0, reads = 0, writes = 0; } capture;
@@ -3036,37 +3476,51 @@ static int self_test(PPCContext& ctx) {
         auto watch = sdk_memory.RegisterPhysicalMemoryInvalidationCallback(callback, &invalidation);
         sdk_memory.EnablePhysicalMemoryAccessCallbacks(physical + 3, 1, true, false);
         expect(bridge.watched_pages() == 1);
-        sdk_memory.SynchronizePhysicalWrites(); expect(!invalidation.calls);
+        me_gate_epoch.fetch_add(1); sdk_memory.SynchronizePhysicalWrites(); expect(!invalidation.calls);
         PPC_STORE_U32(physical_alias + 16, 0x11223344);
         // Re-enabling must not hide the write by replacing the snapshot.
         sdk_memory.EnablePhysicalMemoryAccessCallbacks(physical, 4096, true, false);
-        sdk_memory.SynchronizePhysicalWrites();
+        me_gate_epoch.fetch_add(1); sdk_memory.SynchronizePhysicalWrites();
         expect(invalidation.calls == 1 && invalidation.address == physical && invalidation.length == 4096);
         expect(bridge.watched_pages() == 0);
-        sdk_memory.SynchronizePhysicalWrites(); expect(invalidation.calls == 1);
+        me_gate_epoch.fetch_add(1); sdk_memory.SynchronizePhysicalWrites(); expect(invalidation.calls == 1);
         sdk_memory.EnablePhysicalMemoryAccessCallbacks(physical, 4096, true, false);
         simde_mm_storeu_si128(reinterpret_cast<simde__m128i*>(guest + physical_alias + 32), simde_mm_set1_epi32(0x12345678));
-        sdk_memory.SynchronizePhysicalWrites(); expect(invalidation.calls == 2);
+        me_gate_epoch.fetch_add(1); sdk_memory.SynchronizePhysicalWrites(); expect(invalidation.calls == 2);
         sdk_memory.EnablePhysicalMemoryAccessCallbacks(physical, 4096, true, false);
         __atomic_store_n(reinterpret_cast<uint32_t*>(guest + physical_alias + 64), 0x87654321, __ATOMIC_SEQ_CST);
-        sdk_memory.SynchronizePhysicalWrites(); expect(invalidation.calls == 3);
+        me_gate_epoch.fetch_add(1); sdk_memory.SynchronizePhysicalWrites(); expect(invalidation.calls == 3);
         sdk_memory.EnablePhysicalMemoryAccessCallbacks(physical, 4096, true, false);
-        std::memset(shared_bytes + 80, 0x5a, 16);
-        sdk_memory.SynchronizePhysicalWrites(); expect(invalidation.calls == 4);
+        std::memset(guest + physical_alias + 80, 0x5a, 16); // CPU write through a guest alias
+        me_gate_epoch.fetch_add(1); sdk_memory.SynchronizePhysicalWrites(); expect(invalidation.calls == 4);
+        sdk_memory.EnablePhysicalMemoryAccessCallbacks(physical, 4096, true, false);
+        me_gate_epoch.fetch_add(1); sdk_memory.SynchronizePhysicalWrites();
+        PPC_STORE_U32(physical_alias + 16, 0x55667788);
+        sdk_memory.SynchronizePhysicalWrites(); expect(invalidation.calls == 5 && bridge.watched_pages() == 0); // reported without a gate handover
+        me_gate_epoch.fetch_add(1); sdk_memory.SynchronizePhysicalWrites(); expect(invalidation.calls == 5);
+        sdk_memory.EnablePhysicalMemoryAccessCallbacks(physical, 4096, true, false);
+        PPC_STORE_U32(0xc0000000u + physical + 8, 1); // second physical alias faults too
+        me_gate_epoch.fetch_add(1); sdk_memory.SynchronizePhysicalWrites(); expect(invalidation.calls == 6 && invalidation.address == physical);
+        sdk_memory.EnablePhysicalMemoryAccessCallbacks(physical, 4096, true, false);
+        me_gpu_write_watch.host_write(physical_alias + 100, 8); // system-call writes (pread) are marked explicitly
+        expect(!bridge.watched_pages());
+        me_gate_epoch.fetch_add(1); sdk_memory.SynchronizePhysicalWrites(); expect(invalidation.calls == 7);
         sdk_memory.EnablePhysicalMemoryAccessCallbacks(physical, 8192, true, false);
         expect(bridge.watched_pages() == 2);
         MeRexGpuMemory::InvalidateReleasedRange(physical, 8192);
-        expect(invalidation.calls == 5 && invalidation.length == 8192 && !bridge.watched_pages());
+        expect(invalidation.calls == 8 && invalidation.length == 8192 && !bridge.watched_pages());
         auto release_alias = physical_memory.allocate(4096, 4, 0, UINT32_MAX, 4096);
         expect(release_alias != 0);
         const auto release_physical = MePhysicalMemory::physical(release_alias);
+        // Allocation drops stale GPU copies of the new range (default ME_GPU_ALLOC_INVALIDATE).
+        expect(invalidation.calls == 9 && invalidation.address == release_physical && invalidation.length == 4096);
         sdk_memory.EnablePhysicalMemoryAccessCallbacks(release_physical, 4096, true, false);
         expect(physical_memory.free(release_alias));
-        expect(invalidation.calls == 6 && invalidation.address == release_physical && !bridge.watched_pages());
+        expect(invalidation.calls == 10 && invalidation.address == release_physical && !bridge.watched_pages());
         sdk_memory.UnregisterPhysicalMemoryInvalidationCallback(watch);
         sdk_memory.EnablePhysicalMemoryAccessCallbacks(physical, 4096, true, false);
         PPC_STORE_U32(physical_alias + 16, 0);
-        sdk_memory.SynchronizePhysicalWrites(); expect(invalidation.calls == 6);
+        me_gate_epoch.fetch_add(1); sdk_memory.SynchronizePhysicalWrites(); expect(invalidation.calls == 10);
         bool rejected = false;
         try { sdk_memory.EnablePhysicalMemoryAccessCallbacks(physical, 4096, true, true); }
         catch (const std::runtime_error&) { rejected = true; }
@@ -3085,6 +3539,16 @@ static int self_test(PPCContext& ctx) {
     expect(!physical_memory.allocate(8192, 4, physical, physical + 4095, 0));
     ctx.r3.u64 = 0; ctx.r4.u64 = physical_alias; __imp__MmFreePhysicalMemory(ctx, guest);
     expect(physical_memory.allocations.empty() && !physical_memory.find(physical_alias));
+    if (!strict_physical_free()) {
+        // Platform contract: the freed allocation's pages stay mapped in every
+        // alias window, which is what makes the console's deferred audio-kick
+        // race legal. Any stale read or write must not fault.
+        put_word(physical_alias + 0x10, 0xdeadbeef);
+        expect(load_word(physical_alias + 0x10) == 0xdeadbeef);
+        expect(load_word(0xc0000000u + physical + 0x10) == 0xdeadbeef);
+        PPC_STORE_U32(0xa0000000u + physical + 0x14, 5);
+        expect(load_word(physical_alias + 0x14) == 5);
+    }
     expect(!gpu_physical.resolve(physical, 4));
     auto reused = physical_memory.allocate(4800, 0x404, physical, physical + 8191, 4096);
     expect(reused == physical_alias && !load_word(reused) && !load_word(reused + 4));
@@ -3280,6 +3744,8 @@ static int self_test(PPCContext& ctx) {
     ctx.r3.u64 = 0x70000f50; ctx.r4.u64 = 0x70000f80; __imp__NtQueryFullAttributesFile(ctx, guest);
     expect(ctx.r3.u32 == 0xc000000f && load_word(0x70000f80) == 0xaaaaaaaa && load_word(0x70000fb4) == 0xaaaaaaaa);
     ctx.r3.u64 = 0xc000000f; __imp__RtlNtStatusToDosError(ctx, guest); expect(ctx.r3.u32 == 2);
+    ctx.r3.u64=0xc0000008;__imp__RtlNtStatusToDosError(ctx,guest);expect(ctx.r3.u32==6);
+    ctx.r3.u64=0xc0000035;__imp__RtlNtStatusToDosError(ctx,guest);expect(ctx.r3.u32==183);
     guest[0x70000f00] = 1;
     ctx.r3.u64 = 0x70000f50; ctx.r4.u64 = 0x70000f80; __imp__NtQueryFullAttributesFile(ctx, guest);
     expect(ctx.r3.u32 == 0xc0000033 && load_word(0x70000f80) == 0xaaaaaaaa);
@@ -3525,11 +3991,22 @@ static int self_test(PPCContext& ctx) {
         for(unsigned i=0;i<node_count;++i)put_word(base_nodes+i*8,i+1<node_count?base_nodes+(i+1)*8:0);
         put_word(header,base_nodes);put_word(header+4,(node_count<<16)|0x4321);
         std::array<std::vector<uint32_t>,4> popped;std::array<std::thread,4> workers;
-        for(unsigned i=0;i<4;++i)workers[i]=std::thread([&,i]{PPCContext local{};for(;;){local.r3.u64=header;__imp__InterlockedPopEntrySList(local,guest);if(!local.r3.u32)break;popped[i].push_back(local.r3.u32);}});
+        for(unsigned i=0;i<4;++i)workers[i]=std::thread([&,i]{PPCContext local{};for(;;){local.r3.u64=header;__imp__InterlockedPopEntrySList_locked(local,guest); /* body without the kernel lock: real CAS contention */if(!local.r3.u32)break;popped[i].push_back(local.r3.u32);}});
         for(auto& worker:workers)worker.join();
         std::vector<uint32_t> all;for(const auto& items:popped)all.insert(all.end(),items.begin(),items.end());std::sort(all.begin(),all.end());
         expect(all.size()==node_count);bool exact=all.size()==node_count;for(unsigned i=0;i<all.size();++i)exact&=all[i]==base_nodes+i*8;expect(exact);
         expect(load_word(header)==0 && load_word(header+4)==0x4321);
+    }
+    {   // Lock-free critical sections under real host contention (parallel guest mode):
+        // 4 threads x 20000 Enter/Leave, a plain counter inside must come out exact.
+        const uint32_t cs=0x70001a00;ctx.r3.u64=cs;__imp__RtlInitializeCriticalSection(ctx,guest);
+        uint64_t counter=0;std::array<std::thread,4> workers;
+        { std::unique_lock<MeExecutionGate> release(execution_gate,std::adopt_lock);release.unlock();
+          for(unsigned i=0;i<4;++i)workers[i]=std::thread([&,i]{thread_address=0x61f01000+i*0x1000;PPCContext local{};
+              for(unsigned n=0;n<20000;++n){local.r3.u64=cs;if(n&1){__imp__RtlEnterCriticalSection(local,guest);}else{__imp__RtlTryEnterCriticalSection(local,guest);if(!local.r3.u32){local.r3.u64=cs;__imp__RtlEnterCriticalSection(local,guest);}}
+                  ++counter;local.r3.u64=cs;__imp__RtlLeaveCriticalSection(local,guest);}});
+          for(auto& w:workers)w.join();release.lock();release.release(); }
+        expect(counter==80000 && load_word(cs+16)==UINT32_MAX && load_word(cs+20)==0 && load_word(cs+24)==0 && cs_handoffs.empty());
     }
     {
         const auto old_pcr=pcr_address,old_thread=thread_address,old_tls=tls_dynamic;
@@ -3573,6 +4050,15 @@ static int self_test(PPCContext& ctx) {
         ctx.r3.u64=0x70001400;__imp__XMACreateContext(ctx,guest);expect(ctx.r3.u32==0 && load_word(0x70001400)==contexts[0]);
         zero=true;for(unsigned i=0;i<64;++i)zero&=guest[contexts[0]+i]==0;expect(zero);
         expect(!xma_context_pool.release(xma_registers.context_physical,xma_registers.context_physical+1));
+        // Kick/Lock through RexGlue XmaContext: a context without a valid output buffer is
+        // consumed by one kick (enable flag cleared) and its data stays untouched.
+        std::memset(guest+contexts[5],0,64);
+        me_xma_store(0x7fea1940,4,__builtin_bswap32(1u<<5));
+        expect(!me_xma_bridge_enabled(5));
+        bool untouched=true;for(unsigned i=0;i<64;++i)untouched&=guest[contexts[5]+i]==0;expect(untouched);
+        me_xma_store(0x7fea1964,4,__builtin_bswap32(1u<<31));expect(!me_xma_bridge_enabled(319));
+        me_xma_store(0x7fea1a40,4,__builtin_bswap32(1u<<5));expect(!me_xma_bridge_enabled(5));
+        untouched=true;for(unsigned i=0;i<64;++i)untouched&=guest[contexts[5]+i]==0;expect(untouched);
         bool released=true;for(auto address:contexts){ctx.r3.u64=address;__imp__XMAReleaseContext(ctx,guest);released&=ctx.r3.u32==0;}expect(released);
         expect(!xma_context_pool.release(xma_registers.context_physical,xma_registers.context_physical));
         uint64_t value=0;expect(xma_registers.read(0x7fea1800,4,value) && uint32_t(value)==__builtin_bswap32(xma_registers.context_physical));
@@ -3644,16 +4130,90 @@ static int self_test(PPCContext& ctx) {
         {std::unique_lock lock(mutex);expect(changed.wait_for(lock,std::chrono::seconds(2),[&]{return ticks>=2;}));}
         worker.stop_and_join();expect(!worker.failure());expect(!worker.start([]{}));
     }
+
+    {
+        // Exercise guest ABI against an isolated host fixture, never real saves.
+        expect(save_storage.root.empty());
+        char fixture[]="/data/local/tmp/me-content-abi-XXXXXX";
+        expect(mkdtemp(fixture)!=nullptr && save_storage.init(fixture));
+        const bool old_signed=local_player_signed_in;const auto old_player=selected_local_player;
+        local_player_signed_in=true;selected_local_player.xuid=0xe000000000001234ull;
+        constexpr uint32_t base=0x70009000,ov=base+512,out=base+560,root=base+600;
+        std::memset(guest+base,0,1024);uint32_t event=0;expect(events.create(1,false,event)==0);
+        put_word(ov+12,event);ctx.r3.u64=0;ctx.r4.u64=1;ctx.r5.u64=0x200;ctx.r6.u64=0;ctx.r7.u64=out;ctx.r8.u64=ov;
+        __imp__XamShowDeviceSelectorUI(ctx,guest);
+        expect(ctx.r3.u32==997 && load_word(out)==1 && load_word(ov)==0 && events.find(event)->signaled);
+        put_word(base,1);put_word(base+4,1);std::memcpy(guest+base+264,"AbiTest",8);std::memcpy(guest+root,"save",5);
+        auto create=[&](uint32_t flags){ctx.r3.u64=0;ctx.r4.u64=root;ctx.r5.u64=base;ctx.r6.u64=flags;ctx.r7.u64=out;ctx.r8.u64=0;ctx.r9.u64=0;__imp__XamContentCreate(ctx,guest);return ctx.r3.u32;};
+        expect(create(1)==0 && load_word(out)==1);
+        // Build Xbox OBJECT_ATTRIBUTES and ANSI_STRING for NtOpenFile.
+        constexpr uint32_t attrs=base+640,name=base+660,path=base+680,iosb=base+720,buf=base+760;
+        std::memcpy(guest+path,"save:\\progress.bin",19);
+        put_word(attrs,0);put_word(attrs+4,name);put_word(attrs+8,0);put_word(name,(18u<<16)|19);put_word(name+4,path);
+        ctx.r3.u64=out;ctx.r4.u64=0x40000000;ctx.r5.u64=attrs;ctx.r6.u64=iosb;
+        expect(save_open_guest(ctx,2,0x40) && ctx.r3.u32==0);const auto handle=load_word(out);
+        const char payload[]="persisted guest bytes";std::memcpy(guest+buf,payload,sizeof(payload));
+        ctx.r3.u64=handle;ctx.r4.u64=0;ctx.r5.u64=0;ctx.r6.u64=0;ctx.r7.u64=iosb;ctx.r8.u64=buf;ctx.r9.u64=sizeof(payload);ctx.r10.u64=0;
+        __imp__NtWriteFile(ctx,guest);expect(ctx.r3.u32==0 && load_word(iosb+4)==sizeof(payload));
+        auto allocation=[&](uint32_t h,uint64_t bytes){save_store64(base+800,bytes);ctx.r3.u64=h;ctx.r4.u64=iosb;ctx.r5.u64=base+800;ctx.r6.u64=8;ctx.r7.u64=19;__imp__NtSetInformationFile(ctx,guest);return ctx.r3.u32;};
+        expect(allocation(handle,65536)==0);
+        struct stat allocated{};expect(fstat(save_storage.find(handle)->fd,&allocated)==0 && allocated.st_size==sizeof(payload) && allocated.st_blocks*512>=65536);
+        expect(allocation(handle,UINT64_MAX)==0xc000000d);
+        ctx.r3.u64=handle;ctx.r4.u64=iosb;__imp__NtFlushBuffersFile(ctx,guest);expect(ctx.r3.u32==0);
+        ctx.r3.u64=handle;__imp__NtClose(ctx,guest);expect(ctx.r3.u32==0);
+        ctx.r3.u64=root;ctx.r4.u64=0;__imp__XamContentClose(ctx,guest);expect(ctx.r3.u32==0);
+        expect(create(3)==0 && load_word(out)==2);
+        ctx.r3.u64=out;ctx.r4.u64=0x80000000;ctx.r5.u64=attrs;ctx.r6.u64=iosb;ctx.r8.u64=0x40;
+        __imp__NtOpenFile(ctx,guest);expect(ctx.r3.u32==0);const auto reopened=load_word(out);
+        std::memset(guest+buf,0,sizeof(payload));ctx.r3.u64=reopened;ctx.r4.u64=0;ctx.r5.u64=0;ctx.r6.u64=0;ctx.r7.u64=iosb;ctx.r8.u64=buf;ctx.r9.u64=sizeof(payload);ctx.r10.u64=0;
+        __imp__NtReadFile(ctx,guest);expect(ctx.r3.u32==0 && std::memcmp(guest+buf,payload,sizeof(payload))==0);
+        expect(allocation(reopened,65536)==0xc0000022);
+        ctx.r3.u64=reopened;__imp__NtClose(ctx,guest);expect(ctx.r3.u32==0);
+        ctx.r3.u64=root;ctx.r4.u64=0;__imp__XamContentClose(ctx,guest);expect(ctx.r3.u32==0);
+        expect(create(2)==50); // Existing data must survive unsupported replacement.
+        ctx.r3.u64=0;ctx.r4.u64=1;ctx.r5.u64=1;ctx.r6.u64=0;ctx.r7.u64=1;ctx.r8.u64=out;ctx.r9.u64=out+4;
+        __imp__XamContentCreateEnumerator(ctx,guest);expect(ctx.r3.u32==0 && load_word(out)==308);const auto enumeration=load_word(out+4);
+        ctx.r3.u64=enumeration;ctx.r4.u64=0;ctx.r5.u64=base;ctx.r6.u64=308;ctx.r7.u64=out;ctx.r8.u64=0;
+        __imp__XamEnumerate(ctx,guest);expect(ctx.r3.u32==0 && load_word(out)==1 && std::memcmp(guest+base+264,"AbiTest",7)==0);
+        ctx.r3.u64=enumeration;__imp__NtClose(ctx,guest);expect(ctx.r3.u32==0);expect(events.close(event)==0);
+        std::printf("{\"event\":\"save_abi_fixture\",\"path\":\"%s\"}\n",fixture);
+        save_storage.root.clear();save_storage.files.clear();save_storage.mounts.clear();content_enumerators.clear();
+        local_player_signed_in=old_signed;selected_local_player=old_player;
+    }
+    {
+        // Guest changes a valid bit/pointer while hardware advances its offset.
+        uint32_t word=__builtin_bswap32(0x00000007u);
+        me_xma_merge_word(&word,0x00100007u,0x08100007u);
+        expect(__builtin_bswap32(word)==0x08000007u);
+        word=__builtin_bswap32(0x12345678u);
+        me_xma_merge_word(&word,0x11223344u,0x11223344u);
+        expect(__builtin_bswap32(word)==0x12345678u);
+        word=__builtin_bswap32(0x00300007u);
+        me_xma_merge_word(&word,0x00100007u,0x00000007u);
+        expect(__builtin_bswap32(word)==0x00200007u);
+    }
     std::printf("{\"event\":\"self_test_passed\",\"checks\":%u,\"measured_tick_hz\":%.0f}\n", checks, measured);
     return 0;
 }
-int main(int argc, char** argv) {
+// Entered from exe_main.cpp (ADB executable) or jni_main.cpp (libmeruntime.so).
+int me_runtime_main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
+    // ME_GAME_ROOT: extracted game files (inventory.txt + files); the APK passes its
+    // app-accessible copy, the ADB executable keeps /data/local/tmp/me_game_readonly.
+    if (const char* game_root = std::getenv("ME_GAME_ROOT")) readonly_files.root = game_root;
     const bool testing = argc == 4 && std::strcmp(argv[3], "--self-test") == 0;
     pool_scan_experiment=argc==4 && std::strcmp(argv[3],"--gpu-explore-pool-scan")==0;
     if(pool_scan_experiment)std::puts("{\"event\":\"pool_scan_compatibility_experiment\",\"enabled\":true,\"original_game_bytes_modified\":false}");
     const bool long_probe=pool_scan_experiment || (argc==4 && std::strcmp(argv[3],"--gpu-explore-long-poll-yield")==0);
     diagnostic_timeout_rounds=pool_scan_experiment?48:(long_probe?24:4);
+    // Optional longer game runs: ME_DIAGNOSTIC_SECONDS (240..3600) keeps 5 s snapshots
+    // and only moves the bounded exit; the default limits stay unchanged.
+    if(const char* seconds=std::getenv("ME_DIAGNOSTIC_SECONDS")){
+        const long value=std::strtol(seconds,nullptr,10);
+        if(value>=240 && value<=3600)diagnostic_timeout_rounds=sig_atomic_t(value/5);
+        if(value==0)diagnostic_timeout_rounds=sig_atomic_t(0x7fffffff); // 0 = no bounded exit (APK play)
+        std::printf("{\"event\":\"diagnostic_timeout\",\"seconds\":%d}\n",int(diagnostic_timeout_rounds)*5);
+    }
     polling_yield_experiment=long_probe || (argc==4 && std::strcmp(argv[3],"--gpu-explore-poll-yield")==0);
     gpu_explore_mode = polling_yield_experiment || (argc == 4 && std::strcmp(argv[3], "--gpu-explore") == 0);
     const bool mmio_unbound_test = argc == 4 && std::strcmp(argv[3], "--mmio-unbound-test") == 0;
@@ -3663,6 +4223,9 @@ int main(int argc, char** argv) {
     char magic[8]; read_exact(file, magic, 8);
     if (std::memcmp(magic, "MEBOOT01", 8)) return 2;
     page_size = size_t(sysconf(_SC_PAGESIZE));
+    me_gate_label = gate_label;
+    if (const char* serial = std::getenv("ME_GUEST_SERIAL"); serial && !std::strcmp(serial, "1")) guest_parallel = false;
+    execution_gate.set_barging(guest_parallel && !testing); // short kernel lock in parallel mode
     guest = static_cast<uint8_t*>(mmap(nullptr, 0x100000000ull, PROT_NONE,
         MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0));
     if (guest == MAP_FAILED) { std::perror("reserve guest space"); return 2; }
@@ -3734,6 +4297,7 @@ int main(int argc, char** argv) {
     sigaction(SIGILL, &action, nullptr); sigaction(SIGTRAP, &action, nullptr); sigaction(SIGALRM, &action, nullptr); sigaction(SIGUSR1, &action, nullptr);
     alarm(5);
     std::printf("{\"event\":\"entry_begin\",\"entry\":\"829fab98\",\"mappings\":%u,\"sections\":%u,\"page_size\":%zu}\n", mappings, sections, page_size);
+    if (guest_parallel) run.unlock();
     _xstart(context, guest);
     std::printf("{\"event\":\"entry_returned\",\"r3\":%u}\n", context.r3.u32);
     return 44; // Unexpected return is not game startup success.

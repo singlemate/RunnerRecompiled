@@ -1,6 +1,8 @@
 #pragma once
 #include "gpu_physical_view.h"
 #include "gpu_mmio.h"
+#include "execution_gate.h"
+#include "gpu_write_watch.h"
 #include <rex/memory/gpu_memory.h>
 #include <stdexcept>
 #include <map>
@@ -8,8 +10,9 @@
 #include <vector>
 #include <algorithm>
 
+struct MeGpuScanStats { std::atomic<uint64_t> calls{0}, scans{0}, pages{0}; };
 // Non-owning bridge; no Rex Memory instance, heap, or new backing store.
-// All access must hold the loader execution gate and retain allocations.
+// Callable from the GPU thread without the loader execution gate (see gpu_write_watch.h).
 class MeRexGpuMemory final : public rex::memory::GpuMemory {
  public:
     MeRexGpuMemory(const MeGpuPhysicalView& view, MeGpuMmio& mmio) : view_(view), mmio_(mmio) { instances_.push_back(this); }
@@ -40,8 +43,8 @@ class MeRexGpuMemory final : public rex::memory::GpuMemory {
             }};
         return true;
     }
-    // Software watches: compare exact bytes at GPU consumption boundaries.
-    // All CPU producers and GPU consumers MUST share execution_gate.
+    // Write watches use page protection (gpu_write_watch.h): CPU writes to a watched
+    // page fault once and mark it dirty; synchronization reports only dirty pages.
     void* RegisterPhysicalMemoryInvalidationCallback(PhysicalMemoryInvalidationCallback callback, void* context) override {
         if (!callback) throw std::runtime_error("Null GPU invalidation callback");
         auto entry = std::make_unique<Callback>();
@@ -64,38 +67,42 @@ class MeRexGpuMemory final : public rex::memory::GpuMemory {
         // Validate all pages before changing watch state.
         for (uint64_t page = first; page < end; page += 4096)
             if (!view_.resolve(uint32_t(page), 4096)) throw std::runtime_error("GPU watch covers unallocated memory");
-        for (uint64_t page = first; page < end; page += 4096) {
-            // Do not refresh a pre-existing watch and hide an unobserved CPU write.
-            if (pages_.contains(uint32_t(page))) continue;
-            auto& snapshot = pages_[uint32_t(page)];
-            std::memcpy(snapshot.data(), view_.resolve(uint32_t(page), 4096), 4096);
+        // Pages already watched or holding an unsynchronized write keep their state,
+        // so re-enabling never hides a CPU write.
+        me_gpu_write_watch.watch(first / 4096, uint32_t((end - first) / 4096));
+    }
+    // Called per draw (SharedMemory::RequestRanges) and per primary buffer. Guest
+    // threads run concurrently with the command processor, so the dirty set (a 16 KiB
+    // bitmap filled by write faults) is checked on every call.
+    void SynchronizePhysicalWrites() override {
+        scan_stats.calls.fetch_add(1, std::memory_order_relaxed);
+        scan_stats.scans.fetch_add(1, std::memory_order_relaxed);
+        std::vector<std::pair<uint32_t, uint32_t>> runs;
+        me_gpu_write_watch.take_dirty([&](uint32_t first, uint32_t count) { runs.emplace_back(first, count); });
+        for (auto [first, count] : runs) {
+            scan_stats.pages.fetch_add(count, std::memory_order_relaxed);
+            notify(first * 4096u, count * 4096u);
         }
     }
-    void SynchronizePhysicalWrites() override {
-        std::vector<uint32_t> changed;
-        for (const auto& [page, snapshot] : pages_) {
-            auto* bytes = view_.resolve(page, 4096);
-            if (!bytes || std::memcmp(bytes, snapshot.data(), 4096)) changed.push_back(page);
-        }
-        for (auto page : changed) invalidate(page, 4096);
+    // Allocation/free notification regardless of watch state (Xenia Canary fork PR #93:
+    // pages the GPU marked valid without a watch keep a stale copy after the guest
+    // reallocates and fills them -> black textures). Default on; ME_GPU_ALLOC_INVALIDATE=0 disables.
+    static void InvalidateAllocatedRange(uint32_t address, uint32_t length) {
+        me_gpu_write_watch.release(address, length);
+        for (auto* instance : instances_) instance->notify(address, length);
     }
     static void InvalidateReleasedRange(uint32_t address, uint32_t length) {
-        for (auto* instance : instances_) instance->invalidate(address, length);
+        if (!me_gpu_write_watch.release(address, length)) return;
+        for (auto* instance : instances_) instance->notify(address, length);
     }
-    size_t watched_pages() const { return pages_.size(); }
+    size_t watched_pages() const { return me_gpu_write_watch.watched_pages(); }
+
+    static inline MeGpuScanStats scan_stats;
  private:
     struct Callback { PhysicalMemoryInvalidationCallback callback; void* context; bool active = true; };
     std::vector<std::unique_ptr<Callback>> callbacks_;
-    std::map<uint32_t, std::array<uint8_t, 4096>> pages_;
     static inline std::vector<MeRexGpuMemory*> instances_;
-    void invalidate(uint32_t address, uint32_t length) {
-        bool watched = false;
-        for (auto it = pages_.begin(); it != pages_.end();) {
-            if (uint64_t(it->first) < uint64_t(address) + length && uint64_t(it->first) + 4096 > address) {
-                it = pages_.erase(it); watched = true;
-            } else ++it;
-        }
-        if (!watched) return;
+    void notify(uint32_t address, uint32_t length) {
         // Snapshot stable handles so reentrant unregister/register cannot invalidate iteration.
         std::vector<Callback*> callbacks;
         for (auto& entry : callbacks_) if (entry->active) callbacks.push_back(entry.get());

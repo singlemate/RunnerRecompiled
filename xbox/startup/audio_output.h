@@ -30,6 +30,11 @@ struct MeAudioOutput {
             if (waited != AAUDIO_OK && waited != AAUDIO_ERROR_TIMEOUT) break;
         }
         if (state != AAUDIO_STREAM_STATE_STARTED) { close(); return false; }
+        // Blocking writes pace the guest audio callback to real device consumption;
+        // keep the queue short (about 4 guest frames of 256 samples) so the guest's
+        // audio clock stays close to what is actually heard.
+        const int32_t burst = AAudioStream_getFramesPerBurst(stream);
+        AAudioStream_setBufferSizeInFrames(stream, burst > 512 ? burst * 2 : 1024);
         return true;
     }
 };

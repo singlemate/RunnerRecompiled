@@ -42,6 +42,8 @@ public class MainActivity extends Activity implements InputManager.InputDeviceLi
         text(root,"Технический стенд ввода и файлов. Игровой runtime запускается отдельно.");
         Button preview=new Button(this);preview.setText("Живой просмотр игры (диагностика)");root.addView(preview);
         preview.setOnClickListener(v->startActivity(new Intent(this,PreviewActivity.class)));
+        Button play=new Button(this);play.setText("Играть (вывод на экран)");root.addView(play);
+        play.setOnClickListener(v->startActivity(new Intent(this,GameActivity.class)));
         LinearLayout options=new LinearLayout(this);root.addView(options);
         CheckBox intro=new CheckBox(this);intro.setTextColor(Color.WHITE);intro.setText("Пропускать стартовую заставку (будущий запуск)");
         intro.setChecked(getPreferences(0).getBoolean("skipIntro",false));options.addView(intro);
