@@ -76,6 +76,13 @@ static MeMutants mutants;
 static MeNotifications notifications;
 static MeOfflineNetwork offline_network;
 static MePhysicalMemory physical_memory;
+// Per-call events (waits, virtual alloc/free, file reads, swaps...) are ~3000 lines/s
+// in a level. stdout is unbuffered, so each is a write syscall - on /sdcard (FUSE) in the
+// APK, often made while holding the kernel lock. Printed only with ME_LOG_VERBOSE=1.
+static bool me_log_verbose() {
+    static const bool verbose = [] { const char* v = std::getenv("ME_LOG_VERBOSE"); return v && !std::strcmp(v, "1"); }();
+    return verbose;
+}
 static MeReadOnlyFiles readonly_files("/data/local/tmp/me_game_readonly");
 static int physical_fd = -1;
 static MeGpuPhysicalView gpu_physical;
@@ -501,7 +508,7 @@ ME_IMPORT(__imp__ExGetXConfigSetting) {
     // Match the SDK entry wrapper: size is zero on a failed query.
     if (required) { const uint16_t encoded = __builtin_bswap16(size); std::memcpy(guest + required, &encoded, 2); }
     ctx.r3.u64 = status;
-    std::printf("{\"event\":\"xconfig_query\",\"setting\":%u,\"value\":\"%08x\",\"capacity\":%u,\"required\":%u,\"status\":\"%08x\"}\n",setting,profile_value,capacity,size,status);
+    if (me_log_verbose()) std::printf("{\"event\":\"xconfig_query\",\"setting\":%u,\"value\":\"%08x\",\"capacity\":%u,\"required\":%u,\"status\":\"%08x\"}\n",setting,profile_value,capacity,size,status);
 }
 static void query_video_mode(PPCContext& ctx) {
     const auto output = ctx.r3.u32;
@@ -549,7 +556,7 @@ ME_IMPORT(__imp__VdRetrainEDRAM) {
         !checked_span(ctx.r4.u32, 4) || !checked_span(ctx.r6.u32, 4) || !checked_span(ctx.r7.u32, 8))
         me_stop_import("EDRAM_retrain_requires_known_explore_case", ctx);
     // At this callsite zero selects the no-command/no-retry path. Leave outputs unchanged.
-    std::puts("{\"event\":\"edram_retrain_compat\",\"hardware_training\":false,\"commands_generated\":0,\"result\":0}");
+    if (me_log_verbose()) std::puts("{\"event\":\"edram_retrain_compat\",\"hardware_training\":false,\"commands_generated\":0,\"result\":0}");
     ctx.r3.u64 = 0;
 }
 static MeXmaRegisters xma_registers;
@@ -709,7 +716,7 @@ ME_IMPORT(__imp__VdGetSystemCommandBuffer) {
     std::memset(guest + buffer, 0, 0x94);
     put_word(buffer, 0xbeef0000);
     put_word(identifier, 0xbeef0001);
-    std::printf("{\"event\":\"system_command_buffer_metadata\",\"buffer\":\"%08x\",\"identifier_output\":\"%08x\",\"compatibility_markers\":true,\"gpu_buffer_created\":false}\n", buffer, identifier);
+    if (me_log_verbose()) std::printf("{\"event\":\"system_command_buffer_metadata\",\"buffer\":\"%08x\",\"identifier_output\":\"%08x\",\"compatibility_markers\":true,\"gpu_buffer_created\":false}\n", buffer, identifier);
 }
 ME_IMPORT(__imp__VdPersistDisplay) {
     const auto request=ctx.r3.u32,output=ctx.r4.u32;
@@ -783,7 +790,26 @@ ME_IMPORT(__imp__VdSwap) {
     for (unsigned i = 0; i < 64; ++i) put_word(ctx.r3.u32 + i * 4, commands[i]);
     static uint64_t calls=0;const auto call=++calls;
     if(call<=8 || !(call&(call-1)))trace_gpu_submission("swap_generated",ctx.r31.u32,call);
-    std::printf("{\"event\":\"swap_commands_generated\",\"buffer\":\"%08x\",\"frontbuffer_physical\":\"%08x\",\"width\":%u,\"height\":%u,\"dwords\":64,\"identifier_completion_emulated\":false}\n", ctx.r3.u32, physical, width, height);
+    if (me_log_verbose()) std::printf("{\"event\":\"swap_commands_generated\",\"buffer\":\"%08x\",\"frontbuffer_physical\":\"%08x\",\"width\":%u,\"height\":%u,\"dwords\":64,\"identifier_completion_emulated\":false}\n", ctx.r3.u32, physical, width, height);
+    // Frame limiter (heat/battery, launcher setting): ME_FRAME_LIMIT=30|60 (10..240 Hz,
+    // unset/0 = off) paces the guest's swaps on a fixed cadence; the gate is released
+    // while waiting so other guest threads keep running. Falling behind restarts the
+    // cadence instead of catching up with a burst of frames.
+    static const int64_t limit_ns = [] {
+        const char* v = std::getenv("ME_FRAME_LIMIT"); const int hz = v ? std::atoi(v) : 0;
+        if (hz) std::printf("{\"event\":\"frame_limit\",\"hz\":%d}\n", hz);
+        return hz >= 10 && hz <= 240 ? int64_t(1000000000) / hz : int64_t(0);
+    }();
+    if (limit_ns) {
+        static int64_t next_swap_ns = 0;
+        const int64_t now = int64_t(me_gate_now_ns());
+        if (next_swap_ns && now < next_swap_ns) {
+            me_diagnostic_sleep(std::chrono::nanoseconds(next_swap_ns - now));
+            next_swap_ns += limit_ns;
+        } else {
+            next_swap_ns = now + limit_ns;
+        }
+    }
 }
 ME_IMPORT(__imp__MmSetAddressProtect) {
     const auto address = ctx.r3.u32, size = ctx.r4.u32, protection = ctx.r5.u32;
@@ -1431,7 +1457,7 @@ ME_IMPORT(__imp__KeWaitForSingleObject) {
     };
     uint32_t status = 0;
     if (!ready()) {
-        std::printf("{\"event\":\"kernel_object_wait_begin\",\"object\":\"%08x\",\"thread\":\"%08x\"}\n",address,thread_address);
+        if (me_log_verbose()) std::printf("{\"event\":\"kernel_object_wait_begin\",\"object\":\"%08x\",\"thread\":\"%08x\"}\n",address,thread_address);
         if (timeout && !raw) status = 0x102;
         else if (!timeout) wait_for_change(ready);
         else {
@@ -1488,7 +1514,7 @@ ME_IMPORT(__imp__KeWaitForMultipleObjects) {
         return false;
     };
     if (!ready()) {
-        std::printf("{\"event\":\"kernel_multiple_wait_begin\",\"count\":%u,\"wait_all\":%s,\"thread\":\"%08x\"}\n", count, type == 0 ? "true":"false", thread_address);
+        if (me_log_verbose()) std::printf("{\"event\":\"kernel_multiple_wait_begin\",\"count\":%u,\"wait_all\":%s,\"thread\":\"%08x\"}\n", count, type == 0 ? "true":"false", thread_address);
         if (timeout && !raw) status = 0x102;
         else if (!timeout) wait_for_change(ready);
         else {
@@ -1616,7 +1642,7 @@ ME_IMPORT(__imp__NtSetInformationFile) {
         else file->position=position;
     }
     put_word(iosb,status);put_word(iosb+4,status?0:8);ctx.r3.u64=status;
-    std::printf("{\"event\":\"file_position_set\",\"position\":%llu,\"status\":\"%08x\"}\n",(unsigned long long)file->position,status);
+    if (me_log_verbose()) std::printf("{\"event\":\"file_position_set\",\"position\":%llu,\"status\":\"%08x\"}\n",(unsigned long long)file->position,status);
 }
 
 ME_IMPORT(__imp__NtQueryInformationFile) {
@@ -1691,7 +1717,7 @@ ME_IMPORT(__imp__NtReadFile) {
     }
     const uint32_t status=count<0?0xc0000001:(length && !count?0xc0000011:0);
     put_word(iosb,status);put_word(iosb+4,count<0?0:uint32_t(count));ctx.r3.u64=status;
-    std::printf("{\"event\":\"file_read\",\"handle\":\"%08x\",\"offset\":%llu,\"requested\":%u,\"read\":%lld,\"status\":\"%08x\"}\n",handle,(unsigned long long)offset,length,(long long)count,status);
+    if (me_log_verbose()) std::printf("{\"event\":\"file_read\",\"handle\":\"%08x\",\"offset\":%llu,\"requested\":%u,\"read\":%lld,\"status\":\"%08x\"}\n",handle,(unsigned long long)offset,length,(long long)count,status);
 }
 
 ME_IMPORT(__imp__NtQueryFullAttributesFile) {
@@ -1831,7 +1857,7 @@ ME_IMPORT(__imp__NtWaitForSingleObjectEx) {
         return events.wait(handle, false, status);
     };
     if (!ready()) {
-        std::printf("{\"event\":\"object_wait_begin\",\"handle\":\"%08x\",\"thread\":\"%08x\"}\n", handle, thread_address);
+        if (me_log_verbose()) std::printf("{\"event\":\"object_wait_begin\",\"handle\":\"%08x\",\"thread\":\"%08x\"}\n", handle, thread_address);
         if (timeout && !raw_timeout) status = 0x102;
         else if (!timeout) wait_for_change(ready);
         else {
@@ -1842,7 +1868,7 @@ ME_IMPORT(__imp__NtWaitForSingleObjectEx) {
             lock.release();
         }
     }
-    std::printf("{\"event\":\"object_wait\",\"handle\":\"%08x\",\"status\":\"%08x\"}\n", handle, status);
+    if (me_log_verbose()) std::printf("{\"event\":\"object_wait\",\"handle\":\"%08x\",\"status\":\"%08x\"}\n", handle, status);
     ctx.r3.u64 = status;
 }
 ME_IMPORT(__imp__NtWaitForMultipleObjectsEx) {
@@ -2136,7 +2162,7 @@ ME_IMPORT(__imp__NtFreeVirtualMemory) {
     auto address = load_word(ap), size = load_word(sp);
     const auto status = virtual_memory.free(address, size, type);
     if (!status) { put_word(ap, address); put_word(sp, size); }
-    std::printf("{\"event\":\"virtual_free\",\"base\":\"%08x\",\"size\":%u,\"type\":\"%08x\",\"status\":\"%08x\"}\n", address, size, type, status);
+    if (me_log_verbose()) std::printf("{\"event\":\"virtual_free\",\"base\":\"%08x\",\"size\":%u,\"type\":\"%08x\",\"status\":\"%08x\"}\n", address, size, type, status);
     ctx.r3.u64 = status;
 }
 ME_IMPORT(__imp__NtAllocateVirtualMemory) {
@@ -2154,7 +2180,7 @@ ME_IMPORT(__imp__NtAllocateVirtualMemory) {
         uint32_t encoded = __builtin_bswap32(address); std::memcpy(base + base_pointer, &encoded, 4);
         encoded = __builtin_bswap32(size); std::memcpy(base + size_pointer, &encoded, 4);
     }
-    std::printf("{\"event\":\"virtual_allocate\",\"requested_base\":\"%08x\",\"requested_size\":%u,\"type\":\"%08x\",\"base\":\"%08x\",\"size\":%u,\"status\":\"%08x\"}\n",
+    if (me_log_verbose()) std::printf("{\"event\":\"virtual_allocate\",\"requested_base\":\"%08x\",\"requested_size\":%u,\"type\":\"%08x\",\"base\":\"%08x\",\"size\":%u,\"status\":\"%08x\"}\n",
         old_address, old_size, type, address, size, status);
     ctx.r3.u64 = status;
 }

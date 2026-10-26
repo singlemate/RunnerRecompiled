@@ -91,7 +91,7 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
                 if (!library.isFile()) { message("Нет libmeruntime.so в " + work); return; }
                 for (String name : new String[] {"me_native_entry_sections_resources.bin", "me_native_xex_headers.bin"})
                     if (!new File(work, name).isFile()) { message("Нет " + name + " в " + work); return; }
-                if (!new File(work, "me_game_readonly/inventory.txt").isFile()) { message("Нет файлов игры (me_game_readonly) в " + work); return; }
+                if (!new File(gameRoot(work), "inventory.txt").isFile()) { message("Нет файлов игры в " + gameRoot(work)); return; }
                 System.load(library.getAbsolutePath());
                 loaded = true;
             }
@@ -106,9 +106,10 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
         env.add("ME_PREVIEW=0");  // no readback preview: the frame goes straight to the Surface
         env.add("ME_GUEST_INPUT=1");
         env.add("ME_DIAGNOSTIC_SECONDS=0");
-        env.add("ME_GAME_ROOT=" + new File(work, "me_game_readonly"));
+        env.add("ME_GAME_ROOT=" + gameRoot(work));
         env.add("ME_SAVE_ROOT=" + new File(work, "me_saves"));
         env.add("ME_FRAME_DUMP=" + new File(work, "me_guest_frame.ppm"));
+        env.add("ME_CACHE_ROOT=" + new File(work, "cache"));  // shader/pipeline storage + driver pipeline cache
         String extra = getIntent().getStringExtra("env");  // tests and launcher options, applied last
         if (extra != null) for (String item : extra.trim().split("\\s+")) if (item.contains("=")) env.add(item);
         String[] args = {"me_native_entry_sections_resources.bin", "me_native_xex_headers.bin", "--gpu-explore-pool-scan"};
@@ -117,6 +118,12 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
             handler.postDelayed(() -> message(""), 6000);
         }
         watchExit();
+    }
+
+    /** Game files: the launcher's choice (internal storage or the external files directory). */
+    private File gameRoot(File work) {
+        String root = getIntent().getStringExtra("game_root");
+        return root != null ? new File(root) : new File(work, "me_game_readonly");
     }
 
     private void watchExit() {

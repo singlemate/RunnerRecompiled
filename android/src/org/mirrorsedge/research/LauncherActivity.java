@@ -33,8 +33,10 @@ public class LauncherActivity extends Activity {
     private static final int KEEP_BACKUPS = 10;
 
     private TextView status, progress;
-    private Button play, importButton;
+    private Button play, importButton, moveButton;
+    private CheckBox internalGame;
     private volatile boolean importing;
+    private static final int[] FRAME_LIMITS = {0, 30, 60};
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -43,6 +45,7 @@ public class LauncherActivity extends Activity {
         root.setBackgroundColor(0xff111820);
         root.setPadding(48, 32, 48, 32);
         root.setGravity(Gravity.CENTER_HORIZONTAL);
+        root.setFitsSystemWindows(true);  // keep the title clear of the status bar
         TextView title = new TextView(this);
         title.setText("Mirror’s Edge");
         title.setTextSize(32);
@@ -58,6 +61,30 @@ public class LauncherActivity extends Activity {
         root.addView(progress);
         play = button(root, "Играть", v -> launch());
         importButton = button(root, "Импорт данных игры из папки…", v -> pickFolder());
+        // Settings (kept in the launcher's preferences, passed to GameActivity on launch).
+        RadioGroup limits = new RadioGroup(this);
+        limits.setOrientation(RadioGroup.HORIZONTAL);
+        TextView limitTitle = new TextView(this);
+        limitTitle.setText("Лимит кадров (меньше — холоднее):");
+        limitTitle.setTextColor(0xffd0d8e0);
+        root.addView(limitTitle);
+        for (int hz : FRAME_LIMITS) {
+            RadioButton option = new RadioButton(this);
+            option.setText(hz == 0 ? "нет" : hz + " к/с");
+            option.setTextColor(Color.WHITE);
+            option.setId(1000 + hz);
+            limits.addView(option);
+        }
+        limits.check(1000 + prefs().getInt("frameLimit", 0));
+        limits.setOnCheckedChangeListener((g, id) -> prefs().edit().putInt("frameLimit", id - 1000).apply());
+        root.addView(limits);
+        internalGame = new CheckBox(this);
+        internalGame.setText("Файлы игры во внутренней памяти (без FUSE, для теста фризов)");
+        internalGame.setTextColor(Color.WHITE);
+        internalGame.setChecked(prefs().getBoolean("internalGame", false));
+        internalGame.setOnCheckedChangeListener((b, on) -> { prefs().edit().putBoolean("internalGame", on).apply(); refresh(); });
+        root.addView(internalGame);
+        moveButton = button(root, "Скопировать файлы игры во внутреннюю память", v -> copyGameInternal());
         button(root, "Технический стенд", v -> startActivity(new Intent(this, MainActivity.class)));
         setContentView(root);
     }
@@ -73,13 +100,20 @@ public class LauncherActivity extends Activity {
     @Override public void onResume() { super.onResume(); refresh(); }
 
     private File work() { return getExternalFilesDir(null); }
+    private android.content.SharedPreferences prefs() { return getSharedPreferences("launcher", MODE_PRIVATE); }
+    /** Extracted game files: app-internal storage (ext4) or the external files directory (FUSE). */
+    private File gameRoot() {
+        return prefs().getBoolean("internalGame", false) ? new File(getFilesDir(), "me_game_readonly")
+                                                         : new File(work(), "me_game_readonly");
+    }
 
     /** Missing pieces, empty when the game can start. */
     private List<String> missing() {
         List<String> missing = new ArrayList<>();
         File work = work();
         for (String name : BUNDLE) if (!new File(work, name).isFile()) missing.add(name);
-        if (!new File(work, "me_game_readonly/inventory.txt").isFile()) missing.add("me_game_readonly (файлы игры)");
+        if (!new File(gameRoot(), "inventory.txt").isFile())
+            missing.add(prefs().getBoolean("internalGame", false) ? "файлы игры во внутренней памяти (нажми «Скопировать…»)" : "me_game_readonly (файлы игры)");
         return missing;
     }
 
@@ -92,6 +126,10 @@ public class LauncherActivity extends Activity {
         else status.setText("Не хватает: " + String.join(", ", missing) + ".\nНажми «Импорт данных игры из папки…» и выбери папку с ними.");
         play.setEnabled(missing.isEmpty());
         importButton.setEnabled(true);
+        boolean internal = prefs().getBoolean("internalGame", false);
+        boolean externalReady = new File(work(), "me_game_readonly/inventory.txt").isFile();
+        moveButton.setVisibility(internal ? android.view.View.VISIBLE : android.view.View.GONE);
+        moveButton.setEnabled(externalReady);
     }
 
     private static int count(File dir) {
@@ -112,7 +150,56 @@ public class LauncherActivity extends Activity {
                 .setPositiveButton("OK", null).show();
             return;
         }
-        startActivity(new Intent(this, GameActivity.class));
+        Intent intent = new Intent(this, GameActivity.class);
+        intent.putExtra("game_root", gameRoot().getAbsolutePath());
+        int limit = prefs().getInt("frameLimit", 0);
+        if (limit > 0) intent.putExtra("env", "ME_FRAME_LIMIT=" + limit);
+        startActivity(intent);
+    }
+
+    /** Copies the imported game files (external, FUSE) to internal storage; same-size files are skipped. */
+    private void copyGameInternal() {
+        File from = new File(work(), "me_game_readonly"), to = new File(getFilesDir(), "me_game_readonly");
+        long need = size(from), free = getFilesDir().getUsableSpace();
+        if (need > free) { progress.setText(String.format(Locale.US, "Мало места: нужно %.1f ГБ, свободно %.1f ГБ", need / 1e9, free / 1e9)); return; }
+        importing = true;
+        play.setEnabled(false); importButton.setEnabled(false); moveButton.setEnabled(false);
+        status.setText("Копирую файлы игры во внутреннюю память… Не закрывай приложение.");
+        new Thread(() -> {
+            String error = null;
+            bytesDone = 0; bytesTotal = need; filesCopied = filesSkipped = 0;
+            try { copyTreeCounting(from, to); } catch (IOException e) { error = e.getMessage(); }
+            final String message = error;
+            runOnUiThread(() -> {
+                importing = false;
+                refresh();
+                progress.setText(message == null
+                    ? String.format(Locale.US, "Скопировано во внутреннюю память: %d файлов, уже было %d. Копию на /sdcard можно оставить.", filesCopied, filesSkipped)
+                    : "Копирование не завершено: " + message + ". Можно запустить ещё раз.");
+            });
+        }, "game-copy").start();
+    }
+
+    private static long size(File f) {
+        if (f.isFile()) return f.length();
+        long n = 0;
+        File[] list = f.listFiles();
+        if (list != null) for (File c : list) n += size(c);
+        return n;
+    }
+
+    private void copyTreeCounting(File from, File to) throws IOException {
+        if (from.isDirectory()) {
+            if (!to.isDirectory() && !to.mkdirs()) throw new IOException("mkdir " + to);
+            File[] list = from.listFiles();
+            if (list == null) throw new IOException("list " + from);
+            for (File f : list) copyTreeCounting(f, new File(to, f.getName()));
+            return;
+        }
+        if (to.isFile() && to.length() == from.length()) { filesSkipped++; bytesDone += from.length(); report(false); return; }
+        try (InputStream in = new FileInputStream(from)) { write(new CountingStream(in), to); }
+        filesCopied++;
+        report(false);
     }
 
     /** Copies me_saves to me_saves_backups/<time>; keeps the newest KEEP_BACKUPS. Null if there is nothing to back up. */

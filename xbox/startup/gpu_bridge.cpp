@@ -22,9 +22,14 @@
 // Performance A/B toggles (defaults unchanged). RexGlue defines these at global scope.
 REXCVAR_DECLARE(bool, occlusion_query_enable);
 REXCVAR_DECLARE(bool, clear_memory_page_state);
+REXCVAR_DECLARE(bool, vulkan_async_skip_incomplete_frames);
 static rex::graphics::vulkan::VulkanGraphicsSystem* graphics;
 static MeRexGpuMemory* memory;
 static std::atomic<uint64_t> generated_swaps{0};
+// Longest interval between two guest swaps since the last frame_rates line (freezes are
+// invisible in a 2 s average): max_frame_ms in frame_rates; reset by whoever logs it.
+static std::atomic<int64_t> last_swap_ns{0}, max_swap_interval_ns{0};
+static int64_t take_max_frame_ns() { return max_swap_interval_ns.exchange(0, std::memory_order_relaxed); }
 // Direct display (APK): the Java side hands over an ANativeWindow; the display thread
 // presents the latest guest output into it (VulkanPresenter::PresentGuestOutputToWindow).
 // me_display_set_window(nullptr) blocks until the presenter has released the window,
@@ -71,7 +76,7 @@ static void display_loop(){
             // Without the preview thread this is the frame-rate log (same event as there).
             if(!preview){
                 const auto swaps=generated_swaps.load(std::memory_order_relaxed);
-                std::printf("{\"event\":\"frame_rates\",\"seconds\":%.3f,\"capture_hz\":0,\"generated_swap_hz\":%.2f}\n",seconds,(swaps-prior_swaps)/seconds);
+                std::printf("{\"event\":\"frame_rates\",\"seconds\":%.3f,\"capture_hz\":0,\"generated_swap_hz\":%.2f,\"max_frame_ms\":%.1f}\n",seconds,(swaps-prior_swaps)/seconds,take_max_frame_ns()/1e6);
                 prior_swaps=swaps;
             }
             std::printf("{\"event\":\"display_rate\",\"presented_hz\":%.1f,\"idle_polls\":%llu,\"failed\":%llu}\n",presented/seconds,(unsigned long long)idle,(unsigned long long)failed);
@@ -113,10 +118,13 @@ extern "C" int me_gpu_start(void* view, void* mmio, MeGpuGate enter, MeGpuGate l
         const char* occlusion = std::getenv("ME_GPU_OCCLUSION_QUERIES");
         if (occlusion && !std::strcmp(occlusion, "0")) REXCVAR_SET(occlusion_query_enable, false);
         const char* page_state = std::getenv("ME_GPU_PAGE_STATE");
-        // Default back ON: with it off the user saw black helicopter/doors/runner bag
-        // (stale textures). ME_GPU_PAGE_STATE=0 turns it off for A/B with
-        // ME_GPU_ALLOC_INVALIDATE=1 (allocation-time invalidation, the suspected fix).
-        REXCVAR_SET(clear_memory_page_state, !(page_state && !std::strcmp(page_state, "0")));
+        // OFF by default again (2026-10-25). The black helicopter/doors/runner bag seen with
+        // it off were stale textures from memory reused without invalidation; allocation-
+        // time invalidation (map_physical alloc_invalidate, on by default) fixed that, and
+        // the user confirmed correct colours at the helicopter. With it on, every draw
+        // re-uploads its ranges, each copy ends the render pass (~330 passes per frame vs
+        // ~140) and level fps drops from ~27.6 to 23-24. ME_GPU_PAGE_STATE=1 turns it on.
+        REXCVAR_SET(clear_memory_page_state, page_state && !std::strcmp(page_state, "1"));
         std::printf("{\"event\":\"gpu_perf_toggles\",\"occlusion_queries\":%s,\"page_state_refresh\":%s}\n",
                     REXCVAR_GET(occlusion_query_enable) ? "true" : "false", REXCVAR_GET(clear_memory_page_state) ? "true" : "false");
         // Diagnostic: ME_VULKAN_RENDER_PASSES=1 uses classic render passes, the
@@ -132,6 +140,24 @@ extern "C" int me_gpu_start(void* view, void* mmio, MeGpuGate enter, MeGpuGate l
         if(presentation_status!=0)return 0;
         auto status = graphics->SetupExternalGpu(*memory, {enter, leave}, irq, 1280, 720, 60);
         std::printf("{\"event\":\"game_gpu_setup_result\",\"status\":\"%08x\",\"same_loader_memory\":true,\"presentation\":false}\n",unsigned(status));
+        if(status==0){
+            // Persistent shader/pipeline storage (RexGlue): pipelines the game has used are
+            // recorded and created again at startup, before the first frame, instead of
+            // on first use in game (a synchronous placeholder compile on the command
+            // processor plus skipped frames = visible freezes). Also holds the Vulkan driver
+            // pipeline cache (vulkan_pipeline_cache.bin). ME_CACHE_ROOT; the APK passes its
+            // files directory, the ADB executable uses /data/local/tmp/me_cache.
+            const char* cache_env=std::getenv("ME_CACHE_ROOT");
+            const std::string cache_root=cache_env?cache_env:"/data/local/tmp/me_cache";
+            const auto storage_begin=std::chrono::steady_clock::now();
+            graphics->InitializeShaderStorage(cache_root,0x45410850,true);
+            std::printf("{\"event\":\"shader_storage_ready\",\"root\":\"%s\",\"ms\":%lld}\n",cache_root.c_str(),
+                (long long)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-storage_begin).count());
+        }
+        // ME_ASYNC_SKIP_FRAMES=0: present frames that still use placeholder pipelines (an
+        // object missing for a few frames) instead of not presenting them (a freeze).
+        if(const char* skip=std::getenv("ME_ASYNC_SKIP_FRAMES"); skip && !std::strcmp(skip,"0"))
+            REXCVAR_SET(vulkan_async_skip_incomplete_frames,false);
         if(status==0 && std::getenv("ME_DISPLAY"))new std::thread(display_loop);
         // ME_PREVIEW=0 (APK): no readback/preview worker (no socket, no frame dumps); the
         // display thread then logs the frame rates.
@@ -166,7 +192,7 @@ extern "C" int me_gpu_start(void* view, void* mmio, MeGpuGate enter, MeGpuGate l
                     const double seconds=std::chrono::duration<double>(rate_now-rate_start).count();
                     if(seconds>=2){
                         const auto swaps=generated_swaps.load(std::memory_order_relaxed);
-                        std::printf("{\"event\":\"frame_rates\",\"seconds\":%.3f,\"capture_hz\":%.2f,\"generated_swap_hz\":%.2f}\n",seconds,captures/seconds,(swaps-prior_swaps)/seconds);
+                        std::printf("{\"event\":\"frame_rates\",\"seconds\":%.3f,\"capture_hz\":%.2f,\"generated_swap_hz\":%.2f,\"max_frame_ms\":%.1f}\n",seconds,captures/seconds,(swaps-prior_swaps)/seconds,take_max_frame_ns()/1e6);
                         captures=0;prior_swaps=swaps;rate_start=rate_now;
                     }
                     if(live && attempt%10==0){
@@ -217,5 +243,13 @@ extern "C" int me_gpu_make_swap(uint32_t* words, const uint32_t* fetch, uint32_t
     words[9] = physical_address; words[10] = width; words[11] = height;
     for (unsigned i = 12; i < 64; ++i) words[i] = x::MakePacketType2();
     generated_swaps.fetch_add(1,std::memory_order_relaxed);
+    {
+        const int64_t now=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        const int64_t last=last_swap_ns.exchange(now,std::memory_order_relaxed);
+        if(last){
+            int64_t interval=now-last,seen=max_swap_interval_ns.load(std::memory_order_relaxed);
+            while(interval>seen && !max_swap_interval_ns.compare_exchange_weak(seen,interval,std::memory_order_relaxed)){}
+        }
+    }
     return 1;
 }
