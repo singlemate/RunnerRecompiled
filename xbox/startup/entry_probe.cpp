@@ -41,9 +41,15 @@
 #include <time.h>
 #include <thread>
 #include <mutex>
+#include <cctype>
+#include <ctime>
+#include <fstream>
 #include <condition_variable>
 #include <memory>
 #include <chrono>
+#include <unordered_map>
+#include <vector>
+#include <algorithm>
 #include <functional>
 
 struct Guard { uint32_t iat, address, ordinal; char name[96]; };
@@ -308,7 +314,17 @@ ME_IMPORT(__imp__FscSetCacheElementCount) {
 static bool word_writable(uint32_t);
 static void put_word(uint32_t, uint32_t);
 static bool image_span_mapped(uint32_t, uint32_t);
-static constexpr uint32_t guest_console_language = 1; // XConfig setting 9: English.
+// XConfig setting 9 (console language), Xbox codes: 1 English, 3 German, 4 French,
+// 5 Spanish, 6 Italian, 12 Russian (the languages this game ships). ME_LANGUAGE picks
+// one; anything else keeps English. Read once: the game queries it from several threads.
+static uint32_t guest_console_language() {
+    static const uint32_t language = [] {
+        const char* v = std::getenv("ME_LANGUAGE");
+        const unsigned code = v ? static_cast<unsigned>(std::strtoul(v, nullptr, 10)) : 1u;
+        return (code == 1 || code == 3 || code == 4 || code == 5 || code == 6 || code == 12) ? code : 1u;
+    }();
+    return language;
+}
 ME_IMPORT(__imp__XexGetModuleHandle) {
     if (ctx.r3.u32) me_stop_import("named_module_lookup_not_implemented", ctx);
     if (!word_writable(ctx.r4.u32)) me_stop_import("module_handle_output_invalid", ctx);
@@ -490,7 +506,7 @@ ME_IMPORT(__imp__ExGetXConfigSetting) {
     if (category != 3 || !((setting>=1 && setting<=7) || setting==9 || setting==10 || setting==12)) me_stop_import("XConfig_setting_not_implemented", ctx);
     // Names are four ASCII bytes, transition dates four packed bytes. A zero
     // transition month disables DST; both biases remain zero for fixed UTC.
-    const uint32_t profile_value = setting==9?guest_console_language:setting==10?0x00040000u:setting==12?0x40u:
+    const uint32_t profile_value = setting==9?guest_console_language():setting==10?0x00040000u:setting==12?0x40u:
         (setting==2 || setting==3)?0x55544300u:0u;
     if (required && ((required & 1) || !checked_span(required, 2))) me_stop_import("XConfig_required_size_invalid", ctx);
     uint32_t status = 0;
@@ -757,6 +773,212 @@ static void trace_gpu_submission(const char* stage,uint32_t device,uint64_t call
     std::printf("{\"event\":\"gpu_submission_snapshot\",\"stage\":\"%s\",\"call\":%llu,\"device\":\"%08x\",\"cursor\":\"%08x\",\"limit\":\"%08x\",\"writeback\":\"%08x\",\"serial\":%u,\"flags\":\"%08x\",\"field13232\":\"%08x\",\"field13516\":\"%08x\",\"secondary_cursor\":\"%08x\",\"secondary_limit\":\"%08x\",\"submitted_cursor\":\"%08x\",\"field21532\":\"%08x\",\"ring_wptr\":%u,\"ring_rptr\":%u}\n",
         stage,(unsigned long long)call,device,load_word(device+48),load_word(device+56),load_word(device+10896),load_word(device+10908),load_word(device+10940),load_word(device+13232),load_word(device+13516),load_word(device+13536),load_word(device+13540),load_word(device+14928),load_word(device+21532),gpu_last_write_index,read);
 }
+// Crash lr 8249b888 (Stormdrain / Edge_Pt2, guest 0x5d..0x405c): sub_8249B6E8 loops over a
+// byte index table {u32 table, s32 count} at r5 (bone indices, 4x4 matrices follow) and reads
+// it through a null table pointer. Logged with the caller and the object (r3) when the table
+// is null and the count positive. ME_GUARD_NULL_BONE_TABLE=1 (test only, off by default)
+// skips such a call instead of faulting - the mesh is not drawn/updated for that call.
+extern "C" void me_current_scene(char* out, size_t capacity);
+extern "C" void __imp__sub_8249B6E8(PPCContext&,uint8_t*);
+PPC_FUNC(sub_8249B6E8) {
+    static std::atomic<uint64_t> bone_walks{0}, bone_walk_nodes{0};  // attachment-list walks below
+    const uint32_t table_desc = ctx.r5.u32;
+    if (table_desc && checked_span(table_desc, 8, true)) {
+        const uint32_t table = load_word(table_desc), count = load_word(table_desc + 4);
+        if (!table && int32_t(count) > 0) {
+            static uint64_t hits = 0;
+            const auto hit = ++hits;
+            if (hit <= 32 || !(hit & (hit - 1))) {
+                const uint32_t object = ctx.r3.u32;
+                auto word = [&](uint32_t address) { return checked_span(address, 4, true) ? load_word(address) : 0xffffffffu; };
+                char scene[48]; me_current_scene(scene, sizeof(scene));
+                std::printf("{\"event\":\"null_bone_table\",\"hit\":%llu,\"scene\":\"%s\",\"caller_lr\":\"%08x\",\"r3\":\"%08x\",\"r4\":\"%08x\",\"r5\":\"%08x\",\"count\":%d,"
+                            "\"desc_words\":[\"%08x\",\"%08x\",\"%08x\",\"%08x\"],\"obj464\":\"%08x\",\"obj552\":\"%08x\",\"obj592\":\"%08x\",\"r4_0\":\"%08x\"}\n",
+                            (unsigned long long)hit, scene, uint32_t(ctx.lr), object, ctx.r4.u32, table_desc, int32_t(count),
+                            word(table_desc - 8), word(table_desc - 4), word(table_desc + 8), word(table_desc + 12),
+                            word(object + 464), word(object + 552), word(object + 592), word(ctx.r4.u32));
+                std::fflush(stdout);
+            }
+            static const bool guard = [] { const char* v = std::getenv("ME_GUARD_NULL_BONE_TABLE"); return v && !std::strcmp(v, "1"); }();
+            if (guard) return;
+        }
+    }
+    // ME_DIAGNOSTIC_BONES_AT=<x>,<y>: for a component (r3) whose first 0x800 bytes hold the float
+    // pair (x, y) - its LocalToWorld translation, e.g. the Stormdrain valve wheel 1928.01,-7872.01 -
+    // log the bone atoms it gets (r4: +0 array of 32-byte atoms) for the required bones (r5:
+    // {u8 table, count}) and the bone matrices it produces (*(r3+592), 64 bytes per bone).
+    static const float* bones_at = [] {
+        static float xy[2];
+        const char* v = std::getenv("ME_DIAGNOSTIC_BONES_AT");
+        return v && std::sscanf(v, "%f,%f", &xy[0], &xy[1]) == 2 ? xy : nullptr;
+    }();
+    int bones_offset = -1;
+    uint32_t bones_object = ctx.r3.u32, bones_atoms_desc = ctx.r4.u32, bones_required = ctx.r5.u32;
+    static uint64_t bones_logged = 0;
+    static int bones_learned_offset = -1;  // offset of (x, y) in r3 found by the memory scan below
+    if (bones_at && bones_logged < 12 && checked_span(bones_object, 0x800, true)) {
+        auto f32 = [&](uint32_t address) { uint32_t w = load_word(address); float f; std::memcpy(&f, &w, 4); return f; };
+        auto near_xy = [&](uint32_t a) { return std::fabs(f32(a) - bones_at[0]) < 0.05f && std::fabs(f32(a + 4) - bones_at[1]) < 0.05f; };
+        if (bones_learned_offset >= 0 && checked_span(bones_object + bones_learned_offset, 8, true) && near_xy(bones_object + bones_learned_offset))
+            bones_offset = bones_learned_offset;
+        for (int off = 0; bones_offset < 0 && off + 8 <= 0x800; off += 4)
+            if (near_xy(bones_object + off)) bones_offset = off;
+    }
+    // With ME_DIAGNOSTIC_BONES_AT: count calls and distinct components (r3), and every 20 s
+    // outside menus (up to 60 times) scan all readable guest memory for the float pair (x, y). Each hit is logged
+    // with the nearest component at or below it (offset) and the 64 bytes before it (a matrix
+    // ending in the translation), so a hit inside a component teaches the probe its offset.
+    if (bones_at) {
+        static std::mutex scan_mutex;
+        static std::vector<uint32_t> objects;  // sorted distinct r3
+        static uint64_t calls = 0, scans = 0;
+        static auto last_scan = std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> lock(scan_mutex);
+        ++calls;
+        auto at = std::lower_bound(objects.begin(), objects.end(), bones_object);
+        if ((at == objects.end() || *at != bones_object) && objects.size() < 16384) objects.insert(at, bones_object);
+        const auto now = std::chrono::steady_clock::now();
+        char scene[48] = "";
+        if (scans < 60 && now - last_scan > std::chrono::seconds(20)) me_current_scene(scene, sizeof(scene));
+        if (scene[0] && !std::strstr(scene, "Menu")) {
+            last_scan = now;
+            ++scans;
+            std::printf("{\"event\":\"bones_scan\",\"scan\":%llu,\"scene\":\"%s\",\"calls\":%llu,\"objects\":%zu,\"walks\":%llu,\"walk_nodes\":%llu,\"hits\":[",
+                        (unsigned long long)scans, scene, (unsigned long long)calls, objects.size(),
+                        (unsigned long long)bone_walks.load(), (unsigned long long)bone_walk_nodes.load());
+            uint32_t want_x, want_y; std::memcpy(&want_x, &bones_at[0], 4); std::memcpy(&want_y, &bones_at[1], 4);
+            int hits = 0;
+            // From 0x10000 up: the game's own heap (UObjects) is at 0x1xxxxxxx, GPU/physical copies at 0xa0000000+.
+            for (uint64_t a = 0x10000; a < 0x100000000ull && hits < 24;) {
+                const uint64_t end = writable_extent(uint32_t(a));
+                if (end <= a) { a = (a | 0xffff) + 1; continue; }
+                for (; a + 8 <= end && hits < 24; a += 4) {
+                    const uint32_t w = load_word(uint32_t(a));
+                    float f; std::memcpy(&f, &w, 4);
+                    if (!(std::fabs(f - bones_at[0]) < 0.05f)) continue;  // (NaN never matches)
+                    const uint32_t w2 = load_word(uint32_t(a + 4)); float g; std::memcpy(&g, &w2, 4);
+                    if (!(std::fabs(g - bones_at[1]) < 0.05f)) continue;
+                    auto owner = std::upper_bound(objects.begin(), objects.end(), uint32_t(a));
+                    const uint32_t object = owner == objects.begin() ? 0 : *(owner - 1);
+                    const uint32_t offset = object ? uint32_t(a) - object : 0;
+                    if (object && offset < 0x4000 && bones_learned_offset < 0) bones_learned_offset = int(offset);
+                    std::printf("%s{\"address\":\"%08x\",\"object\":\"%08x\",\"offset\":%u,\"prev64\":[", hits ? "," : "", uint32_t(a), object, offset);
+                    for (int k = -12; k < 4; ++k) {
+                        const uint32_t v = checked_span(uint32_t(a) + k * 4, 4, true) ? load_word(uint32_t(a) + k * 4) : 0;
+                        float h; std::memcpy(&h, &v, 4); std::printf("%s%g", k > -12 ? "," : "", h);
+                    }
+                    std::printf("]}");
+                    ++hits;
+                }
+                if (a + 8 > end) a = end;
+            }
+            std::printf("],\"learned_offset\":%d,\"scan_ms\":%.1f}\n", bones_learned_offset,
+                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - now).count());
+            std::fflush(stdout);
+        }
+    }
+    if (bones_offset >= 0) {
+        auto f32 = [&](uint32_t address) { uint32_t w = checked_span(address, 4, true) ? load_word(address) : 0; float f; std::memcpy(&f, &w, 4); return f; };
+        const uint32_t table = checked_span(bones_required, 8, true) ? load_word(bones_required) : 0;
+        const int32_t count = checked_span(bones_required, 8, true) ? int32_t(load_word(bones_required + 4)) : -1;
+        const uint32_t atoms = checked_span(bones_atoms_desc, 4, true) ? load_word(bones_atoms_desc) : 0;
+        std::printf("{\"event\":\"bones_probe\",\"stage\":\"before\",\"n\":%llu,\"object\":\"%08x\",\"match_offset\":%d,\"caller_lr\":\"%08x\",\"atoms\":\"%08x\",\"table\":\"%08x\",\"count\":%d,\"bones\":[",
+                    (unsigned long long)bones_logged, bones_object, bones_offset, uint32_t(ctx.lr), atoms, table, count);
+        for (int32_t i = 0; i < count && i < 24; ++i) {
+            const uint32_t bone = table && checked_span(table + i, 1, true) ? base[table + i] : 0xffu;
+            const uint32_t atom = atoms + bone * 32;
+            std::printf("%s{\"bone\":%u,\"atom\":[%g,%g,%g,%g,%g,%g,%g,%g]}", i ? "," : "", bone,
+                        f32(atom), f32(atom + 4), f32(atom + 8), f32(atom + 12), f32(atom + 16), f32(atom + 20), f32(atom + 24), f32(atom + 28));
+        }
+        std::printf("]}\n");
+    }
+    // Walk the per-bone attachment lists the function will follow (read only, guest code at
+    // loc_8249B9xx): idx = u8 (*(r3+704))[bone] when *(r3+708) > 0 and idx != 255; node =
+    // *(*(o+252) + idx*16 + 8) with o = *(r3+552) (the code first checks its class); next =
+    // *(node+132). A node or next pointer outside readable guest memory is the corruption
+    // that crashes at lr 8249b888 - logged with the chain before the guest reads it.
+    {
+        static uint64_t corrupt_logged = 0;
+        const uint32_t object = ctx.r3.u32, required = ctx.r5.u32;
+        auto word = [&](uint32_t a) { return checked_span(a, 4, true) ? load_word(a) : 0xffffffffu; };
+        if (corrupt_logged < 16 && checked_span(object + 552, 4, true) && checked_span(object + 704, 8, true) && checked_span(required, 8, true)) {
+            const uint32_t owner = load_word(object + 552), map = load_word(object + 704);
+            const int32_t map_count = int32_t(load_word(object + 708));
+            const uint32_t table = load_word(required);
+            const int32_t count = int32_t(load_word(required + 4));
+            const uint32_t lists = owner && checked_span(owner + 252, 4, true) ? load_word(owner + 252) : 0;
+            for (int32_t i = 0; lists && map_count > 0 && count > 0 && i < count && i < 512; ++i) {
+                if (!checked_span(table + i, 1, true)) break;
+                const uint32_t bone = base[table + i];
+                if (int32_t(bone) >= map_count || !checked_span(map + bone, 1, true)) continue;
+                const uint32_t index = base[map + bone];
+                if (index == 255 || !checked_span(lists + index * 16 + 8, 4, true)) continue;
+                uint32_t node = load_word(lists + index * 16 + 8), chain[8] = {}, depth = 0;
+                ++bone_walks;
+                bool bad = false;
+                for (uint32_t steps = 0; node && steps < 256; ++steps) {
+                    if (depth < 8) chain[depth] = node;
+                    ++depth;
+                    if (!checked_span(node, 136, true)) { bad = true; break; }
+                    ++bone_walk_nodes;
+                    node = load_word(node + 132);
+                }
+                // Last healthy look of each linked node (first word = vtable for UObjects): a node
+                // that is still linked but changed its first word was freed and reused while linked.
+                struct Seen { uint32_t w0, w4, f72, f92, next; double t; };
+                static std::unordered_map<uint64_t, Seen> seen;
+                const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+                for (uint32_t k = 0; k < depth && k < 8; ++k) {
+                    const uint32_t n = chain[k];
+                    if (!checked_span(n, 136, true)) break;
+                    const uint64_t key = uint64_t(n) << 32 | (uint64_t(object) ^ (uint64_t(bone) << 24));
+                    const Seen cur{word(n), word(n + 4), word(n + 72), word(n + 92), word(n + 132), now};
+                    auto it = seen.find(key);
+                    if (it != seen.end() && it->second.w0 != cur.w0 && corrupt_logged < 16) {
+                        ++corrupt_logged;
+                        std::printf("{\"event\":\"bone_attach_node_changed\",\"object\":\"%08x\",\"bone\":%u,\"position\":%u,\"node\":\"%08x\",\"before\":{\"w0\":\"%08x\",\"w4\":\"%08x\",\"f72\":\"%08x\",\"f92\":\"%08x\",\"next\":\"%08x\",\"age_s\":%.3f},\"after\":{\"w0\":\"%08x\",\"w4\":\"%08x\",\"f72\":\"%08x\",\"f92\":\"%08x\",\"next\":\"%08x\"},\"caller_lr\":\"%08x\"}\n",
+                                    object, bone, k, n, it->second.w0, it->second.w4, it->second.f72, it->second.f92, it->second.next, now - it->second.t,
+                                    cur.w0, cur.w4, cur.f72, cur.f92, cur.next, uint32_t(ctx.lr));
+                        std::fflush(stdout);
+                    }
+                    if (seen.size() < 65536 || it != seen.end()) seen[key] = cur;
+                }
+                if (!bad) continue;
+                ++corrupt_logged;
+                char scene[48]; me_current_scene(scene, sizeof(scene));
+                std::printf("{\"event\":\"bone_attach_corrupt\",\"n\":%llu,\"scene\":\"%s\",\"caller_lr\":\"%08x\",\"object\":\"%08x\",\"owner\":\"%08x\",\"lists\":\"%08x\",\"bone\":%u,\"index\":%u,\"entry\":[\"%08x\",\"%08x\",\"%08x\",\"%08x\"],\"depth\":%u,\"bad_node\":\"%08x\",\"chain\":[",
+                            (unsigned long long)corrupt_logged, scene, uint32_t(ctx.lr), object, owner, lists, bone, index,
+                            word(lists + index * 16), word(lists + index * 16 + 4), word(lists + index * 16 + 8), word(lists + index * 16 + 12), depth, node);
+                for (uint32_t k = 0; k < depth && k < 8; ++k) {
+                    const uint32_t n = chain[k];
+                    std::printf("%s{\"node\":\"%08x\",\"w0\":\"%08x\",\"w4\":\"%08x\",\"f72\":\"%08x\",\"f92\":\"%08x\",\"f128\":\"%08x\",\"next\":\"%08x\"}", k ? "," : "",
+                                n, word(n), word(n + 4), word(n + 72), word(n + 92), word(n + 128), word(n + 132));
+                }
+                std::printf("]}\n");
+                std::fflush(stdout);
+                break;
+            }
+        }
+    }
+    __imp__sub_8249B6E8(ctx, base);
+    if (bones_offset >= 0) {
+        auto f32 = [&](uint32_t address) { uint32_t w = checked_span(address, 4, true) ? load_word(address) : 0; float f; std::memcpy(&f, &w, 4); return f; };
+        const uint32_t matrices = checked_span(bones_object + 592, 4, true) ? load_word(bones_object + 592) : 0;
+        const uint32_t table = checked_span(bones_required, 8, true) ? load_word(bones_required) : 0;
+        const int32_t count = checked_span(bones_required, 8, true) ? int32_t(load_word(bones_required + 4)) : -1;
+        std::printf("{\"event\":\"bones_probe\",\"stage\":\"after\",\"n\":%llu,\"matrices\":\"%08x\",\"bones\":[", (unsigned long long)bones_logged, matrices);
+        for (int32_t i = 0; i < count && i < 24; ++i) {
+            const uint32_t bone = table && checked_span(table + i, 1, true) ? base[table + i] : 0xffu;
+            const uint32_t m = matrices + bone * 64;
+            std::printf("%s{\"bone\":%u,\"m\":[", i ? "," : "", bone);
+            for (int k = 0; k < 16; ++k) std::printf("%s%g", k ? "," : "", f32(m + k * 4));
+            std::printf("]}");
+        }
+        std::printf("]}\n");
+        std::fflush(stdout);
+        ++bones_logged;
+    }
+}
 extern "C" void __imp__sub_828138E0(PPCContext&,uint8_t*);
 PPC_FUNC(sub_828138E0) {
     static uint64_t calls=0;const auto call=++calls;const auto device=ctx.r3.u32;
@@ -795,11 +1017,27 @@ ME_IMPORT(__imp__VdSwap) {
     // unset/0 = off) paces the guest's swaps on a fixed cadence; the gate is released
     // while waiting so other guest threads keep running. Falling behind restarts the
     // cadence instead of catching up with a burst of frames.
-    static const int64_t limit_ns = [] {
-        const char* v = std::getenv("ME_FRAME_LIMIT"); const int hz = v ? std::atoi(v) : 0;
+    // ME_FRAME_LIMIT_FILE=<path> (diagnostics): the limit is re-read from that file every 60
+    // swaps, so A/B of pacing modes needs no restart at the same spot of a level.
+    static auto limit_for = [](int hz) { return hz >= 10 && hz <= 240 ? int64_t(1000000000) / hz : int64_t(0); };
+    // Default 30 when unset: above 30 FPS (Unlock FPS patch) the game crashed in Stormdrain
+    // (lr 8249b888, bone attachment list); ME_FRAME_LIMIT=0 runs without a limit.
+    static int64_t limit_ns = [] {
+        const char* v = std::getenv("ME_FRAME_LIMIT"); const int hz = v ? std::atoi(v) : 30;
         if (hz) std::printf("{\"event\":\"frame_limit\",\"hz\":%d}\n", hz);
-        return hz >= 10 && hz <= 240 ? int64_t(1000000000) / hz : int64_t(0);
+        return limit_for(hz);
     }();
+    static const char* limit_file = std::getenv("ME_FRAME_LIMIT_FILE");
+    if (limit_file && call % 60 == 0) {
+        if (FILE* f = std::fopen(limit_file, "r")) {
+            int hz = 0;
+            if (std::fscanf(f, "%d", &hz) == 1 && limit_for(hz) != limit_ns) {
+                limit_ns = limit_for(hz);
+                std::printf("{\"event\":\"frame_limit\",\"hz\":%d,\"source\":\"file\"}\n", hz);
+            }
+            std::fclose(f);
+        }
+    }
     if (limit_ns) {
         static int64_t next_swap_ns = 0;
         const int64_t now = int64_t(me_gate_now_ns());
@@ -1108,6 +1346,18 @@ ME_IMPORT(__imp__XamShowSigninUI) {
  state_changed.notify_all();ctx.r3.u64=0;
  std::printf("{\"event\":\"local_signin_completed\",\"user\":0,\"name\":\"%s\",\"online\":false,\"notifications\":%d}\n",selected_local_player.name,shown+changed+hidden);
 }
+// Marketplace (menu "Downloadable content"): the profile is offline, so on a console the Guide
+// only says Xbox Live is required and closes. Same here: no UI, the system-UI notification goes
+// shown -> hidden and the call succeeds (CHECKLIST: Marketplace offline assumption).
+ME_IMPORT(__imp__XamShowMarketplaceUI) {
+ const auto user=ctx.r3.u32;
+ if(user>=4){ctx.r3.u64=87;return;}
+ if(user || !local_player_signed_in){ctx.r3.u64=1317;return;}
+ const int shown=notifications.broadcast(9,1),hidden=notifications.broadcast(9,0);
+ if(shown<0 || hidden<0)me_stop_import("marketplace_notification_capacity",ctx);
+ state_changed.notify_all();ctx.r3.u64=0;
+ std::printf("{\"event\":\"marketplace_ui_offline\",\"user\":%u,\"entry_point\":%u,\"notifications\":%d}\n",user,ctx.r4.u32,shown+hidden);
+}
 ME_IMPORT(__imp__XamUserGetSigninInfo) {
  const auto user=ctx.r3.u32,out=ctx.r5.u32;
  if(!out || !checked_span(out,40,true)){ctx.r3.u64=0x80070057;return;}
@@ -1186,7 +1436,7 @@ static bool load_title_achievements(){
         const auto address=load_word(entry+8),size=load_word(entry+12);MeXdbf db;
         if(!image_span_mapped(address,size) || !db.open(guest+address,size))return false;
         std::vector<MeAchievement> items;uint32_t language=0;
-        if(!db.achievements(guest_console_language,items,language) || items.empty())return false;
+        if(!db.achievements(guest_console_language(),items,language) || items.empty())return false;
         title_achievements=std::move(items);title_achievement_language=language;
         std::printf("{\"event\":\"title_achievements_loaded\",\"title\":\"%s\",\"count\":%zu,\"language\":%u,\"unlocked\":0}\n",name,title_achievements.size(),language);
         return true;
@@ -1196,9 +1446,13 @@ static bool load_title_achievements(){
 // XUserSetContextEx values of the signed-in local user: session presence state,
 // kept in memory only and never sent anywhere.
 static std::vector<std::pair<uint32_t,uint32_t>> local_player_contexts;
+static void xgi_write_achievements(PPCContext& ctx,uint32_t overlapped,uint32_t buffer,uint32_t length);
+static void xgi_unsupported_message(PPCContext& ctx,uint32_t message,uint32_t overlapped,uint32_t length);
 ME_IMPORT(__imp__XMsgStartIORequest) {
     const auto app=ctx.r3.u32,message=ctx.r4.u32,overlapped=ctx.r5.u32,buffer=ctx.r6.u32,length=ctx.r7.u32;
-    if(!gpu_explore_mode || app!=0xfb || message!=0xb0006)me_stop_import("xmsg_io_app_or_message_unsupported",ctx);
+    if(!gpu_explore_mode || app!=0xfb)me_stop_import("xmsg_io_app_or_message_unsupported",ctx);
+    if(message==0xb0008){xgi_write_achievements(ctx,overlapped,buffer,length);return;}
+    if(message!=0xb0006){xgi_unsupported_message(ctx,message,overlapped,length);return;}
     if(overlapped)me_stop_import("xgi_set_context_overlapped_not_implemented",ctx);
     if(length!=24 || !checked_span(buffer,24,true))me_stop_import("xgi_set_context_buffer_invalid",ctx);
     // Caller sub_829F9A78 layout: user, unwritten word, zero qword, context id, value.
@@ -1217,6 +1471,8 @@ ME_IMPORT(__imp__XMsgStartIORequest) {
     put_word(thread_address+0x160,0);ctx.r3.u64=0;
     static unsigned calls=0;if(++calls<=16)std::printf("{\"event\":\"user_context_set\",\"user\":0,\"context\":\"%08x\",\"value\":%u}\n",id,value);
 }
+static void load_local_unlocks();
+static uint64_t local_unlock_filetime(uint32_t id);
 ME_IMPORT(__imp__XamUserCreateAchievementEnumerator) {
     if(!gpu_explore_mode)me_stop_import("achievement_profile_service_unavailable",ctx);
     const auto title=ctx.r3.u32,user=ctx.r4.u32,flags=ctx.r6.u32,offset=ctx.r7.u32,count=ctx.r8.u32,size_out=ctx.r9.u32,handle_out=ctx.r10.u32;
@@ -1230,6 +1486,7 @@ ME_IMPORT(__imp__XamUserCreateAchievementEnumerator) {
     if(title && title!=module_title_id())me_stop_import("achievement_other_title_unsupported",ctx);
     if(xuid && xuid!=selected_local_player.xuid)me_stop_import("achievement_other_player_unsupported",ctx);
     if(!load_title_achievements())me_stop_import("achievement_title_metadata_invalid",ctx);
+    load_local_unlocks();
     if(offset>title_achievements.size()){ctx.r3.u64=87;return;}
     const auto handle=achievement_enumerators.create(user,flags,count,offset);
     if(!handle)me_stop_import("achievement_enumerator_capacity_exceeded",ctx);
@@ -1237,6 +1494,76 @@ ME_IMPORT(__imp__XamUserCreateAchievementEnumerator) {
     std::printf("{\"event\":\"achievement_enumerator_created\",\"handle\":\"%08x\",\"flags\":%u,\"offset\":%u,\"count\":%u,\"available\":%zu}\n",handle,flags,offset,count,title_achievements.size());
 }
 #include "save_content.h"
+// Unlocked achievements of the signed-in local profile, persisted next to its saves:
+// <ME_SAVE_ROOT>/<XUID>/<title id>/achievements.txt, one "<id> <unix seconds>" line each
+// (read by the launcher too). Loaded once per session; rewritten through a temporary
+// file on every new unlock. Self-tests switch the store off so they never touch saves.
+static std::vector<uint32_t> local_player_unlocked;
+static std::vector<uint64_t> local_player_unlock_times;  // unix seconds, parallel to the ids
+static bool achievement_store_disabled=false,achievement_store_loaded=false;
+static std::string achievement_store_path(){
+    if(achievement_store_disabled || !selected_local_player.xuid || !ensure_save_storage())return {};
+    char name[64];std::snprintf(name,sizeof(name),"/%016llX/%08X/achievements.txt",(unsigned long long)selected_local_player.xuid,module_title_id());
+    return save_storage.root+name;
+}
+static void load_local_unlocks(){
+    if(achievement_store_loaded)return;
+    const auto path=achievement_store_path();if(path.empty())return;
+    achievement_store_loaded=true;
+    std::ifstream in(path);unsigned id=0;unsigned long long when=0;
+    while(in>>id>>when){
+        if(std::find(local_player_unlocked.begin(),local_player_unlocked.end(),id)!=local_player_unlocked.end() || local_player_unlocked.size()>=1024)continue;
+        local_player_unlocked.push_back(id);local_player_unlock_times.push_back(when);
+    }
+    std::printf("{\"event\":\"achievements_restored\",\"count\":%zu}\n",local_player_unlocked.size());
+}
+static bool save_local_unlocks(){
+    const auto path=achievement_store_path();if(path.empty())return false;
+    const auto slash=path.find_last_of('/');::mkdir(path.substr(0,slash).c_str(),0770);
+    const auto temp=path+".tmp";
+    {std::ofstream out(temp,std::ios::trunc);if(!out)return false;
+     for(size_t i=0;i<local_player_unlocked.size();++i)out<<local_player_unlocked[i]<<' '<<local_player_unlock_times[i]<<'\n';
+     if(!out.flush())return false;}
+    return std::rename(temp.c_str(),path.c_str())==0;
+}
+// FILETIME (100 ns since 1601) of an unlock, 0 when the id is not unlocked.
+static uint64_t local_unlock_filetime(uint32_t id){
+    for(size_t i=0;i<local_player_unlocked.size();++i)if(local_player_unlocked[i]==id)
+        return i<local_player_unlock_times.size() && local_player_unlock_times[i] ? local_player_unlock_times[i]*10000000ull+116444736000000000ull : 116444736000000000ull;
+    return 0;
+}
+// XGI 0xB0008 = XUserWriteAchievements (Xenia xgi_app.cc): buffer {count, XUSER_ACHIEVEMENT*},
+// each achievement {user index, achievement id}. New unlocks are stored in the profile's
+// achievements.txt and logged; the request completes immediately, through the XOVERLAPPED
+// when the caller passed one.
+static void xgi_write_achievements(PPCContext& ctx,uint32_t overlapped,uint32_t buffer,uint32_t length){
+    if(length!=8 || !checked_span(buffer,8))me_stop_import("xgi_write_achievements_buffer_invalid",ctx);
+    const auto count=load_word(buffer),items=load_word(buffer+4);
+    if(count>256 || (count && !checked_span(items,count*8)))me_stop_import("xgi_write_achievements_list_invalid",ctx);
+    save_validate_overlapped(ctx,overlapped);
+    load_local_unlocks();
+    for(uint32_t i=0;i<count;++i){
+        const auto user=load_word(items+i*8),id=load_word(items+i*8+4);
+        const bool fresh=std::find(local_player_unlocked.begin(),local_player_unlocked.end(),id)==local_player_unlocked.end();
+        bool persisted=false;
+        if(fresh && local_player_unlocked.size()<1024){
+            local_player_unlocked.push_back(id);local_player_unlock_times.push_back(uint64_t(std::time(nullptr)));
+            persisted=save_local_unlocks();
+        }
+        std::printf("{\"event\":\"achievement_unlocked\",\"user\":%u,\"id\":%u,\"new\":%s,\"persisted\":%s}\n",user,id,fresh?"true":"false",persisted?"true":"false");
+    }
+    put_word(thread_address+0x160,0);
+    ctx.r3.u64=save_complete(ctx,overlapped,0);
+}
+// Other XGI messages: reported as not supported (ERROR_NOT_SUPPORTED, completed through the
+// XOVERLAPPED if given) instead of stopping the game; nothing is pretended to succeed.
+static void xgi_unsupported_message(PPCContext& ctx,uint32_t message,uint32_t overlapped,uint32_t length){
+    save_validate_overlapped(ctx,overlapped);
+    static unsigned logged=0;
+    if(++logged<=32)std::printf("{\"event\":\"xgi_message_unsupported\",\"message\":\"%08x\",\"length\":%u,\"overlapped\":%s,\"result\":50}\n",message,length,overlapped?"true":"false");
+    put_word(thread_address+0x160,50);
+    ctx.r3.u64=overlapped?save_complete(ctx,overlapped,50):(0x80070000u|50);
+}
 ME_IMPORT(__imp__XamEnumerate) {
     const auto handle=ctx.r3.u32,flags=ctx.r4.u32,buffer=ctx.r5.u32,capacity=ctx.r6.u32,returned=ctx.r7.u32,overlapped=ctx.r8.u32;
     if(auto* content=save_enumerator(handle)){enumerate_save_content(ctx,*content);return;}
@@ -1252,7 +1579,7 @@ ME_IMPORT(__imp__XamEnumerate) {
     const uint64_t needed=uint64_t(e->per_call)*MeAchievementEnumerators::item_size(e->flags);
     if(capacity>=needed && !checked_span(buffer,uint32_t(needed)))me_stop_import("enumerate_buffer_invalid",ctx);
     uint32_t written=0;
-    const auto result=MeAchievementEnumerators::write(*e,title_achievements,guest+buffer,buffer,capacity,written);
+    const auto result=MeAchievementEnumerators::write(*e,title_achievements,guest+buffer,buffer,capacity,written,local_unlock_filetime);
     if(!result)put_word(returned,written);
     ctx.r3.u64=result;
     static unsigned calls=0;if(++calls<=16)std::printf("{\"event\":\"achievement_enumerate\",\"handle\":\"%08x\",\"written\":%u,\"result\":%u}\n",handle,written,result);
@@ -1583,6 +1910,97 @@ ME_IMPORT(__imp__NetDll_XNetStartup) {
     std::printf("{\"event\":\"xnet_local_service\",\"ready\":%s,\"loopback_port\":%u,\"external_connection\":false,\"xbox_live\":false}\n",ready?"true":"false",offline_network.port);
 }
 
+// Current scene for the session log: the game streams level packages named
+// <Chapter>_<Area>[_Part].xxx (Escape_R1, Escape_R1_Art...). The scene is the chapter
+// plus area (Escape_R1), or the bare package name for menus (TdMainMenu); shared
+// packages (Textures, CharTextures, startup and engine packages, *_LOC_*) are ignored.
+static std::mutex scene_mutex;
+static char current_scene[48] = "startup";
+extern "C" void me_current_scene(char* out, size_t capacity) {
+    std::lock_guard<std::mutex> lock(scene_mutex);
+    std::snprintf(out, capacity, "%s", current_scene);
+}
+static void note_scene_from_path(const std::string& path) {
+    const auto slash = path.find_last_of("\\/");
+    std::string name = path.substr(slash == std::string::npos ? 0 : slash + 1);
+    if (name.size() < 5 || name.compare(name.size() - 4, 4, ".xxx")) return;
+    name.resize(name.size() - 4);
+    static const char* shared[] = {"Textures", "CharTextures", "GuidCache", "Startup", "TdGame", "GameFramework",
+                                   "IpDrv", "Engine", "Core", "Ts", "Tp", "Tk", "TdEditor", "TdSharedContent"};
+    for (const char* s : shared) if (!name.compare(0, std::strlen(s), s) && (name.size() == std::strlen(s) || name[std::strlen(s)] == '_')) return;
+    if (name.find("_LOC_") != std::string::npos) return;
+    std::string scene = name.substr(0, name.find('_'));
+    const auto first = name.find('_');
+    if (first != std::string::npos) {
+        const auto second = name.find('_', first + 1);
+        const std::string area = name.substr(first + 1, second == std::string::npos ? std::string::npos : second - first - 1);
+        if (area.size() >= 2 && (area[0] == 'R' || area[0] == 'r') && std::isdigit(static_cast<unsigned char>(area[1]))) scene += "_" + area;
+    }
+    std::lock_guard<std::mutex> lock(scene_mutex);
+    if (scene != current_scene) {
+        std::snprintf(current_scene, sizeof(current_scene), "%s", scene.c_str());
+        std::printf("{\"event\":\"scene\",\"name\":\"%s\",\"package\":\"%s\"}\n", current_scene, name.c_str());
+    }
+}
+// Xenia "Dynamic Lighting & Shadows Shading Fix" (apply_xenia_patches.py) is on by
+// default; ME_SHADING_FIX=0 runs the game's original store instead (A/B).
+// Xenia "Unlock FPS" patch (apply_xenia_patches.py), on unless ME_UNLOCK_FPS=0: off runs the
+// game's original frame pacing code (valve wheel / bone attachment A/B, crash lr 8249b888).
+extern "C" bool me_unlock_fps() {
+    static const bool on = [] {
+        const char* v = std::getenv("ME_UNLOCK_FPS"); const bool enabled = !(v && !std::strcmp(v, "0"));
+        std::printf("{\"event\":\"xenia_patch\",\"name\":\"unlock_fps\",\"enabled\":%s}\n", enabled ? "true" : "false");
+        return enabled;
+    }();
+    return on;
+}
+extern "C" bool me_shading_fix() {
+    static const bool on=[]{const char* v=std::getenv("ME_SHADING_FIX");return !(v && !std::strcmp(v,"0"));}();
+    return on;
+}
+// Xenia's Coalesced hash-check patch is enabled only for the explicit private
+// shadow A/B input. Never alter the game's normal verification path by default.
+extern "C" bool me_diagnostic_coalesced_enabled() {
+    static const bool on=[]{const char* v=std::getenv("ME_DIAGNOSTIC_COALESCED");return v && *v;}();
+    return on;
+}
+// One-frame copy of a Bink 1 movie (skip-intro setting): same header and audio track
+// descriptors, frame count 1, a two-entry frame index and the first frame's data, so the
+// player opens a valid movie that ends at once. Written once to <ME_CACHE_ROOT>; empty
+// string if the source is not a Bink file this understands.
+static std::string me_one_frame_movie(const std::string& source){
+    const char* cache=std::getenv("ME_CACHE_ROOT");
+    const std::string target=std::string(cache?cache:"/data/local/tmp/me_cache")+"/startupmovie-1frame.bik";
+    struct stat existing{};
+    if(::stat(target.c_str(),&existing)==0 && existing.st_size>64)return target;
+    std::ifstream in(source,std::ios::binary);
+    std::vector<uint8_t> head(44);
+    if(!in.read(reinterpret_cast<char*>(head.data()),44) || std::memcmp(head.data(),"BIK",3))return {};
+    auto le=[](const uint8_t* p){return uint32_t(p[0])|uint32_t(p[1])<<8|uint32_t(p[2])<<16|uint32_t(p[3])<<24;};
+    auto put=[](uint8_t* p,uint32_t v){p[0]=uint8_t(v);p[1]=uint8_t(v>>8);p[2]=uint8_t(v>>16);p[3]=uint8_t(v>>24);};
+    const uint32_t frames=le(&head[8]),tracks=le(&head[40]);
+    if(!frames || tracks>8)return {};
+    const uint32_t index_at=44+tracks*12;  // per track: max decoded size, rate+flags, id
+    head.resize(index_at+8);
+    if(!in.read(reinterpret_cast<char*>(head.data()+44),index_at+8-44))return {};
+    const uint32_t first=le(&head[index_at]),next=le(&head[index_at+4]);
+    const uint32_t start=first&~1u,end=next&~1u;
+    if(end<=start || end-start>(16u<<20))return {};
+    std::vector<uint8_t> frame(end-start);
+    in.seekg(start);
+    if(!in.read(reinterpret_cast<char*>(frame.data()),frame.size()))return {};
+    const uint32_t frame_at=index_at+8,total=frame_at+uint32_t(frame.size());
+    put(&head[4],total-8);put(&head[8],1);put(&head[12],uint32_t(frame.size()));put(&head[16],1);
+    put(&head[index_at],frame_at|(first&1u));put(&head[index_at+4],total);
+    ::mkdir(target.substr(0,target.find_last_of('/')).c_str(),0770);
+    const std::string temp=target+".tmp";
+    {std::ofstream out(temp,std::ios::binary|std::ios::trunc);
+     out.write(reinterpret_cast<const char*>(head.data()),head.size());out.write(reinterpret_cast<const char*>(frame.data()),frame.size());
+     if(!out.flush())return {};}
+    if(std::rename(temp.c_str(),target.c_str()))return {};
+    std::printf("{\"event\":\"one_frame_movie_written\",\"source_frames\":%u,\"bytes\":%u}\n",frames,total);
+    return target;
+}
 #include "save_file_io.h"
 ME_IMPORT(__imp__NtCreateFile) {
     if(!checked_span(ctx.r1.u32+84,4,true))me_stop_import("file_create_stack_invalid",ctx);
@@ -1595,6 +2013,7 @@ ME_IMPORT(__imp__NtCreateFile) {
     if (length>1024 || !checked_span(pointer,length,true)) me_stop_import("create_file_path_invalid",ctx);
     std::string escaped;
     for(unsigned i=0;i<length;++i){auto c=guest[pointer+i];if(c<32||c>126)me_stop_import("create_file_path_not_ascii",ctx);if(c==92||c==34)escaped.push_back(char(92));escaped.push_back(char(c));}
+    note_scene_from_path(std::string(reinterpret_cast<const char*>(guest + pointer), length));
     std::printf("{\"event\":\"file_open_probe\",\"root\":\"%08x\",\"path\":\"%s\",\"access\":\"%08x\",\"disposition\":%u,\"options\":\"%08x\"}\n",load_word(attributes),escaped.c_str(),ctx.r4.u32,ctx.r10.u32,load_word(ctx.r1.u32+84));
 
     const auto output = ctx.r3.u32, iosb = ctx.r6.u32;
@@ -1615,7 +2034,28 @@ ME_IMPORT(__imp__NtCreateFile) {
         me_stop_import("file_open_only_read_existing_supported",ctx);
     std::string relative;
     if(!MeReadOnlyFiles::relative(path,relative))me_stop_import("file_open_volume_or_path_unsupported",ctx);
-    const auto handle=readonly_files.open(path);
+    // Launcher setting "skip intro" (ME_SKIP_INTRO=1): the startup movie (the engine's
+    // [FullScreenMovie] StartupMovies=StartupMovie, also preloaded via [LoadMovies]) is
+    // served as a one-frame copy made from the user's own file. Reporting it absent is not
+    // an option: the game then raises the dirty-disc error (XamShowDirtyDiscErrorUI).
+    static const bool skip_intro=[]{const char* v=std::getenv("ME_SKIP_INTRO");return v && !std::strcmp(v,"1");}();
+    uint32_t handle=0;
+    if(skip_intro && relative=="tdgame/movies/startupmovie.bik"){
+        const auto movie=me_one_frame_movie(readonly_files.root+"/"+relative);
+        if(!movie.empty())handle=readonly_files.open_host(movie);
+        std::printf("{\"event\":\"startup_movie_skipped\",\"one_frame_copy\":%s}\n",handle?"true":"false");
+    }
+    // Diagnostic A/B only: load a separately generated Coalesced.ini copy.
+    // The original user file remains untouched. The matching static-recomp patch
+    // bypasses the game's Coalesced hash check only in this explicit mode.
+    if(!handle && relative=="tdgame/config/xenon/cooked/coalesced.ini"){
+        if(const char* probe=std::getenv("ME_DIAGNOSTIC_COALESCED"); probe && *probe){
+            handle=readonly_files.open_host(probe);
+            if(!handle)me_stop_import("diagnostic_coalesced_open_failed",ctx);
+            std::puts("{\"event\":\"diagnostic_coalesced_loaded\"}");
+        }
+    }
+    if(!handle)handle=readonly_files.open(path);
 
     if(!handle){
         if(errno==ENOENT){put_word(output,UINT32_MAX);put_word(iosb,0xc000000f);put_word(iosb+4,0);ctx.r3.u64=0xc000000f;return;}
@@ -2728,7 +3168,9 @@ ME_IMPORT(__imp__XAudioSubmitRenderDriverFrame) {
         result = me_pcm_write_all(stereo, [&](const float* data, int frames) {
             if (std::chrono::steady_clock::now() >= deadline) return int(AAUDIO_ERROR_TIMEOUT);
             return int(AAudioStream_write(audio_output->stream, data, frames, 20000000));
-        }); }
+        });
+        if (const int32_t grown = audio_output->adapt())
+          std::printf("{\"event\":\"audio_xrun\",\"underruns\":%d,\"buffer_frames\":%d}\n", audio_output->xruns, grown); }
       gate.lock(); gate.release(); }
     const bool accepted = result.frames == 256 && !result.error;
     const auto submitted = accepted ? audio_frames_submitted.fetch_add(1) + 1 : audio_frames_submitted.load();
@@ -2833,6 +3275,32 @@ extern "C" void me_runtime_set_paused(bool paused) {
     } else {
         pause_changed.notify_all();
     }
+}
+// Jump-table cases XenonRecomp missed. sub_82D37AD8 switches on r11 (0..6) through a
+// table at 0x82D37B80 that the analysis took for code: case 0 (0x82D37B9C) ended up
+// inside "sub_82D37B80" and case 6 (0x82D37BD0) inside sub_82D37BC8, so neither had a
+// lookup entry and the indirect call jumped to address 0 (crash in chapter "Edge",
+// lr 82d3cd78). Translated by hand from the guest instructions:
+//   82D37B9C: andi. r11,r3,40 ; b 0x82D37BC8
+//   82D37BD0: li r10,1 ; mr r3,r10 ; blr
+static PPC_FUNC(me_case_82D37B9C) {
+    ctx.r11.u64 = ctx.r3.u64 & 40;
+    ctx.cr0.compare<int32_t>(ctx.r11.s32, 0, ctx.xer);
+    (PPC_LOOKUP_FUNC(base, 0x82D37BC8))(ctx, base);
+}
+static PPC_FUNC(me_case_82D37BD0) {
+    ctx.r10.s64 = 1;
+    ctx.r3.u64 = ctx.r10.u64;
+}
+static void install_missing_jump_cases() {
+    const struct { uint32_t guest; PPCFunc* host; } cases[] = {{0x82D37B9C, me_case_82D37B9C}, {0x82D37BD0, me_case_82D37BD0}};
+    for (const auto& c : cases)
+        if (!PPC_LOOKUP_FUNC(guest, c.guest)) PPC_LOOKUP_FUNC(guest, c.guest) = c.host;
+}
+void me_unmapped_indirect_call(uint32_t target, uint32_t lr) {
+    std::printf("{\"event\":\"indirect_call_unmapped\",\"target\":\"%08x\",\"lr\":\"%08x\",\"thread\":\"%08x\"}\n", target, lr, thread_address);
+    std::fflush(stdout);
+    _exit(97);
 }
 static PPC_FUNC(thread_test_entry) {
     const auto event = ctx.r3.u32;
@@ -3058,6 +3526,20 @@ static int self_test(PPCContext& ctx) {
         expect(set_context(0,0x800b,1)==0 && load_word(thread_address+0x160)==0);
         expect(set_context(0,0x800b,2)==0 && local_player_contexts.size()==1 && local_player_contexts[0].second==2);
         expect(set_context(0,0x8001,7)==0 && local_player_contexts.size()==2 && load_word(0x70008014)==7);
+        // XUserWriteAchievements (0xB0008): {count, list}, list = {user, id}; synchronous here.
+        const auto saved_unlocked=local_player_unlocked;const auto saved_times=local_player_unlock_times;
+        achievement_store_disabled=true;  // self-test process: never read or write a profile store on disk
+        local_player_unlocked.clear();local_player_unlock_times.clear();
+        put_word(0x70008100,0);put_word(0x70008104,17);put_word(0x70008000,1);put_word(0x70008004,0x70008100);
+        ctx.r3.u64=0xfb;ctx.r4.u64=0xb0008;ctx.r5.u64=0;ctx.r6.u64=0x70008000;ctx.r7.u64=8;__imp__XMsgStartIORequest(ctx,guest);
+        expect(ctx.r3.u32==0 && local_player_unlocked.size()==1 && local_player_unlocked[0]==17);
+        ctx.r3.u64=0xfb;ctx.r4.u64=0xb0008;ctx.r5.u64=0;ctx.r6.u64=0x70008000;ctx.r7.u64=8;__imp__XMsgStartIORequest(ctx,guest);
+        expect(ctx.r3.u32==0 && local_player_unlocked.size()==1);  // same id again: no duplicate
+        // Unknown XGI message: reported as not supported, the game keeps running.
+        ctx.r3.u64=0xfb;ctx.r4.u64=0xb00ff;ctx.r5.u64=0;ctx.r6.u64=0x70008000;ctx.r7.u64=8;__imp__XMsgStartIORequest(ctx,guest);
+        expect(ctx.r3.u32==0x80070032 && load_word(thread_address+0x160)==50);
+        expect(local_unlock_filetime(17)>116444736000000000ull && local_unlock_filetime(18)==0);
+        local_player_unlocked=saved_unlocked;local_player_unlock_times=saved_times;
         // Achievement metadata comes from the real title XDBF; nothing is reported as achieved.
         expect(load_title_achievements() && title_achievements.size()==44 && title_achievement_language==1);
         uint32_t score=0;for(const auto& a:title_achievements){score+=a.gamerscore;expect(!a.label.empty() && !(a.flags&0x30000));}
@@ -4284,6 +4766,7 @@ int me_runtime_main(int argc, char** argv) {
         PPC_LOOKUP_FUNC(guest, p->guest) = p->host;
         ++mappings;
     }
+    install_missing_jump_cases();
     if(polling_yield_experiment){original_stream_poll=PPC_LOOKUP_FUNC(guest,0x8238e850);PPC_LOOKUP_FUNC(guest,0x8238e850)=diagnostic_stream_poll;original_worker_poll=PPC_LOOKUP_FUNC(guest,0x826ccc08);PPC_LOOKUP_FUNC(guest,0x826ccc08)=diagnostic_worker_poll;}
     writable(0x70000000, 0x100000);
     physical_memory.map = map_physical;

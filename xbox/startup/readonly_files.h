@@ -61,6 +61,17 @@ struct MeReadOnlyFiles {
         files.push_back({fd,uint64_t(info.st_size),0});
         return 0x30000+uint32_t(files.size()-1)*4;
     }
+    // A host file the runtime produced itself (e.g. the one-frame startup movie for the
+    // skip-intro setting), served under a guest path the caller already validated.
+    uint32_t open_host(const std::string& host_path){
+        if(files.size()>=256){errno=EMFILE;return 0;}
+        int fd=::open(host_path.c_str(),O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
+        if(fd<0)return 0;
+        struct stat info{};
+        if(fstat(fd,&info)||!S_ISREG(info.st_mode)||info.st_size<0){::close(fd);errno=EINVAL;return 0;}
+        files.push_back({fd,uint64_t(info.st_size),0});
+        return 0x30000+uint32_t(files.size()-1)*4;
+    }
     int64_t read(uint32_t handle,void* data,uint32_t length,uint64_t offset){
         auto* f=find(handle);if(!f || offset>INT64_MAX){errno=EINVAL;return -1;}
         ssize_t n;

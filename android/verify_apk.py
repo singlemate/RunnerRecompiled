@@ -3,7 +3,7 @@ from pathlib import Path
 from unicorn import Uc,UC_ARCH_ARM64,UC_MODE_ARM
 from unicorn.arm64_const import UC_ARM64_REG_X0,UC_ARM64_REG_X1,UC_ARM64_REG_X2,UC_ARM64_REG_X3,UC_ARM64_REG_LR,UC_ARM64_REG_PC
 ap=argparse.ArgumentParser();ap.add_argument('--ndk',required=True);args=ap.parse_args()
-root=Path(__file__).resolve().parents[1];build=root/'build'/'android';tools=Path(args.ndk)/'toolchains/llvm/prebuilt/windows-x86_64/bin';apk=root/'mirrors-edge-research.apk'
+root=Path(__file__).resolve().parents[1];build=root/'build'/'android';tools=Path(args.ndk)/'toolchains/llvm/prebuilt/windows-x86_64/bin';apk=root/'RunnerRecompiled.apk'
 with zipfile.ZipFile(apk) as z:
  assert z.testzip() is None
  lib=z.getinfo('lib/arm64-v8a/libmeprobe.so');assert lib.compress_type==zipfile.ZIP_STORED

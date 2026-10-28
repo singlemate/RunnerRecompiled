@@ -98,7 +98,7 @@ SDK packages: `platforms;android-35`, `build-tools;35.0.0`, `platform-tools`.
 
 1. Включить USB-отладку, подключить кабелем передачи данных и разрешить этот ПК
    в системном запросе на планшете. `adb devices -l` должен показать статус device.
-2. Установка: `adb install -r ../mirrors-edge-research.apk`.
+2. Установка: `adb install -r ../RunnerRecompiled.apk`.
 3. Запуск: `adb shell am start -n org.mirrorsedge.research/.MainActivity`.
 4. Проверить JNI PASS, несколько одновременных касаний, стики/кнопки геймпада,
    его отключение и паузу. После возврата фокуса нажать «Продолжить тест».

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Themed (monochrome) icon for Android 13+: the route line and block outlines only. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#FFFFFF" android:pathData="M20,66h14v38h-14zM48,48h14v56h-14zM76,70h14v34h-14z"/>
+    <path android:strokeColor="#FFFFFF" android:strokeWidth="5" android:pathData="M18,60H42L46,42H70L74,64H92"/>
+</vector>

@@ -17,6 +17,7 @@
 
 int me_runtime_main(int argc, char** argv);
 extern "C" void me_runtime_set_paused(bool paused);
+extern "C" void me_overlay_stats(uint64_t* swaps, int64_t* max_frame_ns);
 
 namespace {
 std::atomic<bool> started{false};
@@ -88,4 +89,15 @@ extern "C" JNIEXPORT void JNICALL Java_org_mirrorsedge_research_GameActivity_nat
 extern "C" JNIEXPORT void JNICALL Java_org_mirrorsedge_research_GameActivity_nativeSetPaused(
     JNIEnv*, jclass, jboolean paused) {
     if (started.load()) me_runtime_set_paused(paused == JNI_TRUE);
+}
+
+// Performance overlay: {guest swaps so far, longest frame in ns since the previous call}.
+extern "C" JNIEXPORT jlongArray JNICALL Java_org_mirrorsedge_research_GameActivity_nativeFrameStats(JNIEnv* env, jclass) {
+    uint64_t swaps = 0;
+    int64_t max_frame_ns = 0;
+    if (started.load()) me_overlay_stats(&swaps, &max_frame_ns);
+    const jlong values[2] = {jlong(swaps), jlong(max_frame_ns)};
+    jlongArray result = env->NewLongArray(2);
+    if (result) env->SetLongArrayRegion(result, 0, 2, values);
+    return result;
 }

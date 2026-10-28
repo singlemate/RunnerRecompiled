@@ -67,7 +67,7 @@ struct MeAchievementEnumerators {
  bool close(uint32_t h){auto* e=find(h);if(!e)return false;e->live=false;return true;}
  // Writes up to per_call items into a host view of the guest buffer at guest_address.
  // Returns a Win32 code: 0, 18 NO_MORE_FILES, 122 INSUFFICIENT_BUFFER, 1627 strings overflow.
- static uint32_t write(Object& e,const std::vector<MeAchievement>& items,uint8_t* buffer,uint32_t guest_address,uint32_t capacity,uint32_t& written){
+ static uint32_t write(Object& e,const std::vector<MeAchievement>& items,uint8_t* buffer,uint32_t guest_address,uint32_t capacity,uint32_t& written,uint64_t (*unlocked)(uint32_t)=nullptr){
   written=0;if(e.cursor>=items.size())return 18;
   if(uint64_t(capacity)<uint64_t(e.per_call)*item_size(e.flags))return 122;
   const uint32_t count=std::min<uint32_t>(e.per_call,uint32_t(items.size()-e.cursor));
@@ -80,6 +80,8 @@ struct MeAchievementEnumerators {
    if((e.flags&2) && !(description=append(a.description)))return 1627;
    if((e.flags&4) && !(unachieved=append(a.unachieved)))return 1627;
    put(d,a.id);put(d+4,label);put(d+8,description);put(d+12,unachieved);put(d+16,a.image_id);put(d+20,a.gamerscore);
-   put(d+24,0);put(d+28,0);put(d+32,a.flags);}  // No unlock time: nothing is achieved.
+   // Unlocked (from the profile store): FILETIME high/low and XACHIEVEMENT_DETAILS_ACHIEVED.
+   const uint64_t when=unlocked?unlocked(a.id):0;
+   put(d+24,uint32_t(when>>32));put(d+28,uint32_t(when));put(d+32,a.flags|(when?0x20000u:0u));}
   e.cursor+=count;written=count;return 0;}
 };

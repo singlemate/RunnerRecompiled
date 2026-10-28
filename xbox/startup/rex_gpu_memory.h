@@ -9,6 +9,8 @@
 #include <array>
 #include <vector>
 #include <algorithm>
+// Shadow-flicker diagnostic (RexGlue shared_memory.cpp): who triggered an invalidation.
+extern "C" int me_trace_invalidation_source;
 
 struct MeGpuScanStats { std::atomic<uint64_t> calls{0}, scans{0}, pages{0}; };
 // Non-owning bridge; no Rex Memory instance, heap, or new backing store.
@@ -81,7 +83,7 @@ class MeRexGpuMemory final : public rex::memory::GpuMemory {
         me_gpu_write_watch.take_dirty([&](uint32_t first, uint32_t count) { runs.emplace_back(first, count); });
         for (auto [first, count] : runs) {
             scan_stats.pages.fetch_add(count, std::memory_order_relaxed);
-            notify(first * 4096u, count * 4096u);
+            me_trace_invalidation_source = 1; notify(first * 4096u, count * 4096u); me_trace_invalidation_source = 0;
         }
     }
     // Allocation/free notification regardless of watch state (Xenia Canary fork PR #93:
@@ -89,11 +91,11 @@ class MeRexGpuMemory final : public rex::memory::GpuMemory {
     // reallocates and fills them -> black textures). Default on; ME_GPU_ALLOC_INVALIDATE=0 disables.
     static void InvalidateAllocatedRange(uint32_t address, uint32_t length) {
         me_gpu_write_watch.release(address, length);
-        for (auto* instance : instances_) instance->notify(address, length);
+        for (auto* instance : instances_) { me_trace_invalidation_source = 2; instance->notify(address, length); me_trace_invalidation_source = 0; }
     }
     static void InvalidateReleasedRange(uint32_t address, uint32_t length) {
         if (!me_gpu_write_watch.release(address, length)) return;
-        for (auto* instance : instances_) instance->notify(address, length);
+        for (auto* instance : instances_) { me_trace_invalidation_source = 3; instance->notify(address, length); me_trace_invalidation_source = 0; }
     }
     size_t watched_pages() const { return me_gpu_write_watch.watched_pages(); }
 

@@ -1,5 +1,7 @@
 #pragma once
 #include <aaudio/AAudio.h>
+#include <algorithm>
+#include <cstdint>
 // Blocking-mode output, owned by the diagnostic process. No audio frames are
 // acknowledged here: PCM submission/conversion remains a separate operation.
 struct MeAudioOutput {
@@ -35,6 +37,22 @@ struct MeAudioOutput {
         // audio clock stays close to what is actually heard.
         const int32_t burst = AAudioStream_getFramesPerBurst(stream);
         AAudioStream_setBufferSizeInFrames(stream, burst > 512 ? burst * 2 : 1024);
+        xruns = AAudioStream_getXRunCount(stream);
         return true;
+    }
+    // Underruns (crackling) when the guest audio thread is late, e.g. on slower devices: grow
+    // the queue by one burst per new underrun, up to ~85 ms (4096 frames). Returns the new
+    // buffer size when it grew, 0 otherwise. Called after writes, under the writer lock.
+    int32_t xruns = 0;
+    int32_t adapt() {
+        const int32_t count = AAudioStream_getXRunCount(stream);
+        if (count <= xruns) return 0;
+        xruns = count;
+        const int32_t size = AAudioStream_getBufferSizeInFrames(stream);
+        const int32_t limit = std::min<int32_t>(4096, AAudioStream_getBufferCapacityInFrames(stream));
+        if (size >= limit) return 0;
+        const int32_t burst = std::max<int32_t>(AAudioStream_getFramesPerBurst(stream), 256);
+        const int32_t grown = AAudioStream_setBufferSizeInFrames(stream, std::min(limit, size + burst));
+        return grown > size ? grown : 0;
     }
 };

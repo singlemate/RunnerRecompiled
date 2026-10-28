@@ -7,6 +7,15 @@
 uint64_t me_gpu_mmio_load(uint64_t address, unsigned size);
 void me_gpu_mmio_store(uint64_t address, unsigned size, uint64_t value);
 void me_guest_poll_window(uint64_t address);
+// Indirect calls (bctr/bctrl through the function lookup table): a target with no
+// recompiled function stops with its address instead of jumping to address 0.
+[[noreturn]] void me_unmapped_indirect_call(uint32_t target, uint32_t lr);
+#define PPC_CALL_INDIRECT_FUNC(x) \
+    do { \
+        auto* const me_indirect_ = PPC_LOOKUP_FUNC(base, x); \
+        if (__builtin_expect(!me_indirect_, 0)) me_unmapped_indirect_call(uint32_t(x), uint32_t(ctx.lr)); \
+        me_indirect_(ctx, base); \
+    } while (0)
 bool me_pool_scan_enabled();
 uint64_t me_xma_load(uint64_t address, unsigned size);
 void me_xma_store(uint64_t address, unsigned size, uint64_t value);
