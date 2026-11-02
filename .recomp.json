@@ -1,15 +1,15 @@
 {
   "$schema": "https://recomp.fyi/schema/v1.json",
   "game": "Mirror's Edge",
-  "system": "Xbox 360",
+  "system": ["PC (Windows)", "Xbox 360"],
   "type": "recomp",
   "project": "RunnerRecompiled",
-  "status": "in-progress",
+  "status": "exploring",
   "targets": ["Android"],
   "toolchain": ["Xenonrecomp", "Rexglue"],
-  "approach": "Static recompilation of the Xbox 360 XEX to native ARM64, own kernel/XAM runtime, RexGlue Vulkan GPU backend",
+  "approach": "Moving to static recompilation of the PC (Windows, x86) executable to native ARM64 with a D3D9-to-Vulkan layer; the Xbox 360 XEX recompilation (own kernel/XAM runtime, RexGlue Vulkan backend) is the current working build",
   "maintainers": [{ "name": "singlemate", "link": "https://github.com/singlemate" }],
-  "help": ["Rendering artifacts on distant buildings", "XMA audio decoding", "Xbox save storage and device selector"],
+  "help": ["x86 PE static recompilation (x87, SEH, indirect calls)", "D3D9 to Vulkan on Android", "PhysX 2.x on ARM64"],
   "tags": ["arm64", "vulkan", "android"],
-  "notes": "Runs on Android ARM64 (tested on Lenovo Legion Y700 Gen 4). Reaches the title screen with controller input and a local offline profile sign-in; menus and levels are not reached yet. No audio decoding, no save storage yet. You must supply your own Xbox 360 copy of the game; no game files are included."
+  "notes": "Xbox 360 build is playable on Android ARM64 (Lenovo Legion Y700 Gen 4, Adreno 830), 20-30 FPS, GPU-bound by Xenos EDRAM emulation. Work is shifting to a native recompilation of the DRM-free PC release for 60 FPS, resolution and FOV options; the PC part is at the analysis stage. You must supply your own copy of the game; no game files are included."
 }
