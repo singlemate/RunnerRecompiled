@@ -15,9 +15,25 @@ extern uintptr_t x86_mem_base;
 #define X86_MEM_BASE x86_mem_base
 #endif
 
+typedef union X86Xmm {
+    float f[4];
+    uint32_t u[4];
+    int32_t i[4];
+    double d[2];
+    uint64_t q[2];
+} X86Xmm;
+
 typedef struct X86Ctx {
     uint32_t eax, ecx, edx, ebx, esp, ebp, esi, edi;
     uint32_t fs_base; /* guest address of the TEB */
+    /* x87: values held as double (see x87_round), physical registers st[], top of stack,
+       bit mask of non-empty physical registers, control word, status word (C0..C3). */
+    double st[8];
+    uint32_t ftop, ftag;
+    uint32_t fcw, fsw;
+    X86Xmm xmm[8];
+    uint32_t mxcsr;
+    uint64_t mm[8]; /* MMX, kept apart from the x87 registers (the game does not mix them) */
 } X86Ctx;
 
 typedef void (*X86Fn)(X86Ctx *);
@@ -26,9 +42,207 @@ typedef void (*X86Fn)(X86Ctx *);
 static inline uint8_t ld8(uint32_t a) { uint8_t v; memcpy(&v, (void *)X86_PTR(a), 1); return v; }
 static inline uint16_t ld16(uint32_t a) { uint16_t v; memcpy(&v, (void *)X86_PTR(a), 2); return v; }
 static inline uint32_t ld32(uint32_t a) { uint32_t v; memcpy(&v, (void *)X86_PTR(a), 4); return v; }
+static inline uint64_t ld64(uint32_t a) { uint64_t v; memcpy(&v, (void *)X86_PTR(a), 8); return v; }
 static inline void st8(uint32_t a, uint8_t v) { memcpy((void *)X86_PTR(a), &v, 1); }
 static inline void st16(uint32_t a, uint16_t v) { memcpy((void *)X86_PTR(a), &v, 2); }
 static inline void st32(uint32_t a, uint32_t v) { memcpy((void *)X86_PTR(a), &v, 4); }
+static inline void st64(uint32_t a, uint64_t v) { memcpy((void *)X86_PTR(a), &v, 8); }
+static inline float ldf(uint32_t a) { float v; memcpy(&v, (void *)X86_PTR(a), 4); return v; }
+static inline double ldd(uint32_t a) { double v; memcpy(&v, (void *)X86_PTR(a), 8); return v; }
+static inline void stf(uint32_t a, float v) { memcpy((void *)X86_PTR(a), &v, 4); }
+static inline void std_(uint32_t a, double v) { memcpy((void *)X86_PTR(a), &v, 8); }
+static inline X86Xmm ldx(uint32_t a) { X86Xmm v; memcpy(&v, (void *)X86_PTR(a), 16); return v; }
+static inline void stx(uint32_t a, X86Xmm v) { memcpy((void *)X86_PTR(a), &v, 16); }
+static inline uint32_t f2u(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
+static inline float u2f(uint32_t u) { float f; memcpy(&f, &u, 4); return f; }
+
+/* --- x87 --- */
+#define ST(i) (ctx->st[(ctx->ftop + (i)) & 7])
+
+static inline void x87_push(X86Ctx *c, double v)
+{
+    c->ftop = (c->ftop - 1) & 7;
+    c->st[c->ftop] = v;
+    c->ftag |= 1u << c->ftop;
+}
+
+/* "Real indefinite": what a masked stack underflow reads from an empty register. Empty registers
+   hold it, so reading one (fstp after an fsincos that did not push, say) behaves like the x87. */
+static inline double x87_indefinite(void)
+{
+    uint64_t u = 0xFFF8000000000000ull;
+    double v;
+    memcpy(&v, &u, 8);
+    return v;
+}
+
+static inline void x87_pop(X86Ctx *c)
+{
+    c->ftag &= ~(1u << c->ftop);
+    c->st[c->ftop] = x87_indefinite();
+    c->ftop = (c->ftop + 1) & 7;
+}
+
+/* Initial x87 state of a context: empty stack, control word as after finit. */
+static inline void x87_init(X86Ctx *c)
+{
+    for (int i = 0; i < 8; i++) c->st[i] = x87_indefinite();
+    c->ftop = 0;
+    c->ftag = 0;
+    c->fcw = 0x37F;
+    c->fsw = 0;
+}
+
+/* Precision control: 24-bit (Direct3D 9 sets it unless FPU_PRESERVE) rounds the significand of
+   every result to 24 bits but keeps the wide exponent, so it is not a cast to float (that would
+   flush small and overflow large values). Rounds to nearest-even in the bits of the double.
+   53- and 64-bit keep double (64-bit extended precision is not modelled). */
+static inline double x87_round24(double v)
+{
+    uint64_t u;
+    memcpy(&u, &v, 8);
+    if (((u >> 52) & 0x7FF) == 0x7FF || ((u >> 52) & 0x7FF) == 0)
+        return v; /* inf, NaN, zero and doubles below the normal range are left as they are */
+    uint64_t low = u & ((1ull << 29) - 1), half = 1ull << 28;
+    u &= ~((1ull << 29) - 1);
+    if (low > half || (low == half && (u & (1ull << 29))))
+        u += 1ull << 29; /* a carry into the exponent is the correct rounding */
+    memcpy(&v, &u, 8);
+    return v;
+}
+
+static inline double x87_round(const X86Ctx *c, double v)
+{
+    return ((c->fcw >> 8) & 3) == 0 ? x87_round24(v) : v;
+}
+
+/* Rounding control for fist/frndint: nearest-even, down, up, toward zero. */
+static inline double x87_rc(const X86Ctx *c, double v)
+{
+    switch ((c->fcw >> 10) & 3) {
+    case 0: return __builtin_rint(v);
+    case 1: return __builtin_floor(v);
+    case 2: return __builtin_ceil(v);
+    default: return __builtin_trunc(v);
+    }
+}
+
+static inline int64_t x87_fist(const X86Ctx *c, double v, int bits)
+{
+    double r = x87_rc(c, v);
+    double lim = bits == 16 ? 32768.0 : bits == 32 ? 2147483648.0 : 9223372036854775808.0;
+    if (!(r >= -lim && r < lim)) /* NaN or out of range: integer indefinite */
+        return bits == 16 ? (int64_t)(int16_t)0x8000 : bits == 32 ? (int64_t)(int32_t)0x80000000u : INT64_MIN;
+    return (int64_t)r;
+}
+
+/* fsin (0), fcos (1), fsincos (2), fptan (3). For |x| >= 2^63 the x87 sets C2 and leaves the
+   stack unchanged; otherwise C2 is cleared. Precision control does not apply to these. Results
+   come from libm, which can differ from the x87 microcode in the last bit. */
+static inline void x87_trig(X86Ctx *c, int op)
+{
+    double x = c->st[c->ftop & 7];
+    if (__builtin_fabs(x) >= 9223372036854775808.0 && x == x && __builtin_fabs(x) != __builtin_inf()) {
+        c->fsw |= 0x0400u;
+        return;
+    }
+    c->fsw &= ~0x0400u;
+    double s = __builtin_sin(x), k = __builtin_cos(x);
+    switch (op) {
+    case 0: c->st[c->ftop & 7] = s; break;
+    case 1: c->st[c->ftop & 7] = k; break;
+    case 2: c->st[c->ftop & 7] = s; x87_push(c, k); break;
+    default: c->st[c->ftop & 7] = __builtin_tan(x); x87_push(c, 1.0); break;
+    }
+}
+
+/* fcom/fucom: C3 C2 C0 = 000 greater, 001 less, 100 equal, 111 unordered. */
+static inline void x87_compare(X86Ctx *c, double a, double b)
+{
+    uint32_t cc = (a != a || b != b) ? 0x4500u : a < b ? 0x0100u : a == b ? 0x4000u : 0u;
+    c->fsw = (c->fsw & ~0x4700u) | cc;
+}
+
+static inline uint32_t x87_status(const X86Ctx *c) { return (c->fsw & ~0x3800u) | ((c->ftop & 7) << 11); }
+
+/* 80-bit extended <-> double (fld/fstp tbyte). */
+static inline double x87_ld80(uint32_t a)
+{
+    uint64_t m = ld64(a);
+    uint16_t se = ld16(a + 8);
+    int e = se & 0x7FFF;
+    double v;
+    if (e == 0 && m == 0) v = 0.0;
+    else if (e == 0x7FFF) v = (m << 1) ? __builtin_nan("") : __builtin_inf();
+    else v = __builtin_ldexp((double)m, e - 16383 - 63);
+    return (se & 0x8000) ? -v : v;
+}
+
+static inline void x87_st80(uint32_t a, double v)
+{
+    uint64_t bits;
+    memcpy(&bits, &v, 8);
+    uint16_t sign = (uint16_t)((bits >> 48) & 0x8000);
+    int e = (int)((bits >> 52) & 0x7FF);
+    uint64_t frac = bits & 0xFFFFFFFFFFFFFull, m;
+    int e80;
+    if (e == 0 && frac == 0) { m = 0; e80 = 0; }
+    else if (e == 0x7FF) { m = 0x8000000000000000ull | (frac << 11); e80 = 0x7FFF; }
+    else if (e == 0) { int s = __builtin_clzll(frac) - 11; m = (frac << (11 + s)); e80 = 1 - 1023 - s + 16383; }
+    else { m = 0x8000000000000000ull | (frac << 11); e80 = e - 1023 + 16383; }
+    st64(a, m);
+    st16(a + 8, (uint16_t)(sign | e80));
+}
+
+/* --- SSE --- */
+/* cvtss2si/cvttss2si: out of range or NaN gives the integer indefinite 0x80000000. */
+static inline uint32_t sse_cvt(double r, int trunc, uint32_t mxcsr)
+{
+    if (trunc) r = __builtin_trunc(r);
+    else switch ((mxcsr >> 13) & 3) {
+        case 0: r = __builtin_rint(r); break;
+        case 1: r = __builtin_floor(r); break;
+        case 2: r = __builtin_ceil(r); break;
+        default: r = __builtin_trunc(r); break;
+    }
+    if (!(r >= -2147483648.0 && r < 2147483648.0)) return 0x80000000u;
+    return (uint32_t)(int32_t)r;
+}
+
+/* --- MMX (only the few forms this exe uses) --- */
+static inline uint64_t mmx_pxor(uint64_t a, uint64_t b) { return a ^ b; }
+static inline uint64_t mmx_punpcklbw(uint64_t a, uint64_t b)
+{
+    uint64_t r = 0;
+    for (int k = 0; k < 4; k++)
+        r |= ((a >> (8 * k)) & 0xFF) << (16 * k) | ((b >> (8 * k)) & 0xFF) << (16 * k + 8);
+    return r;
+}
+static inline uint64_t mmx_punpcklwd(uint64_t a, uint64_t b)
+{
+    return (a & 0xFFFF) | (b & 0xFFFF) << 16 | ((a >> 16) & 0xFFFF) << 32 | ((b >> 16) & 0xFFFF) << 48;
+}
+static inline uint64_t mmx_punpckhwd(uint64_t a, uint64_t b) { return mmx_punpcklwd(a >> 32, b >> 32); }
+static inline uint16_t mmx_sat16(int32_t v) { return (uint16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v); }
+static inline uint8_t mmx_satu8(int16_t v) { return (uint8_t)(v > 255 ? 255 : v < 0 ? 0 : v); }
+static inline uint64_t mmx_packssdw(uint64_t a, uint64_t b)
+{
+    return (uint64_t)mmx_sat16((int32_t)a) | (uint64_t)mmx_sat16((int32_t)(a >> 32)) << 16 |
+           (uint64_t)mmx_sat16((int32_t)b) << 32 | (uint64_t)mmx_sat16((int32_t)(b >> 32)) << 48;
+}
+static inline uint64_t mmx_packuswb(uint64_t a, uint64_t b)
+{
+    uint64_t r = 0;
+    for (int k = 0; k < 4; k++) {
+        r |= (uint64_t)mmx_satu8((int16_t)(a >> (16 * k))) << (8 * k);
+        r |= (uint64_t)mmx_satu8((int16_t)(b >> (16 * k))) << (8 * k + 32);
+    }
+    return r;
+}
+
+/* x86 min/max: the second operand is returned when either is NaN or both are zero. */
+static inline float sse_min(float a, float b) { return a < b ? a : b; }
+static inline float sse_max(float a, float b) { return a > b ? a : b; }
 
 /* Services the generated code calls; provided by the runtime (or the test harness). */
 void x86_dispatch(X86Ctx *ctx, uint32_t target);      /* indirect call/jmp: guest address -> lifted fn */

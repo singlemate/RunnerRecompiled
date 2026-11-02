@@ -24,7 +24,10 @@ REG32 = ["eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"]
 REG16 = {"ax": "eax", "cx": "ecx", "dx": "edx", "bx": "ebx", "sp": "esp", "bp": "ebp", "si": "esi", "di": "edi"}
 REG8L = {"al": "eax", "cl": "ecx", "dl": "edx", "bl": "ebx"}
 REG8H = {"ah": "eax", "ch": "ecx", "dh": "edx", "bh": "ebx"}
-PTR_BITS = {"byte": 8, "word": 16, "dword": 32}
+PTR_BITS = {"byte": 8, "word": 16, "dword": 32, "qword": 64, "tbyte": 80, "xmmword": 128}
+XMM_RE = re.compile(r"^xmm([0-7])$")
+MM_RE = re.compile(r"^mm([0-7])$")
+ST_RE = re.compile(r"^st(?:\(([0-7])\))?$")
 CC = {"o": "CC_O", "no": "CC_NO", "b": "CC_B", "c": "CC_B", "nae": "CC_B", "ae": "CC_AE", "nb": "CC_AE",
       "nc": "CC_AE", "e": "CC_E", "z": "CC_E", "ne": "CC_NE", "nz": "CC_NE", "be": "CC_BE", "na": "CC_BE",
       "a": "CC_A", "nbe": "CC_A", "s": "CC_S", "ns": "CC_NS", "p": "CC_P", "pe": "CC_P", "np": "CC_NP",
@@ -71,6 +74,12 @@ class Op:
             self.kind, self.bits, self.reg = "reg", 8, t
         elif NUM_RE.match(t):
             self.kind, self.bits, self.imm = "imm", None, num(t)
+        elif XMM_RE.match(t):
+            self.kind, self.bits, self.idx = "xmm", 128, int(XMM_RE.match(t).group(1))
+        elif MM_RE.match(t):
+            self.kind, self.bits, self.idx = "mm", 64, int(MM_RE.match(t).group(1))
+        elif ST_RE.match(t):
+            self.kind, self.bits, self.idx = "st", 80, int(ST_RE.match(t).group(1) or 0)
         else:
             raise Unsupported(f"operand {t}")
 
@@ -333,10 +342,20 @@ class FnLifter:
             return
 
         ops = [Op(o) for o in split_ops(rest)] if rest else []
+        off = va - self.L.tva
+        p = off
+        while self.L.code[p] in X.PREFIXES or (self.L.code[p] == 0x9B and p + 1 < off + n):
+            p += 1  # 9B (fwait) merged into fstsw/fstcw/finit forms
+        if 0xD8 <= self.L.code[p] <= 0xDF:
+            self.x87(va, self.L.code[p], self.L.code[p + 1], ops)
+            return
         h = getattr(self, "i_" + mn, None)
         if h is None:
             if mn.startswith("set") and mn[3:] in CC:
                 e(self.wr(ops[0], 8, f"x86_cc(&F, {CC[mn[3:]]})"))
+                return
+            if mn.startswith("cmp") and mn[-2:] in ("ps", "ss") and mn[3:-2] in self.CMP_PRED:
+                self._cmpx(mn, ops)
                 return
             if mn.startswith("cmov") and mn[4:] in CC:
                 bits = self.size(*ops)
@@ -344,6 +363,441 @@ class FnLifter:
                 return
             raise Unsupported(f"mnemonic {mn}")
         h(ops, prefix)
+
+    # --- x87, decoded from the opcode bytes (D8..DF + ModRM) ---
+    # Register forms of fsub/fsubr/fdiv/fdivr with st(i) as destination are easy to get backwards
+    # from disassembler text, so the operation and its direction come from the encoding.
+    X87_ARITH = ["add", "mul", "com", "comp", "sub", "subr", "div", "divr"]
+
+    @staticmethod
+    def _ar(kind, a, b):
+        return {"add": f"{a} + {b}", "mul": f"{a} * {b}", "sub": f"{a} - {b}", "subr": f"{b} - {a}",
+                "div": f"{a} / {b}", "divr": f"{b} / {a}"}[kind]
+
+    def x87(self, va, op, modrm, ops):
+        e = self.e
+        reg, mod, rm = (modrm >> 3) & 7, modrm >> 6, modrm & 7
+        mem = next((o for o in ops if o.kind == "mem"), None)
+        if mod != 3:
+            if mem is None:
+                raise Unsupported("x87 memory operand")
+            ea = self.ea(mem)
+            if op in (0xD8, 0xDC, 0xDA, 0xDE):
+                src = {0xD8: f"(double)ldf({ea})", 0xDC: f"ldd({ea})",
+                       0xDA: f"(double)(int32_t)ld32({ea})", 0xDE: f"(double)(int16_t)ld16({ea})"}[op]
+                k = self.X87_ARITH[reg]
+                if k in ("com", "comp"):
+                    e(f"x87_compare(ctx, ST(0), {src});" + (" x87_pop(ctx);" if k == "comp" else ""))
+                else:
+                    e(f"{{ double s = {src}; ST(0) = x87_round(ctx, {self._ar(k, 'ST(0)', 's')}); }}")
+                return
+            table = {
+                (0xD9, 0): f"x87_push(ctx, (double)ldf({ea}));",
+                (0xD9, 2): f"stf({ea}, (float)ST(0));",
+                (0xD9, 3): f"stf({ea}, (float)ST(0)); x87_pop(ctx);",
+                (0xD9, 5): f"ctx->fcw = ld16({ea});",
+                (0xD9, 7): f"st16({ea}, (uint16_t)ctx->fcw);",
+                (0xDB, 0): f"x87_push(ctx, (double)(int32_t)ld32({ea}));",
+                (0xDB, 2): f"st32({ea}, (uint32_t)x87_fist(ctx, ST(0), 32));",
+                (0xDB, 3): f"st32({ea}, (uint32_t)x87_fist(ctx, ST(0), 32)); x87_pop(ctx);",
+                (0xDB, 5): f"x87_push(ctx, x87_ld80({ea}));",
+                (0xDB, 7): f"x87_st80({ea}, ST(0)); x87_pop(ctx);",
+                (0xDD, 0): f"x87_push(ctx, ldd({ea}));",
+                (0xDD, 2): f"std_({ea}, ST(0));",
+                (0xDD, 3): f"std_({ea}, ST(0)); x87_pop(ctx);",
+                (0xDD, 7): f"st16({ea}, (uint16_t)x87_status(ctx));",
+                (0xDF, 0): f"x87_push(ctx, (double)(int16_t)ld16({ea}));",
+                (0xDF, 2): f"st16({ea}, (uint16_t)x87_fist(ctx, ST(0), 16));",
+                (0xDF, 3): f"st16({ea}, (uint16_t)x87_fist(ctx, ST(0), 16)); x87_pop(ctx);",
+                (0xDF, 5): f"x87_push(ctx, (double)(int64_t)ld64({ea}));",
+                (0xDF, 7): f"st64({ea}, (uint64_t)x87_fist(ctx, ST(0), 64)); x87_pop(ctx);",
+            }
+            s = table.get((op, reg))
+            if s is None:
+                raise Unsupported(f"x87 {op:02X} /{reg} mem")
+            e(s)
+            return
+        i = rm
+        if op == 0xD8:
+            k = self.X87_ARITH[reg]
+            if k in ("com", "comp"):
+                e(f"x87_compare(ctx, ST(0), ST({i}));" + (" x87_pop(ctx);" if k == "comp" else ""))
+            else:
+                e(f"ST(0) = x87_round(ctx, {self._ar(k, 'ST(0)', f'ST({i})')});")
+            return
+        if op in (0xDC, 0xDE):
+            if op == 0xDE and modrm == 0xD9:
+                e("x87_compare(ctx, ST(0), ST(1)); x87_pop(ctx); x87_pop(ctx);")
+                return
+            # st(i) = st(i) op st(0): /4 is FSUBR (st0 - sti), /5 FSUB (sti - st0), /6 FDIVR, /7 FDIV.
+            k = {0: "add", 1: "mul", 4: "subr", 5: "sub", 6: "divr", 7: "div"}.get(reg)
+            if k is None:
+                raise Unsupported(f"x87 {op:02X} /{reg} reg")
+            e(f"ST({i}) = x87_round(ctx, {self._ar(k, f'ST({i})', 'ST(0)')});" + (" x87_pop(ctx);" if op == 0xDE else ""))
+            return
+        if op == 0xD9:
+            if reg == 0:
+                e(f"{{ double v = ST({i}); x87_push(ctx, v); }}")
+                return
+            if reg == 1:
+                e(f"{{ double t = ST(0); ST(0) = ST({i}); ST({i}) = t; }}")
+                return
+            consts = {0xE8: "1.0", 0xE9: "3.321928094887362348", 0xEA: "1.442695040888963407",
+                      0xEB: "3.141592653589793238", 0xEC: "0.301029995663981195", 0xED: "0.693147180559945309",
+                      0xEE: "0.0"}
+            if modrm in consts:
+                e(f"x87_push(ctx, {consts[modrm]});")
+                return
+            simple = {
+                0xD0: "",
+                0xE0: "ST(0) = -ST(0);",
+                0xE1: "ST(0) = __builtin_fabs(ST(0));",
+                0xE4: "x87_compare(ctx, ST(0), 0.0);",
+                0xF0: "ST(0) = __builtin_exp2(ST(0)) - 1.0;",
+                0xF1: "ST(1) = ST(1) * __builtin_log2(ST(0)); x87_pop(ctx);",
+                0xF2: "x87_trig(ctx, 3);",
+                0xF3: "ST(1) = __builtin_atan2(ST(1), ST(0)); x87_pop(ctx);",
+                0xF5: "ST(0) = __builtin_remainder(ST(0), ST(1)); ctx->fsw &= ~0x0400u;",
+                0xF8: "ST(0) = __builtin_fmod(ST(0), ST(1)); ctx->fsw &= ~0x0400u;",
+                0xFA: "ST(0) = x87_round(ctx, __builtin_sqrt(ST(0)));",
+                0xFB: "x87_trig(ctx, 2);",
+                0xFC: "ST(0) = x87_rc(ctx, ST(0));",
+                0xFD: "ST(0) = __builtin_ldexp(ST(0), (int)__builtin_trunc(ST(1)));",
+                0xFE: "x87_trig(ctx, 0);",
+                0xFF: "x87_trig(ctx, 1);",
+            }
+            if modrm in simple:
+                if simple[modrm]:
+                    e(simple[modrm])
+                return
+            raise Unsupported(f"x87 D9 {modrm:02X}")
+        if op in (0xDA, 0xDB) and reg <= 3:
+            cc = ["CC_B", "CC_E", "CC_BE", "CC_P"][reg]
+            neg = "!" if op == 0xDB else ""
+            e(f"if ({neg}x86_cc(&F, {cc})) ST(0) = ST({i});")
+            return
+        if op == 0xDA and modrm == 0xE9:
+            e("x87_compare(ctx, ST(0), ST(1)); x87_pop(ctx); x87_pop(ctx);")
+            return
+        if op == 0xDB and modrm == 0xE2:
+            e("ctx->fsw &= 0x7F00u;")
+            return
+        if op == 0xDB and modrm == 0xE3:
+            e("x87_init(ctx);")
+            return
+        if (op == 0xDB and reg in (5, 6)) or (op == 0xDF and reg in (5, 6)):
+            pop = " x87_pop(ctx);" if op == 0xDF else ""
+            e(f"{{ double a = ST(0), b = ST({i}); int un = a != a || b != b; F.op = FL_EXPL; F.zf = un || a == b; "
+              f"F.pf = un; F.cf = un || a < b; F.sf = 0; F.of = 0; }}{pop}")
+            return
+        if op == 0xDD:
+            s = {0: f"ctx->ftag &= ~(1u << ((ctx->ftop + {i}) & 7)); ST({i}) = x87_indefinite();", 2: f"ST({i}) = ST(0);",
+                 3: f"ST({i}) = ST(0); x87_pop(ctx);", 4: f"x87_compare(ctx, ST(0), ST({i}));",
+                 5: f"x87_compare(ctx, ST(0), ST({i})); x87_pop(ctx);"}.get(reg)
+            if s is None:
+                raise Unsupported(f"x87 DD /{reg} reg")
+            e(s)
+            return
+        if op == 0xDF and modrm == 0xE0:
+            e("eax = (eax & 0xFFFF0000u) | (x87_status(ctx) & 0xFFFFu);")
+            return
+        raise Unsupported(f"x87 {op:02X} {modrm:02X}")
+
+    # --- SSE / MMX (operands from the disassembly text) ---
+    def xsrc32(self, o):
+        """Scalar float source: low lane of an xmm register or a 32-bit memory operand."""
+        return f"ctx->xmm[{o.idx}].f[0]" if o.kind == "xmm" else f"ldf({self.ea(o)})"
+
+    def xsrc128(self, o, aligned):
+        if o.kind == "xmm":
+            return f"ctx->xmm[{o.idx}]"
+        ea = self.ea(o)
+        if aligned:
+            self.e(f"if (({ea}) & 15u) x86_trap(ctx, 0u, \"misaligned SSE operand\");")
+        return f"ldx({ea})"
+
+    def _need(self, o, *kinds):
+        if o.kind not in kinds:
+            raise Unsupported(f"operand kind {o.kind}")
+
+    def i_movss(self, ops, p):
+        d, s = ops
+        if d.kind == "xmm" and s.kind == "mem":
+            self.e(f"{{ X86Xmm v = {{0}}; v.u[0] = ld32({self.ea(s)}); ctx->xmm[{d.idx}] = v; }}")
+        elif d.kind == "xmm" and s.kind == "xmm":
+            self.e(f"ctx->xmm[{d.idx}].u[0] = ctx->xmm[{s.idx}].u[0];")
+        elif d.kind == "mem" and s.kind == "xmm":
+            self.e(f"st32({self.ea(d)}, ctx->xmm[{s.idx}].u[0]);")
+        else:
+            raise Unsupported("movss form")
+
+    def _mov128(self, ops, aligned):
+        d, s = ops
+        if d.kind == "xmm":
+            self.e(f"ctx->xmm[{d.idx}] = {self.xsrc128(s, aligned)};")
+        elif d.kind == "mem" and s.kind == "xmm":
+            ea = self.ea(d)
+            if aligned:
+                self.e(f"if (({ea}) & 15u) x86_trap(ctx, 0u, \"misaligned SSE operand\");")
+            self.e(f"stx({ea}, ctx->xmm[{s.idx}]);")
+        else:
+            raise Unsupported("mov128 form")
+
+    def i_movaps(self, ops, p):
+        self._mov128(ops, True)
+
+    def i_movapd(self, ops, p):
+        self._mov128(ops, True)
+
+    def i_movups(self, ops, p):
+        self._mov128(ops, False)
+
+    def i_movsd(self, ops, p):
+        if not ops or all(o.kind == "mem" for o in ops):
+            return self._string("movsd", p)  # string instruction
+        d, s = ops
+        if d.kind == "xmm" and s.kind == "mem":
+            self.e(f"{{ X86Xmm v = {{0}}; v.q[0] = ld64({self.ea(s)}); ctx->xmm[{d.idx}] = v; }}")
+        elif d.kind == "xmm" and s.kind == "xmm":
+            self.e(f"ctx->xmm[{d.idx}].q[0] = ctx->xmm[{s.idx}].q[0];")
+        elif d.kind == "mem" and s.kind == "xmm":
+            self.e(f"st64({self.ea(d)}, ctx->xmm[{s.idx}].q[0]);")
+        else:
+            raise Unsupported("movsd form")
+
+    def i_movq(self, ops, p):
+        d, s = ops
+
+        def get(o):
+            if o.kind == "mm":
+                return f"ctx->mm[{o.idx}]"
+            if o.kind == "xmm":
+                return f"ctx->xmm[{o.idx}].q[0]"
+            if o.kind == "mem":
+                return f"ld64({self.ea(o)})"
+            raise Unsupported("movq source")
+        v = get(s)
+        if "mm" in (d.kind, s.kind):
+            self.e(self.MMX_TAGS)
+        if d.kind == "mm":
+            self.e(f"ctx->mm[{d.idx}] = {v};")
+        elif d.kind == "xmm":
+            self.e(f"{{ uint64_t v = {v}; ctx->xmm[{d.idx}].q[0] = v; ctx->xmm[{d.idx}].q[1] = 0; }}")
+        elif d.kind == "mem":
+            self.e(f"st64({self.ea(d)}, {v});")
+        else:
+            raise Unsupported("movq dest")
+
+    def _scalar(self, ops, expr):
+        d, s = ops
+        self._need(d, "xmm")
+        self.e(f"{{ float a = ctx->xmm[{d.idx}].f[0], b = {self.xsrc32(s)}; ctx->xmm[{d.idx}].f[0] = {expr}; (void)a; }}")
+
+    def i_addss(self, ops, p):
+        self._scalar(ops, "a + b")
+
+    def i_subss(self, ops, p):
+        self._scalar(ops, "a - b")
+
+    def i_mulss(self, ops, p):
+        self._scalar(ops, "a * b")
+
+    def i_divss(self, ops, p):
+        self._scalar(ops, "a / b")
+
+    def i_minss(self, ops, p):
+        self._scalar(ops, "sse_min(a, b)")
+
+    def i_maxss(self, ops, p):
+        self._scalar(ops, "sse_max(a, b)")
+
+    def i_sqrtss(self, ops, p):
+        self._scalar(ops, "__builtin_sqrtf(b)")
+
+    def i_rsqrtss(self, ops, p):
+        # Hardware gives a ~12-bit approximation; the exact value is used (CHECKLIST).
+        self._scalar(ops, "1.0f / __builtin_sqrtf(b)")
+
+    def i_rcpss(self, ops, p):
+        self._scalar(ops, "1.0f / b")
+
+    def _packed(self, ops, expr, lanes="f"):
+        d, s = ops
+        self._need(d, "xmm")
+        src = self.xsrc128(s, True)
+        self.e(f"{{ X86Xmm A = ctx->xmm[{d.idx}], B = {src}; for (int k = 0; k < 4; k++) "
+               f"{{ {'float' if lanes == 'f' else 'uint32_t'} a = A.{lanes}[k], b = B.{lanes}[k]; A.{lanes}[k] = {expr}; }} "
+               f"ctx->xmm[{d.idx}] = A; }}")
+
+    def i_addps(self, ops, p):
+        self._packed(ops, "a + b")
+
+    def i_subps(self, ops, p):
+        self._packed(ops, "a - b")
+
+    def i_mulps(self, ops, p):
+        self._packed(ops, "a * b")
+
+    def i_divps(self, ops, p):
+        self._packed(ops, "a / b")
+
+    def i_minps(self, ops, p):
+        self._packed(ops, "sse_min(a, b)")
+
+    def i_maxps(self, ops, p):
+        self._packed(ops, "sse_max(a, b)")
+
+    def i_andps(self, ops, p):
+        self._packed(ops, "a & b", "u")
+
+    def i_andnps(self, ops, p):
+        self._packed(ops, "~a & b", "u")
+
+    def i_orps(self, ops, p):
+        self._packed(ops, "a | b", "u")
+
+    def i_xorps(self, ops, p):
+        d, s = ops
+        if s.kind == "xmm" and s.idx == d.idx:
+            self.e(f"memset(&ctx->xmm[{d.idx}], 0, 16);")
+            return
+        self._packed(ops, "a ^ b", "u")
+
+    def i_xorpd(self, ops, p):
+        self.i_xorps(ops, p)
+
+    def i_shufps(self, ops, p):
+        d, s, imm = ops
+        m = imm.imm & 0xFF
+        src = self.xsrc128(s, True)
+        self.e(f"{{ X86Xmm A = ctx->xmm[{d.idx}], B = {src}, R; R.u[0] = A.u[{m & 3}]; R.u[1] = A.u[{(m >> 2) & 3}]; "
+               f"R.u[2] = B.u[{(m >> 4) & 3}]; R.u[3] = B.u[{(m >> 6) & 3}]; ctx->xmm[{d.idx}] = R; }}")
+
+    def i_movhlps(self, ops, p):
+        self.e(f"ctx->xmm[{ops[0].idx}].q[0] = ctx->xmm[{ops[1].idx}].q[1];")
+
+    def i_movlhps(self, ops, p):
+        self.e(f"ctx->xmm[{ops[0].idx}].q[1] = ctx->xmm[{ops[1].idx}].q[0];")
+
+    def i_unpcklps(self, ops, p):
+        d, s = ops
+        src = self.xsrc128(s, True)
+        self.e(f"{{ X86Xmm A = ctx->xmm[{d.idx}], B = {src}, R; R.u[0] = A.u[0]; R.u[1] = B.u[0]; R.u[2] = A.u[1]; "
+               f"R.u[3] = B.u[1]; ctx->xmm[{d.idx}] = R; }}")
+
+    def i_unpckhps(self, ops, p):
+        d, s = ops
+        src = self.xsrc128(s, True)
+        self.e(f"{{ X86Xmm A = ctx->xmm[{d.idx}], B = {src}, R; R.u[0] = A.u[2]; R.u[1] = B.u[2]; R.u[2] = A.u[3]; "
+               f"R.u[3] = B.u[3]; ctx->xmm[{d.idx}] = R; }}")
+
+    def i_movmskps(self, ops, p):
+        s = ops[1].idx
+        self.e(f"{ops[0].reg} = (ctx->xmm[{s}].u[0] >> 31) | ((ctx->xmm[{s}].u[1] >> 31) << 1) | "
+               f"((ctx->xmm[{s}].u[2] >> 31) << 2) | ((ctx->xmm[{s}].u[3] >> 31) << 3);")
+
+    CMP_PRED = {"eq": "a == b", "lt": "a < b", "le": "a <= b", "unord": "a != a || b != b", "neq": "!(a == b)",
+                "nlt": "!(a < b)", "nle": "!(a <= b)", "ord": "a == a && b == b"}
+
+    def _cmpx(self, mn, ops):
+        pred = self.CMP_PRED[mn[3:-2]]
+        if mn.endswith("ps"):
+            self._packed(ops, f"({pred}) ? 0xFFFFFFFFu : 0u")
+        else:
+            d, s = ops
+            self.e(f"{{ float a = ctx->xmm[{d.idx}].f[0], b = {self.xsrc32(s)}; ctx->xmm[{d.idx}].u[0] = ({pred}) ? 0xFFFFFFFFu : 0u; }}")
+
+    def _comis(self, ops):
+        d, s = ops
+        self.e(f"{{ float a = ctx->xmm[{d.idx}].f[0], b = {self.xsrc32(s)}; int un = a != a || b != b; "
+               "F.op = FL_EXPL; F.zf = un || a == b; F.pf = un; F.cf = un || a < b; F.sf = 0; F.of = 0; }")
+
+    def i_comiss(self, ops, p):
+        self._comis(ops)
+
+    def i_ucomiss(self, ops, p):
+        self._comis(ops)
+
+    def i_cvtsi2ss(self, ops, p):
+        d, s = ops
+        self.e(f"ctx->xmm[{d.idx}].f[0] = (float)(int32_t){self.rd(s, 32)};")
+
+    def _cvt2si(self, ops, trunc, double):
+        d, s = ops
+        if double:
+            v = f"ctx->xmm[{s.idx}].d[0]" if s.kind == "xmm" else f"ldd({self.ea(s)})"
+        else:
+            v = f"(double){self.xsrc32(s)}"
+        self.e(f"{d.reg} = sse_cvt({v}, {1 if trunc else 0}, ctx->mxcsr);")
+
+    def i_cvttss2si(self, ops, p):
+        self._cvt2si(ops, True, False)
+
+    def i_cvtss2si(self, ops, p):
+        self._cvt2si(ops, False, False)
+
+    def i_cvttsd2si(self, ops, p):
+        self._cvt2si(ops, True, True)
+
+    def i_cvtpi2ps(self, ops, p):
+        d, s = ops
+        if s.kind == "mm":
+            self.e(self.MMX_TAGS)
+        v = f"ctx->mm[{s.idx}]" if s.kind == "mm" else f"ld64({self.ea(s)})"
+        self.e(f"{{ uint64_t v = {v}; ctx->xmm[{d.idx}].f[0] = (float)(int32_t)(uint32_t)v; "
+               f"ctx->xmm[{d.idx}].f[1] = (float)(int32_t)(uint32_t)(v >> 32); }}")
+
+    def i_cvtps2pi(self, ops, p):
+        d, s = ops
+        self.e(self.MMX_TAGS)
+        if s.kind == "xmm":
+            a, b = f"ctx->xmm[{s.idx}].f[0]", f"ctx->xmm[{s.idx}].f[1]"
+        else:
+            ea = self.ea(s)
+            a, b = f"ldf({ea})", f"ldf({ea} + 4u)"
+        self.e(f"ctx->mm[{d.idx}] = (uint64_t)sse_cvt({a}, 0, ctx->mxcsr) | ((uint64_t)sse_cvt({b}, 0, ctx->mxcsr) << 32);")
+
+    def i_ldmxcsr(self, ops, p):
+        self.e(f"ctx->mxcsr = ld32({self.ea(ops[0])});")
+
+    def i_stmxcsr(self, ops, p):
+        self.e(f"st32({self.ea(ops[0])}, ctx->mxcsr);")
+
+    def i_prefetcht0(self, ops, p):
+        pass
+
+    def i_emms(self, ops, p):
+        self.e("ctx->ftag = 0;")
+
+    MMX_TAGS = "ctx->ftop = 0; ctx->ftag = 0xFFu;"  # MMX instructions mark every x87 register in use
+
+    def _mmx(self, ops, fn):
+        d, s = ops
+        self._need(d, "mm")
+        self.e(self.MMX_TAGS)
+        v = f"ctx->mm[{s.idx}]" if s.kind == "mm" else f"ld64({self.ea(s)})"
+        self.e(f"ctx->mm[{d.idx}] = {fn}(ctx->mm[{d.idx}], {v});")
+
+    def i_pxor(self, ops, p):
+        if ops[0].kind == "xmm":
+            self._packed(ops, "a ^ b", "u")
+        else:
+            self._mmx(ops, "mmx_pxor")
+
+    def i_punpcklbw(self, ops, p):
+        self._mmx(ops, "mmx_punpcklbw")
+
+    def i_punpcklwd(self, ops, p):
+        self._mmx(ops, "mmx_punpcklwd")
+
+    def i_punpckhwd(self, ops, p):
+        self._mmx(ops, "mmx_punpckhwd")
+
+    def i_packssdw(self, ops, p):
+        self._mmx(ops, "mmx_packssdw")
+
+    def i_packuswb(self, ops, p):
+        self._mmx(ops, "mmx_packuswb")
 
     # --- integer instructions ---
     def i_nop(self, ops, p):

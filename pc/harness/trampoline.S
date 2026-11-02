@@ -1,8 +1,10 @@
 # Entry/exit trampolines of the differential harness (i686, mingw: C symbols get a leading '_').
+# State block (see harness.c, NativeState): +0 eax ecx edx ebx esp ebp esi edi, +32 fcw, +36 mxcsr,
+# +48 xmm0..xmm7 (16 bytes each), +176 fnsave image (108 bytes).
         .intel_syntax noprefix
         .text
 
-# int run_native(uint32_t target, uint32_t *regs)   regs: eax ecx edx ebx esp ebp esi edi
+# int run_native(uint32_t target, NativeState *st)
         .globl _run_native
 _run_native:
         push ebp
@@ -14,6 +16,17 @@ _run_native:
         mov [_target], eax
         mov eax, [esp + 24]
         mov [_regs_ptr], eax
+        fninit
+        fldcw word ptr [eax + 32]
+        ldmxcsr dword ptr [eax + 36]
+        movups xmm0, [eax + 48]
+        movups xmm1, [eax + 64]
+        movups xmm2, [eax + 80]
+        movups xmm3, [eax + 96]
+        movups xmm4, [eax + 112]
+        movups xmm5, [eax + 128]
+        movups xmm6, [eax + 144]
+        movups xmm7, [eax + 160]
         mov ecx, [eax + 4]
         mov edx, [eax + 8]
         mov ebx, [eax + 12]
@@ -38,7 +51,18 @@ _native_ret:
         mov [eax + 28], edi
         mov ecx, [_tmp_eax]
         mov [eax + 0], ecx
+        stmxcsr dword ptr [eax + 36]
+        movups [eax + 48], xmm0
+        movups [eax + 64], xmm1
+        movups [eax + 80], xmm2
+        movups [eax + 96], xmm3
+        movups [eax + 112], xmm4
+        movups [eax + 128], xmm5
+        movups [eax + 144], xmm6
+        movups [eax + 160], xmm7
+        fnsave [eax + 176]
         mov esp, [_saved_esp]
+        call restore_host_fp
         pop edi
         pop esi
         pop ebx
@@ -70,11 +94,18 @@ _run_lifted:
 _fault_landing:
         cld
         mov esp, [_saved_esp]
+        call restore_host_fp
         pop edi
         pop esi
         pop ebx
         pop ebp
         mov eax, 1
+        ret
+
+# The harness itself computes with SSE; give it a clean x87 and the default MXCSR back.
+restore_host_fp:
+        fninit
+        ldmxcsr dword ptr [_host_mxcsr]
         ret
 
         .data
@@ -83,3 +114,4 @@ _saved_esp:  .long 0
 _target:     .long 0
 _regs_ptr:   .long 0
 _tmp_eax:    .long 0
+_host_mxcsr: .long 0x1F80
