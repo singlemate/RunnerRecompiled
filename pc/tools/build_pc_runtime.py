@@ -39,6 +39,8 @@ MODULES = [
     ("vorbisfile", "work/pc-deps/rebased/vorbisfile.dll", "vorbisfile/catalog.json", "vorbisfile.dll", "rebased", 0),
     ("vorbisenc", "work/pc-deps/rebased/vorbisenc.dll", "vorbisenc/catalog.json", "vorbisenc.dll", "rebased", 0),
     ("libresample", "work/pc-deps/rebased/libresample.dll", "libresample/catalog.json", "libresample.dll", "rebased", 0),
+    # Bink video (static import of the game; several code sections, see pe32.code_blob).
+    ("binkw32", "work/pc-deps/rebased/binkw32.dll", "binkw32/catalog.json", "binkw32.dll", "rebased", 0),
     ("game", "work/pc/Binaries/MirrorsEdge.exe", "catalog.json", "mirrorsedge.exe", "game", 0),
 ]
 

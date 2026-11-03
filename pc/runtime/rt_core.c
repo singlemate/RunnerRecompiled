@@ -114,6 +114,12 @@ void x86_cpuid(X86Ctx *ctx, uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_
     }
 }
 
+uint64_t x86_rdtsc(X86Ctx *ctx) { (void)ctx; return host_ticks_ns(); }
+
+static volatile int x86_lock_word;
+void x86_lock_enter(void) { while (__atomic_exchange_n(&x86_lock_word, 1, __ATOMIC_ACQUIRE)) {} }
+void x86_lock_leave(void) { __atomic_store_n(&x86_lock_word, 0, __ATOMIC_RELEASE); }
+
 /* ------------------------------------------------------------------ guest memory */
 
 #define NGRAN 65536u            /* 64 KB granules in 4 GB */
@@ -635,6 +641,12 @@ void rt_resolve_imports(RtModule *m)
             if (ent & 0x80000000u) snprintf(name, sizeof name, "#%u", ent & 0xFFFF);
             else snprintf(name, sizeof name, "%s", rt_str(m->base + ent + 2));
             uint32_t addr = target ? rt_export(target, name) : 0;
+            /* The game hands Bink a DirectSound sound system; there is no DirectSound here, so Bink
+               gets its waveOut one instead (guest waveOut is mixed by rt_openal.c). */
+            if (target && !strcmp(target->name, "binkw32.dll") && !strcmp(name, "_BinkOpenDirectSound@4")) {
+                addr = rt_export(target, "_BinkOpenWaveOut@4");
+                rt_log("%s: binkw32!_BinkOpenDirectSound@4 -> _BinkOpenWaveOut@4", m->name);
+            }
             HleFn sfn;
             uint8_t sn;
             int is_data = 0;
@@ -646,7 +658,10 @@ void rt_resolve_imports(RtModule *m)
                 addr = rt_hle_thunk(dll, name);
                 Thunk *t = &thunks[(addr - RT_THUNK_BASE) / RT_THUNK_STEP];
                 if (t->fn) hle++;
-                else missing++;
+                else {
+                    missing++;
+                    if (getenv("ME_PC_LOG_MISSING")) rt_log("  %s: %s!%s not implemented", m->name, dll, name);
+                }
             }
             st32(m->base + iat + 4 * i, addr);
         }

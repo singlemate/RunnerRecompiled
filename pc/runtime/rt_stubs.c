@@ -134,8 +134,8 @@ static void stub_ret0(X86Ctx *ctx) { ctx->eax = 0; }
 static void stub_ctor(X86Ctx *ctx) { ctx->eax = ctx->ecx; }
 static void stub_hidden(X86Ctx *ctx) { ctx->eax = rt_arg(ctx, 0); } /* returns the result buffer */
 
-/* wxWidgets (the editor) and, for now, Bink (movies: BinkOpen fails, so the game skips them). */
-int rt_stub_dll(const char *dll) { return !strncmp(dll, "wxmsw28u", 8) || !strcmp(dll, "binkw32.dll"); }
+/* wxWidgets (the editor): signature-derived stubs. Bink is lifted (binkw32 module). */
+int rt_stub_dll(const char *dll) { return !strncmp(dll, "wxmsw28u", 8); }
 
 /* Fills a stub for an unimplemented import of a stubbed DLL; returns 0 if the name cannot be
    understood (then the import stays "missing" and stops the run when called). */

@@ -236,6 +236,62 @@ static inline uint32_t sse_cvt(double r, int trunc, uint32_t mxcsr)
 /* --- MMX (only the few forms this exe uses) --- */
 static inline uint64_t mmx_pxor(uint64_t a, uint64_t b) { return a ^ b; }
 static inline uint64_t mmx_pand(uint64_t a, uint64_t b) { return a & b; }
+/* 16-bit lanes */
+#define MMX_W(v, i) ((uint16_t)((v) >> (16 * (i))))
+#define MMX_PACKW(e0, e1, e2, e3) ((uint64_t)(uint16_t)(e0) | ((uint64_t)(uint16_t)(e1) << 16) | \
+                                   ((uint64_t)(uint16_t)(e2) << 32) | ((uint64_t)(uint16_t)(e3) << 48))
+static inline int32_t mmx_ssat16(int32_t v) { return v < -32768 ? -32768 : v > 32767 ? 32767 : v; }
+static inline uint64_t mmx_paddw(uint64_t a, uint64_t b)
+{
+    return MMX_PACKW(MMX_W(a, 0) + MMX_W(b, 0), MMX_W(a, 1) + MMX_W(b, 1), MMX_W(a, 2) + MMX_W(b, 2), MMX_W(a, 3) + MMX_W(b, 3));
+}
+static inline uint64_t mmx_psubw(uint64_t a, uint64_t b)
+{
+    return MMX_PACKW(MMX_W(a, 0) - MMX_W(b, 0), MMX_W(a, 1) - MMX_W(b, 1), MMX_W(a, 2) - MMX_W(b, 2), MMX_W(a, 3) - MMX_W(b, 3));
+}
+static inline uint64_t mmx_paddsw(uint64_t a, uint64_t b)
+{
+    int32_t r[4];
+    for (int i = 0; i < 4; i++) r[i] = mmx_ssat16((int16_t)MMX_W(a, i) + (int16_t)MMX_W(b, i));
+    return MMX_PACKW(r[0], r[1], r[2], r[3]);
+}
+static inline uint64_t mmx_psubusw(uint64_t a, uint64_t b)
+{
+    int32_t r[4];
+    for (int i = 0; i < 4; i++) { int32_t v = (int32_t)MMX_W(a, i) - (int32_t)MMX_W(b, i); r[i] = v < 0 ? 0 : v; }
+    return MMX_PACKW(r[0], r[1], r[2], r[3]);
+}
+static inline uint64_t mmx_pmulhw(uint64_t a, uint64_t b)
+{
+    int32_t r[4];
+    for (int i = 0; i < 4; i++) r[i] = ((int32_t)(int16_t)MMX_W(a, i) * (int32_t)(int16_t)MMX_W(b, i)) >> 16;
+    return MMX_PACKW(r[0], r[1], r[2], r[3]);
+}
+static inline uint64_t mmx_punpckhbw(uint64_t a, uint64_t b)
+{
+    uint64_t r = 0;
+    for (int i = 0; i < 4; i++)
+        r |= ((a >> (8 * (i + 4))) & 0xFF) << (16 * i) | ((b >> (8 * (i + 4))) & 0xFF) << (16 * i + 8);
+    return r;
+}
+static inline uint64_t mmx_punpckhdq(uint64_t a, uint64_t b) { return (a >> 32) | (b & 0xFFFFFFFF00000000ull); }
+static inline uint64_t mmx_psllw(uint64_t a, uint64_t n)
+{
+    if (n > 15) return 0;
+    return MMX_PACKW(MMX_W(a, 0) << n, MMX_W(a, 1) << n, MMX_W(a, 2) << n, MMX_W(a, 3) << n);
+}
+static inline uint64_t mmx_psrlw(uint64_t a, uint64_t n)
+{
+    if (n > 15) return 0;
+    return MMX_PACKW(MMX_W(a, 0) >> n, MMX_W(a, 1) >> n, MMX_W(a, 2) >> n, MMX_W(a, 3) >> n);
+}
+static inline uint64_t mmx_pslld(uint64_t a, uint64_t n)
+{
+    if (n > 31) return 0;
+    return (uint64_t)((uint32_t)a << n) | ((uint64_t)((uint32_t)(a >> 32) << n) << 32);
+}
+static inline uint64_t mmx_psllq(uint64_t a, uint64_t n) { return n > 63 ? 0 : a << n; }
+static inline uint64_t mmx_psrlq(uint64_t a, uint64_t n) { return n > 63 ? 0 : a >> n; }
 static inline uint64_t mmx_por(uint64_t a, uint64_t b) { return a | b; }
 static inline uint64_t mmx_paddd(uint64_t a, uint64_t b)
 {
@@ -291,6 +347,11 @@ void x86_dispatch(X86Ctx *ctx, uint32_t target);      /* indirect call/jmp: gues
 void x86_trap(X86Ctx *ctx, uint32_t addr, const char *why) __attribute__((noreturn));
 /* cpuid: the runtime reports the processor the guest sees (leaf in *eax, subleaf in *ecx). */
 void x86_cpuid(X86Ctx *ctx, uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx);
+/* rdtsc: a monotonic counter (the runtime's clock, in nanoseconds). */
+uint64_t x86_rdtsc(X86Ctx *ctx);
+/* lock prefix: the instruction runs under one runtime-wide lock. */
+void x86_lock_enter(void);
+void x86_lock_leave(void);
 
 /* EH resume points. A function with catch/__except continuations (tools/eh.py) registers its
    host frame on entry; when the guest EH runtime jumps to one of them (an indirect jump to a

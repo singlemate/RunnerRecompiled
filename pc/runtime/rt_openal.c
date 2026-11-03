@@ -102,6 +102,17 @@ static void init_once(void)
     context_obj = rt_heap_alloc(16, 1);
 }
 
+static void mix(int16_t *out, uint32_t frames);
+
+/* Host output, started by the first alcOpenDevice or waveOutOpen. */
+static void audio_start(void)
+{
+    if (started) return;
+    int ok = host_audio_start(OUT_RATE, mix);
+    rt_log("audio: host output %s", ok ? "started (48 kHz stereo)" : "not available: silent");
+    started = 1;
+}
+
 /* ---- the mixer (host audio thread) ---- */
 static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
 
@@ -179,6 +190,137 @@ static void mix_source(Source *s, uint32_t frames)
     }
 }
 
+
+/* ---- guest waveOut (winmm), mixed together with OpenAL ----
+   Bink plays movie sound through waveOut (the game's DirectSound choice is redirected to Bink's
+   waveOut system, see rt_core.c). A device is a queue of the guest's WAVEHDRs (16-bit PCM, any
+   rate, 1 or 2 channels), read straight from guest memory by the mixer; a finished header gets
+   WHDR_DONE, as winmm does. Notification: CALLBACK_NULL (polling) and CALLBACK_EVENT; a callback
+   function or window cannot run on the host audio thread and is logged and ignored. */
+#define WHDR_DONE 0x1u
+#define WHDR_PREPARED 0x2u
+#define WHDR_INQUEUE 0x10u
+#define MAX_WAVE 8
+#define WAVE_QUEUE 64
+
+typedef struct {
+    int used, paused;
+    uint32_t rate, channels, bits, event, volume; /* volume: low word left, high word right */
+    uint32_t hdr[WAVE_QUEUE], nhdr;
+    double pos;   /* in frames of the first header */
+} WaveDev;
+static WaveDev waves[MAX_WAVE];
+
+void rt_event_set(uint32_t h);
+
+static void wave_finish_first(WaveDev *w)
+{
+    uint32_t h = w->hdr[0];
+    st32(h + 16, (ld32(h + 16) | WHDR_DONE) & ~WHDR_INQUEUE);
+    memmove(w->hdr, w->hdr + 1, (w->nhdr - 1) * sizeof w->hdr[0]);
+    w->nhdr--;
+    w->pos = 0;
+    if (w->event) rt_event_set(w->event);
+}
+
+/* called by mix() with al_lock held */
+static void mix_waves(uint32_t frames)
+{
+    for (int d = 0; d < MAX_WAVE; d++) {
+        WaveDev *w = &waves[d];
+        if (!w->used || w->paused || w->bits != 16) continue;
+        float gl = (w->volume & 0xFFFF) / 65535.0f, gr = (w->volume >> 16) / 65535.0f;
+        double step = (double)w->rate / OUT_RATE;
+        for (uint32_t i = 0; i < frames && w->nhdr; i++) {
+            uint32_t h = w->hdr[0], data = ld32(h), len = ld32(h + 4) / (2 * w->channels);
+            uint32_t p = (uint32_t)w->pos;
+            if (p >= len) { wave_finish_first(w); i--; continue; }
+            const int16_t *s = (const int16_t *)rt_ptr(data);
+            float l = s[p * w->channels] * (1.0f / 32768), r = w->channels == 2 ? s[p * 2 + 1] * (1.0f / 32768) : l;
+            mixbuf[2 * i] += l * gl;
+            mixbuf[2 * i + 1] += r * gr;
+            w->pos += step;
+        }
+    }
+}
+
+static WaveDev *wave_dev(uint32_t h) { return h >= 1 && h <= MAX_WAVE && waves[h - 1].used ? &waves[h - 1] : NULL; }
+
+/* waveOutOpen(phwo, device, pwfx, callback, instance, flags) */
+static void w_Open(X86Ctx *ctx)
+{
+    uint32_t fmt = ARG(2), flags = ARG(5);
+    uint32_t tag = ld16(fmt), ch = ld16(fmt + 2), rate = ld32(fmt + 4), bits = ld16(fmt + 14);
+    if (flags & 0x1) { RET(0); return; } /* WAVE_FORMAT_QUERY: any PCM is fine */
+    if (tag != 1 || bits != 16 || ch < 1 || ch > 2) { rt_log("waveOutOpen: format %u, %u ch, %u bits: unsupported", tag, ch, bits); RET(32); return; } /* WAVERR_BADFORMAT */
+    audio_start();
+    host_lock(al_lock);
+    int d = 0;
+    while (d < MAX_WAVE && waves[d].used) d++;
+    if (d == MAX_WAVE) { host_unlock(al_lock); RET(4); return; } /* MMSYSERR_ALLOCATED */
+    WaveDev *w = &waves[d];
+    memset(w, 0, sizeof *w);
+    w->used = 1; w->rate = rate; w->channels = ch; w->bits = bits; w->volume = 0xFFFFFFFFu;
+    uint32_t kind = flags & 0x70000u;
+    if (kind == 0x50000u) w->event = ARG(3); /* CALLBACK_EVENT */
+    else if (kind) rt_log("waveOutOpen: callback kind %#x is not supported (polling only)", kind);
+    host_unlock(al_lock);
+    if (ARG(0)) st32(ARG(0), (uint32_t)d + 1);
+    rt_log("waveOutOpen: %u Hz, %u ch -> device %d", rate, ch, d + 1);
+    RET(0);
+}
+
+static void w_Prepare(X86Ctx *ctx) { st32(ARG(1) + 16, ld32(ARG(1) + 16) | WHDR_PREPARED); RET(0); }
+static void w_Unprepare(X86Ctx *ctx) { st32(ARG(1) + 16, ld32(ARG(1) + 16) & ~WHDR_PREPARED); RET(0); }
+
+static void w_Write(X86Ctx *ctx)
+{
+    host_lock(al_lock);
+    WaveDev *w = wave_dev(ARG(0));
+    uint32_t h = ARG(1), r = 0;
+    if (!w) r = 5; /* MMSYSERR_INVALHANDLE */
+    else if (w->nhdr >= WAVE_QUEUE) r = 4;
+    else {
+        st32(h + 16, (ld32(h + 16) | WHDR_INQUEUE) & ~WHDR_DONE);
+        w->hdr[w->nhdr++] = h;
+    }
+    host_unlock(al_lock);
+    RET(r);
+}
+
+static void w_Reset(X86Ctx *ctx)
+{
+    host_lock(al_lock);
+    WaveDev *w = wave_dev(ARG(0));
+    while (w && w->nhdr) wave_finish_first(w);
+    host_unlock(al_lock);
+    RET(0);
+}
+
+static void w_Pause(X86Ctx *ctx) { host_lock(al_lock); WaveDev *w = wave_dev(ARG(0)); if (w) w->paused = 1; host_unlock(al_lock); RET(0); }
+static void w_Restart(X86Ctx *ctx) { host_lock(al_lock); WaveDev *w = wave_dev(ARG(0)); if (w) w->paused = 0; host_unlock(al_lock); RET(0); }
+static void w_SetVolume(X86Ctx *ctx) { host_lock(al_lock); WaveDev *w = wave_dev(ARG(0)); if (w) w->volume = ARG(1); host_unlock(al_lock); RET(0); }
+
+static void w_Close(X86Ctx *ctx)
+{
+    host_lock(al_lock);
+    WaveDev *w = wave_dev(ARG(0));
+    uint32_t r = w && w->nhdr ? 33 : 0; /* WAVERR_STILLPLAYING */
+    if (w && !r) w->used = 0;
+    host_unlock(al_lock);
+    RET(r);
+}
+
+static void w_GetNumDevs(X86Ctx *ctx) { RET(1); }
+
+static const HleDef wave_defs[] = {
+    {"winmm.dll", "waveOutOpen", w_Open, 6}, {"winmm.dll", "waveOutClose", w_Close, 1},
+    {"winmm.dll", "waveOutPrepareHeader", w_Prepare, 3}, {"winmm.dll", "waveOutUnprepareHeader", w_Unprepare, 3},
+    {"winmm.dll", "waveOutWrite", w_Write, 3}, {"winmm.dll", "waveOutReset", w_Reset, 1},
+    {"winmm.dll", "waveOutPause", w_Pause, 1}, {"winmm.dll", "waveOutRestart", w_Restart, 1},
+    {"winmm.dll", "waveOutSetVolume", w_SetVolume, 2}, {"winmm.dll", "waveOutGetNumDevs", w_GetNumDevs, 0},
+};
+
 static void mix(int16_t *out, uint32_t frames)
 {
     if (frames > 4096) frames = 4096;
@@ -186,6 +328,7 @@ static void mix(int16_t *out, uint32_t frames)
     host_lock(al_lock);
     for (int i = 1; i < MAX_OBJ; i++)
         if (sources[i].used && sources[i].state == AL_PLAYING && sources[i].nqueue) mix_source(&sources[i], frames);
+    mix_waves(frames);
     host_unlock(al_lock);
     for (uint32_t i = 0; i < 2 * frames; i++) {
         float v = clampf(mixbuf[i], -1, 1) * 32767;
@@ -631,12 +774,8 @@ static void a_GetZero(X86Ctx *ctx) { if (ARG(2)) st32(ARG(2), 0); }
 static void c_OpenDevice(X86Ctx *ctx)
 {
     init_once();
-    if (!started) {
-        started = host_audio_start(OUT_RATE, mix);
-        rt_log("OpenAL: device \"%s\" opened, host output %s", ARG(0) ? rt_str(ARG(0)) : "(default)",
-               started ? "started (48 kHz stereo)" : "not available: silent");
-        started = 1;
-    }
+    rt_log("OpenAL: device \"%s\" opened", ARG(0) ? rt_str(ARG(0)) : "(default)");
+    audio_start();
     RET(device_obj);
 }
 
@@ -760,4 +899,5 @@ void rt_openal_register(void)
 {
     al_lock = host_mutex_new();
     rt_hle_register(al_defs, sizeof al_defs / sizeof *al_defs);
+    rt_hle_register(wave_defs, sizeof wave_defs / sizeof *wave_defs);
 }

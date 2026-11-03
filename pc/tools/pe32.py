@@ -39,6 +39,18 @@ class PE32:
             self.sections.append(Section(name, va, vsize, raw_off, raw_size, chars))
 
     # --- address helpers (all public addresses are VAs) ---
+    def code_blob(self):
+        """(first VA, bytes) covering every executable section, gaps between them zero-filled.
+        Most images have one (.text); binkw32.dll has several (.text, BINK, BINK32, ...)."""
+        secs = [s for s in self.sections if s.is_code]
+        start = min(s.va for s in secs)
+        end = max(s.va + s.vsize for s in secs)
+        blob = bytearray(end - start)
+        for s in secs:
+            raw = self.data[s.raw_off: s.raw_off + min(s.raw_size, s.vsize)]
+            blob[s.va - start: s.va - start + len(raw)] = raw
+        return self.image_base + start, bytes(blob)
+
     def section_of(self, va):
         rva = va - self.image_base
         for s in self.sections:

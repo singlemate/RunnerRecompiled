@@ -40,10 +40,8 @@ def main():
     data = open(args.exe, "rb").read()
     pe = PE32(data)
     base = pe.image_base
-    text = next(s for s in pe.sections if s.is_code)
-    tva, tend = base + text.va, base + text.va + text.vsize
-    code = data[text.raw_off: text.raw_off + min(text.raw_size, text.vsize)]
-    code += b"\0" * (text.vsize - len(code))
+    tva, code = pe.code_blob()
+    tend = tva + len(code)
     in_text = lambda va: tva <= va < tend  # noqa: E731
 
     imports = pe.imports()

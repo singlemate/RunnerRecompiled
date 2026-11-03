@@ -673,6 +673,19 @@ static void a_GetUserNameA(X86Ctx *ctx)
 
 static void k_GetEnvironmentVariableW(X86Ctx *ctx) { set_error(203); RET(0); }
 
+/* The guest's Windows folders (nothing is read from them: system DLLs are HLE). Returns the
+   length, or the size needed when the buffer is too small. */
+static void dir_result(X86Ctx *ctx, const char *path)
+{
+    uint32_t buf = rt_arg(ctx, 0), n = rt_arg(ctx, 1), len = (uint32_t)strlen(path);
+    if (!buf || n <= len) { ctx->eax = len + 1; return; }
+    memcpy(rt_ptr(buf), path, len + 1);
+    ctx->eax = len;
+}
+
+static void k_GetWindowsDirectoryA(X86Ctx *ctx) { dir_result(ctx, "C:\\WINDOWS"); }
+static void k_GetSystemDirectoryA(X86Ctx *ctx) { dir_result(ctx, "C:\\WINDOWS\\system32"); }
+
 static const HleDef file_defs[] = {
     {"kernel32.dll", "CreateFileA", k_CreateFileA, 7},
     {"kernel32.dll", "CreateFileW", k_CreateFileW, 7},
@@ -714,6 +727,8 @@ static const HleDef file_defs[] = {
     {"kernel32.dll", "GetDriveTypeA", k_GetDriveType, 1},
     {"kernel32.dll", "GetDriveTypeW", k_GetDriveType, 1},
     {"kernel32.dll", "GetTempPathA", k_GetTempPathA, 2},
+    {"kernel32.dll", "GetWindowsDirectoryA", k_GetWindowsDirectoryA, 2},
+    {"kernel32.dll", "GetSystemDirectoryA", k_GetSystemDirectoryA, 2},
     {"kernel32.dll", "GetEnvironmentVariableW", k_GetEnvironmentVariableW, 3},
     {"shell32.dll", "SHGetFolderPathW", k_SHGetFolderPathW, 5},
     {"kernel32.dll", "CreateFileMappingA", k_CreateFileMappingA, 6},

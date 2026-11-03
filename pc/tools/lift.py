@@ -275,7 +275,11 @@ class FnLifter:
             if va in self.blockset:
                 self.lines.append(f"L_{va:08X}:;")
             try:
+                locked = getattr(self, "lock_open", False)
                 self.insn(va, n, txt, kind, tgt)
+                if locked:  # the instruction after a standalone lock prefix
+                    self.e("x86_lock_leave();")
+                    self.lock_open = False
             except (IndexError, AttributeError, TypeError) as ex:
                 self.unsupported[f"internal {type(ex).__name__}: {txt.split()[0]}"] += 1
                 self.e(f"x86_trap(ctx, 0x{va:X}u, \"lifter error\");")
@@ -294,6 +298,10 @@ class FnLifter:
         return f"void f_{self.entry:08X}(X86Ctx *ctx)\n{{\n{body}\n}}\n"
 
     def insn(self, va, n, txt, kind, tgt):
+        if txt.strip() == "lock":  # LLVM decodes the prefix as its own instruction
+            self.e("x86_lock_enter();")
+            self.lock_open = True
+            return
         toks = txt.split(None, 1)
         mn = toks[0]
         rest = toks[1] if len(toks) > 1 else ""
@@ -303,10 +311,16 @@ class FnLifter:
             toks = rest.split(None, 1)
             mn = toks[0]
             rest = toks[1] if len(toks) > 1 else ""
-            if prefix == "lock":
-                raise Unsupported("lock")
         nxt = va + n
         e = self.e
+        if prefix == "lock":
+            e("x86_lock_enter();")
+            n0 = len(self.lines)
+            self.insn(va, n, (mn + " " + rest).strip(), kind, tgt)
+            if len(self.lines) == n0:
+                raise Unsupported("lock form")
+            e("x86_lock_leave();")
+            return
 
         # --- control flow (targets from bytes) ---
         if kind == X.K_CALL:
@@ -906,6 +920,51 @@ class FnLifter:
     def i_psrad(self, ops, p):
         self._mmx_shift(ops, "mmx_psrad")
 
+    def i_rdtsc(self, ops, p):
+        self.e("{ uint64_t t = x86_rdtsc(ctx); eax = (uint32_t)t; edx = (uint32_t)(t >> 32); }")
+
+    def _mmx2(self, ops, fn):
+        """MMX register-or-memory binary op; SSE2 (xmm) forms are not supported."""
+        if ops[0].kind != "mm":
+            raise Unsupported(f"{fn} (SSE2)")
+        self._mmx(ops, fn)
+
+    def i_paddw(self, ops, p):
+        self._mmx2(ops, "mmx_paddw")
+
+    def i_psubw(self, ops, p):
+        self._mmx2(ops, "mmx_psubw")
+
+    def i_paddsw(self, ops, p):
+        self._mmx2(ops, "mmx_paddsw")
+
+    def i_psubusw(self, ops, p):
+        self._mmx2(ops, "mmx_psubusw")
+
+    def i_pmulhw(self, ops, p):
+        self._mmx2(ops, "mmx_pmulhw")
+
+    def i_punpckhbw(self, ops, p):
+        self._mmx2(ops, "mmx_punpckhbw")
+
+    def i_punpckhdq(self, ops, p):
+        self._mmx2(ops, "mmx_punpckhdq")
+
+    def i_psllw(self, ops, p):
+        self._mmx_shift(ops, "mmx_psllw")
+
+    def i_psrlw(self, ops, p):
+        self._mmx_shift(ops, "mmx_psrlw")
+
+    def i_pslld(self, ops, p):
+        self._mmx_shift(ops, "mmx_pslld")
+
+    def i_psllq(self, ops, p):
+        self._mmx_shift(ops, "mmx_psllq")
+
+    def i_psrlq(self, ops, p):
+        self._mmx_shift(ops, "mmx_psrlq")
+
     def i_emms(self, ops, p):
         self.e("ctx->ftag = 0;")
 
@@ -1361,10 +1420,7 @@ class Lifter:
     def __init__(self, exe, llvm, catalog_path):
         data = open(exe, "rb").read()
         self.pe = pe = PE32(data)
-        text = next(s for s in pe.sections if s.is_code)
-        self.tva = pe.image_base + text.va
-        self.code = data[text.raw_off: text.raw_off + min(text.raw_size, text.vsize)]
-        self.code += b"\0" * (text.vsize - len(self.code))
+        self.tva, self.code = pe.code_blob()
         self.dis = X.LLVMDisasm(llvm)
         self.dis.bind(self.code, self.tva)
         self.imports = pe.imports()
