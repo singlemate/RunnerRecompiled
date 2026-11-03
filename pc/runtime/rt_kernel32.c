@@ -199,7 +199,8 @@ static void k_InterlockedCompareExchange(X86Ctx *ctx)
 /* System DLLs are not loaded; they get pseudo handles so GetProcAddress can serve HLE exports. */
 static const char *sys_dlls[] = {"kernel32.dll", "user32.dll", "gdi32.dll", "advapi32.dll", "winmm.dll",
                                  "ole32.dll", "oleaut32.dll", "shell32.dll", "ws2_32.dll", "wsock32.dll",
-                                 "ntdll.dll", "d3d9.dll", "dinput8.dll", "xinput1_3.dll", "dbghelp.dll"};
+                                 "ntdll.dll", "d3d9.dll", "dinput8.dll", "xinput1_3.dll", "dbghelp.dll",
+                                 "openal32.dll"};
 #define SYS_HANDLE(i) (0xFD000000u + 0x10000u * (uint32_t)(i))
 
 static int sys_index(const char *name)
@@ -289,6 +290,8 @@ static void k_GetProcAddress(X86Ctx *ctx)
     if (m) { RET(rt_export(m, name)); return; }
     if (h >= 0xFD000000u && h < 0xFD000000u + 0x10000u * (sizeof sys_dlls / sizeof *sys_dlls)) {
         uint32_t t = rt_hle_thunk(sys_dlls[(h - 0xFD000000u) / 0x10000u], name);
+        if (getenv("ME_PC_TRACE_DLL") && !strcmp(getenv("ME_PC_TRACE_DLL"), sys_dlls[(h - 0xFD000000u) / 0x10000u]))
+            rt_log("GetProcAddress(%s, %s) -> %#x", sys_dlls[(h - 0xFD000000u) / 0x10000u], name, t);
         /* Report only implemented functions, so the caller takes its fallback for the rest. */
         extern int rt_thunk_implemented(uint32_t);
         if (rt_thunk_implemented(t)) { RET(t); return; }

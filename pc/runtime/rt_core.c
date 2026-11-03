@@ -106,6 +106,7 @@ void x86_cpuid(X86Ctx *ctx, uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_
     } else if (leaf == 1) {
         *eax = 0x000006F2; /* family 6, model 15 */
         *edx = (1u << 0) | (1u << 4) | (1u << 8) | (1u << 15) | (1u << 23) | (1u << 24) | (1u << 25);
+        if (getenv("ME_PC_CPUID_NO_SSE")) *edx &= ~((1u << 25) | (1u << 23)); /* diagnostics: x87-only code paths */
     } else if (leaf == 0x80000000u) {
         *eax = 0x80000000u;
     } else {
@@ -369,7 +370,17 @@ void x86_dispatch(X86Ctx *ctx, uint32_t target)
         hle_ring[slot].ret = ld32(ctx->esp);
         if (self) self->in_hle = i + 1;
         __atomic_fetch_add(&t->calls, 1, __ATOMIC_RELAXED);
+        /* ME_PC_TRACE_DLL=<dll>: the first 20000 calls into that DLL with arguments and result. */
+        static const char *trace_dll;
+        static int trace_checked, traced;
+        if (!trace_checked) { trace_checked = 1; trace_dll = getenv("ME_PC_TRACE_DLL"); }
+        uint32_t a0 = ld32(ctx->esp + 4), a1 = ld32(ctx->esp + 8), a2 = ld32(ctx->esp + 12), a3 = ld32(ctx->esp + 16);
+        uint32_t ret = ld32(ctx->esp);
         t->fn(ctx);
+        if (trace_dll && traced < 20000 && !strcmp(t->dll, trace_dll)) {
+            traced++;
+            rt_log("trace %s(%#x, %#x, %#x, %#x) -> %#x (from %#x)", t->name, a0, a1, a2, a3, ctx->eax, ret);
+        }
         if (self) self->in_hle = 0;
         hle_ring[slot].eax_after = ctx->eax;
         ctx->esp += 4 + 4u * t->nargs; /* stdcall: the callee pops the return address and its arguments */
@@ -378,6 +389,34 @@ void x86_dispatch(X86Ctx *ctx, uint32_t target)
     X86Fn fn = fn_find(target);
     if (!fn && self) resume_jump(self, ctx, target);
     if (!fn) rt_fatal("no lifted function at %#x (return address %#x)", target, ld32(ctx->esp));
+    /* ME_PC_TRACE_MOD=<module>: calls of that lifted module's exports (first 2000), with result. */
+    static const char *trace_mod;
+    static int trace_mod_checked, traced_mod;
+    if (!trace_mod_checked) { trace_mod_checked = 1; trace_mod = getenv("ME_PC_TRACE_MOD"); }
+    if (trace_mod && traced_mod < 2000) {
+        RtModule *m = rt_module_at(target);
+        if (m && !strcmp(m->name, trace_mod))
+            for (uint32_t k = 0; k < m->nexports; k++)
+                if (m->exports[k].addr == target) {
+                    uint32_t a0 = ld32(ctx->esp + 4), a1 = ld32(ctx->esp + 8), a2 = ld32(ctx->esp + 12), a3 = ld32(ctx->esp + 16);
+                    uint32_t ret = ld32(ctx->esp);
+                    fn(ctx);
+                    traced_mod++;
+                    int peak = -1;
+                    if (!strcmp(m->exports[k].name, "ov_read") && (int32_t)ctx->eax > 0) /* decoded 16-bit PCM */
+                        for (uint32_t q = 0; q + 1 < ctx->eax; q += 2) { int v = abs((int16_t)ld16(a1 + q)); if (v > peak) peak = v; }
+                    if (!strcmp(m->exports[k].name, "vorbis_synthesis_pcmout") && (int32_t)ctx->eax > 0 && a1) {
+                        /* float **pcm: peak of channel 0, scaled by 32768 */
+                        uint32_t ch0 = ld32(ld32(a1));
+                        float mx = 0;
+                        for (uint32_t q = 0; q < ctx->eax; q++) { uint32_t u = ld32(ch0 + 4 * q); float f; memcpy(&f, &u, 4); if (__builtin_fabsf(f) > mx) mx = __builtin_fabsf(f); }
+                        peak = (int)(mx * 32768);
+                    }
+                    rt_log("trace %s!%s(%#x, %#x, %#x, %#x) -> %#x (from %#x)%s%d", m->name, m->exports[k].name, a0, a1, a2, a3,
+                           ctx->eax, ret, peak >= 0 ? " peak " : "", peak >= 0 ? peak : 0);
+                    return;
+                }
+    }
     fn(ctx);
 }
 

@@ -22,7 +22,8 @@ CFLAGS = ["-O2", "-g0", "-fwrapv", "-ffp-contract=off", "-fno-strict-aliasing", 
 
 # tag, binary to lift, catalog, guest module name, folder at run time (game | deps | rebased),
 # DllMain at start-up (1) or on the first LoadLibrary (0). The PhysX DLLs all ask for 0x10000000:
-# they are lifted from copies rebased with rebase_pe.py (0x20000000 + n * 0x01000000).
+# they are lifted from copies rebased with rebase_pe.py (0x20000000 + n * 0x01000000; the
+# audio DLLs from 0x26000000).
 MODULES = [
     ("msvcr80", "work/pc-deps/msvcr80.dll", "msvcr80/catalog.json", "msvcr80.dll", "deps", 1),
     ("msvcp80", "work/pc-deps/msvcp80.dll", "msvcp80/catalog.json", "msvcp80.dll", "deps", 1),
@@ -32,6 +33,12 @@ MODULES = [
     ("nxcooking", "work/pc-deps/rebased/NxCooking.dll", "nxcooking/catalog.json", "nxcooking.dll", "rebased", 0),
     ("physxextensions", "work/pc-deps/rebased/PhysXExtensions.dll", "physxextensions/catalog.json", "physxextensions.dll", "rebased", 0),
     ("nxcharacter", "work/pc-deps/rebased/NxCharacter.dll", "nxcharacter/catalog.json", "nxcharacter.dll", "rebased", 0),
+    # Ogg Vorbis decoding and resampling of the game's audio (static imports of the game).
+    ("ogg", "work/pc-deps/rebased/ogg.dll", "ogg/catalog.json", "ogg.dll", "rebased", 0),
+    ("vorbis", "work/pc-deps/rebased/vorbis.dll", "vorbis/catalog.json", "vorbis.dll", "rebased", 0),
+    ("vorbisfile", "work/pc-deps/rebased/vorbisfile.dll", "vorbisfile/catalog.json", "vorbisfile.dll", "rebased", 0),
+    ("vorbisenc", "work/pc-deps/rebased/vorbisenc.dll", "vorbisenc/catalog.json", "vorbisenc.dll", "rebased", 0),
+    ("libresample", "work/pc-deps/rebased/libresample.dll", "libresample/catalog.json", "libresample.dll", "rebased", 0),
     ("game", "work/pc/Binaries/MirrorsEdge.exe", "catalog.json", "mirrorsedge.exe", "game", 0),
 ]
 
@@ -95,7 +102,7 @@ def main():
                 jobs.append((os.path.join(src_dir, f), os.path.join(od, f[:-2] + ".o")))
     od = os.path.join(obj_root, "runtime")
     os.makedirs(od, exist_ok=True)
-    for f in ("rt_core.c", "rt_kernel32.c", "rt_sync.c", "rt_files.c", "rt_user32.c", "rt_d3d9.c", "rt_d3d9_gen.c", "rt_physx_support.c", "rt_dinput.c", "rt_ue3.c", "rt_stubs.c", "rt_host_win.c", "rt_main.c"):
+    for f in ("rt_core.c", "rt_kernel32.c", "rt_sync.c", "rt_files.c", "rt_user32.c", "rt_d3d9.c", "rt_d3d9_gen.c", "rt_physx_support.c", "rt_dinput.c", "rt_ue3.c", "rt_openal.c", "rt_stubs.c", "rt_host_win.c", "rt_main.c"):
         jobs.append((os.path.join(RUNTIME, f), os.path.join(od, f[:-2] + ".o")))
 
     errors = 0
@@ -115,7 +122,7 @@ def main():
     with open(rsp, "w") as fp:
         for _, obj in jobs:
             fp.write(obj.replace("\\", "/") + "\n")
-    subprocess.run([cc, f"@{rsp}", "-o", exe, "-Wl,--stack,8388608"], check=True)
+    subprocess.run([cc, f"@{rsp}", "-o", exe, "-Wl,--stack,8388608", "-lwinmm"], check=True)
     print(f"built {exe} in {time.time() - t0:.0f} s")
 
 

@@ -231,3 +231,48 @@ int host_list_dir(const char *path, void (*fn)(void *u, const char *name), void 
     return 1;
 }
 #endif
+
+/* ---- audio output: waveOut, 16-bit stereo, four blocks of 1024 frames (about 85 ms queued) ---- */
+#include <mmsystem.h>
+
+static void (*audio_mix)(int16_t *out, uint32_t frames);
+static HWAVEOUT audio_out;
+static HANDLE audio_event;
+#define AUDIO_BLOCKS 4
+#define AUDIO_FRAMES 1024
+static WAVEHDR audio_hdr[AUDIO_BLOCKS];
+static int16_t audio_data[AUDIO_BLOCKS][AUDIO_FRAMES * 2];
+
+static DWORD WINAPI audio_thread(LPVOID arg)
+{
+    (void)arg;
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+    for (;;) {
+        WaitForSingleObject(audio_event, INFINITE);
+        for (int i = 0; i < AUDIO_BLOCKS; i++)
+            if (audio_hdr[i].dwFlags & WHDR_DONE) {
+                audio_mix(audio_data[i], AUDIO_FRAMES);
+                audio_hdr[i].dwFlags &= ~WHDR_DONE;
+                waveOutWrite(audio_out, &audio_hdr[i], sizeof audio_hdr[i]);
+            }
+    }
+    return 0;
+}
+
+int host_audio_start(uint32_t rate, void (*mix)(int16_t *out, uint32_t frames))
+{
+    WAVEFORMATEX f = {WAVE_FORMAT_PCM, 2, rate, rate * 4, 4, 16, 0};
+    audio_mix = mix;
+    audio_event = CreateEventW(NULL, FALSE, FALSE, NULL);
+    if (waveOutOpen(&audio_out, WAVE_MAPPER, &f, (DWORD_PTR)audio_event, 0, CALLBACK_EVENT) != MMSYSERR_NOERROR)
+        return 0;
+    for (int i = 0; i < AUDIO_BLOCKS; i++) {
+        audio_hdr[i].lpData = (LPSTR)audio_data[i];
+        audio_hdr[i].dwBufferLength = sizeof audio_data[i];
+        waveOutPrepareHeader(audio_out, &audio_hdr[i], sizeof audio_hdr[i]);
+        audio_hdr[i].dwFlags |= WHDR_DONE; /* filled by the thread on its first pass */
+    }
+    CreateThread(NULL, 0, audio_thread, NULL, 0, NULL);
+    SetEvent(audio_event);
+    return 1;
+}

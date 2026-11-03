@@ -235,6 +235,24 @@ static inline uint32_t sse_cvt(double r, int trunc, uint32_t mxcsr)
 
 /* --- MMX (only the few forms this exe uses) --- */
 static inline uint64_t mmx_pxor(uint64_t a, uint64_t b) { return a ^ b; }
+static inline uint64_t mmx_pand(uint64_t a, uint64_t b) { return a & b; }
+static inline uint64_t mmx_por(uint64_t a, uint64_t b) { return a | b; }
+static inline uint64_t mmx_paddd(uint64_t a, uint64_t b)
+{
+    return (uint64_t)(uint32_t)((uint32_t)a + (uint32_t)b) | ((uint64_t)(uint32_t)((uint32_t)(a >> 32) + (uint32_t)(b >> 32)) << 32);
+}
+static inline uint64_t mmx_punpckldq(uint64_t a, uint64_t b) { return (uint64_t)(uint32_t)a | ((uint64_t)(uint32_t)b << 32); }
+/* Shifts of both dwords; counts above 31 give 0 (logical) or the sign (arithmetic). */
+static inline uint64_t mmx_psrld(uint64_t a, uint64_t n)
+{
+    if (n > 31) return 0;
+    return (uint64_t)((uint32_t)a >> n) | ((uint64_t)((uint32_t)(a >> 32) >> n) << 32);
+}
+static inline uint64_t mmx_psrad(uint64_t a, uint64_t n)
+{
+    if (n > 31) n = 31;
+    return (uint64_t)(uint32_t)((int32_t)(uint32_t)a >> n) | ((uint64_t)(uint32_t)((int32_t)(uint32_t)(a >> 32) >> n) << 32);
+}
 static inline uint64_t mmx_punpcklbw(uint64_t a, uint64_t b)
 {
     uint64_t r = 0;

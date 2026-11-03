@@ -735,7 +735,12 @@ class FnLifter:
     def _cmpx(self, mn, ops):
         pred = self.CMP_PRED[mn[3:-2]]
         if mn.endswith("ps"):
-            self._packed(ops, f"({pred}) ? 0xFFFFFFFFu : 0u")
+            # Compare as floats, store the all-ones/zero mask as bits (not as a float value).
+            d, s = ops
+            self._need(d, "xmm")
+            src = self.xsrc128(s, True)
+            self.e(f"{{ X86Xmm A = ctx->xmm[{d.idx}], B = {src}, R; for (int k = 0; k < 4; k++) "
+                   f"{{ float a = A.f[k], b = B.f[k]; R.u[k] = ({pred}) ? 0xFFFFFFFFu : 0u; }} ctx->xmm[{d.idx}] = R; }}")
         else:
             d, s = ops
             self.e(f"{{ float a = ctx->xmm[{d.idx}].f[0], b = {self.xsrc32(s)}; ctx->xmm[{d.idx}].u[0] = ({pred}) ? 0xFFFFFFFFu : 0u; }}")
@@ -798,6 +803,108 @@ class FnLifter:
 
     def i_prefetcht0(self, ops, p):
         pass
+
+    def i_movlps(self, ops, p):
+        d, s = ops
+        if d.kind == "xmm" and s.kind == "mem":
+            self.e(f"ctx->xmm[{d.idx}].q[0] = ld64({self.ea(s)});")
+        elif d.kind == "mem" and s.kind == "xmm":
+            self.e(f"st64({self.ea(d)}, ctx->xmm[{s.idx}].q[0]);")
+        else:
+            raise Unsupported("movlps form")
+
+    def i_movhps(self, ops, p):
+        d, s = ops
+        if d.kind == "xmm" and s.kind == "mem":
+            self.e(f"ctx->xmm[{d.idx}].q[1] = ld64({self.ea(s)});")
+        elif d.kind == "mem" and s.kind == "xmm":
+            self.e(f"st64({self.ea(d)}, ctx->xmm[{s.idx}].q[1]);")
+        else:
+            raise Unsupported("movhps form")
+
+    def i_movntps(self, ops, p):
+        self._mov128(ops, True)  # the non-temporal hint does not change the result
+
+    def i_rcpps(self, ops, p):
+        # Hardware gives a ~12-bit approximation; the exact value is used (CHECKLIST, as rcpss).
+        self._packed(ops, "1.0f / b")
+
+    def i_rsqrtps(self, ops, p):
+        self._packed(ops, "1.0f / __builtin_sqrtf(b)")
+
+    def i_prefetchnta(self, ops, p):
+        pass
+
+    def i_sfence(self, ops, p):
+        pass
+
+    def i_cvttps2pi(self, ops, p):
+        d, s = ops
+        self.e(self.MMX_TAGS)
+        if s.kind == "xmm":
+            a, b = f"ctx->xmm[{s.idx}].f[0]", f"ctx->xmm[{s.idx}].f[1]"
+        else:
+            ea = self.ea(s)
+            a, b = f"ldf({ea})", f"ldf({ea} + 4u)"
+        self.e(f"ctx->mm[{d.idx}] = (uint64_t)sse_cvt({a}, 1, ctx->mxcsr) | ((uint64_t)sse_cvt({b}, 1, ctx->mxcsr) << 32);")
+
+    def i_movd(self, ops, p):
+        d, s = ops
+        if d.kind in ("mm", "xmm"):
+            v = self.rd(s, 32) if s.kind in ("reg", "mem") else None
+            if v is None:
+                raise Unsupported("movd form")
+            if d.kind == "mm":
+                self.e(self.MMX_TAGS)
+                self.e(f"ctx->mm[{d.idx}] = (uint64_t)(uint32_t)({v});")
+            else:
+                self.e(f"{{ uint32_t v = {v}; memset(&ctx->xmm[{d.idx}], 0, 16); ctx->xmm[{d.idx}].u[0] = v; }}")
+        elif s.kind == "mm":
+            self.e(self.MMX_TAGS)
+            self.e(self.wr(d, 32, f"(uint32_t)ctx->mm[{s.idx}]"))
+        elif s.kind == "xmm":
+            self.e(self.wr(d, 32, f"ctx->xmm[{s.idx}].u[0]"))
+        else:
+            raise Unsupported("movd form")
+
+    def i_pand(self, ops, p):
+        if ops[0].kind == "xmm":
+            raise Unsupported("mnemonic pand (SSE2)")
+        self._mmx(ops, "mmx_pand")
+
+    def i_por(self, ops, p):
+        if ops[0].kind == "xmm":
+            raise Unsupported("mnemonic por (SSE2)")
+        self._mmx(ops, "mmx_por")
+
+    def i_paddd(self, ops, p):
+        if ops[0].kind == "xmm":
+            raise Unsupported("mnemonic paddd (SSE2)")
+        self._mmx(ops, "mmx_paddd")
+
+    def i_punpckldq(self, ops, p):
+        if ops[0].kind == "xmm":
+            raise Unsupported("mnemonic punpckldq (SSE2)")
+        self._mmx(ops, "mmx_punpckldq")
+
+    def _mmx_shift(self, ops, fn):
+        d, s = ops
+        if d.kind != "mm":
+            raise Unsupported(f"{fn} (SSE2)")
+        self.e(self.MMX_TAGS)
+        if s.kind == "imm":
+            n = f"{s.imm & 0xFF}u"
+        elif s.kind == "mm":
+            n = f"ctx->mm[{s.idx}]"
+        else:
+            n = f"ld64({self.ea(s)})"
+        self.e(f"ctx->mm[{d.idx}] = {fn}(ctx->mm[{d.idx}], {n});")
+
+    def i_psrld(self, ops, p):
+        self._mmx_shift(ops, "mmx_psrld")
+
+    def i_psrad(self, ops, p):
+        self._mmx_shift(ops, "mmx_psrad")
 
     def i_emms(self, ops, p):
         self.e("ctx->ftag = 0;")
