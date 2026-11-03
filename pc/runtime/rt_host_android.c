@@ -175,11 +175,18 @@ void host_install_fault_handler(void)
     sigaction(SIGFPE, &sa, NULL);
 }
 
-/* ---- Direct3D 9: DXVK Native ---- */
+/* ---- Direct3D 9: DXVK Native (with the project's Android WSI: the view is handed over with
+   dxvk_android_set_window, at load and whenever the app's surface changes) ---- */
+static ANativeWindow *surface;            /* the app's view (rt_android_set_window) */
+static void (*dxvk_set_window)(ANativeWindow *);
+
 void *host_d3d9_create(uint32_t sdk_version)
 {
     void *lib = dlopen("libdxvk_d3d9.so", RTLD_NOW);
     if (!lib) { rt_log("Direct3D 9: libdxvk_d3d9.so not available (%s)", dlerror()); return NULL; }
+    dxvk_set_window = (void (*)(ANativeWindow *))dlsym(lib, "dxvk_android_set_window");
+    if (dxvk_set_window) dxvk_set_window(surface);
+    else rt_log("Direct3D 9: libdxvk_d3d9.so has no Android WSI (dxvk_android_set_window)");
     void *(*create)(uint32_t) = (void *(*)(uint32_t))dlsym(lib, "Direct3DCreate9");
     return create ? create(sdk_version) : NULL;
 }
@@ -199,7 +206,6 @@ static __thread MsgQueue *my_queue;
 
 typedef struct { int used; pid_t owner; int w, h; } HostWindow;
 static HostWindow windows[16];
-static ANativeWindow *surface;            /* the app's view (rt_android_set_window) */
 static volatile int app_in_front = 1;
 
 static MsgQueue *queue_of(pid_t tid)
@@ -277,7 +283,11 @@ void *host_focus_window(void) { return app_in_front && windows[0].used && window
 void *host_foreground_window(void) { return app_in_front && windows[0].used ? &windows[0] : NULL; }
 
 /* ---- input and surface from the app (JNI side) ---- */
-void rt_android_set_window(ANativeWindow *w) { surface = w; }
+void rt_android_set_window(ANativeWindow *w)
+{
+    surface = w;
+    if (dxvk_set_window) dxvk_set_window(w);
+}
 ANativeWindow *rt_android_window(void) { return surface; }
 void rt_android_set_foreground(int in_front) { app_in_front = in_front; }
 

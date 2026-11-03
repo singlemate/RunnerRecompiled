@@ -1,0 +1,15 @@
+[binaries]
+c = ['@NDK_BIN@/clang.exe', '--target=aarch64-linux-android26']
+cpp = ['@NDK_BIN@/clang++.exe', '--target=aarch64-linux-android26']
+ar = '@NDK_BIN@/llvm-ar.exe'
+strip = '@NDK_BIN@/llvm-strip.exe'
+
+[built-in options]
+cpp_link_args = ['-static-libstdc++', '-Wl,-z,max-page-size=16384']
+c_link_args = ['-Wl,-z,max-page-size=16384']
+
+[host_machine]
+system = 'android'
+cpu_family = 'aarch64'
+cpu = 'armv8'
+endian = 'little'
