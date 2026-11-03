@@ -1095,6 +1095,37 @@ class FnLifter:
     def i_leave(self, ops, p):
         self.e("esp = ebp; ebp = ld32(esp); esp += 4;")
 
+    def i_pushal(self, ops, p):
+        # pushad: eax ecx edx ebx (esp before the push) ebp esi edi
+        self.e("{ uint32_t s = esp; esp -= 32; st32(esp + 28, eax); st32(esp + 24, ecx); st32(esp + 20, edx); "
+               "st32(esp + 16, ebx); st32(esp + 12, s); st32(esp + 8, ebp); st32(esp + 4, esi); st32(esp, edi); }")
+
+    def i_popal(self, ops, p):
+        # popad: the saved esp is skipped
+        self.e("edi = ld32(esp); esi = ld32(esp + 4); ebp = ld32(esp + 8); ebx = ld32(esp + 16); "
+               "edx = ld32(esp + 20); ecx = ld32(esp + 24); eax = ld32(esp + 28); esp += 32;")
+
+    def _rotate_carry(self, ops, left):
+        o = ops[0]
+        bits = self.size(o)
+        if bits != 32:
+            raise Unsupported(f"rc{'l' if left else 'r'}{bits}")
+        cnt = "1u" if len(ops) == 1 else ("(ecx & 31u)" if ops[1].kind == "reg" else f"{ops[1].imm & 31}u")
+        # 33-bit rotate of CF:value, one step at a time (counts are tiny in practice).
+        step = ("{ int nc = (int)(v >> 31); v = (v << 1) | (uint32_t)cf; cf = nc; }" if left else
+                "{ int nc = (int)(v & 1u); v = (v >> 1) | ((uint32_t)cf << 31); cf = nc; }")
+        # Only CF and OF change; ZF/SF/PF are kept.
+        self.e(f"{{ uint32_t n = {cnt}; if (n) {{ uint32_t v = {self.rd(o, 32)}; int cf = x86_cf(&F); "
+               "int z = x86_zf(&F), s = x86_sf(&F), pp = x86_pf(&F); "
+               f"for (uint32_t k = 0; k < n; k++) {step} {self.wr(o, 32, 'v')} "
+               "F.op = FL_EXPL; F.zf = z; F.sf = s; F.pf = pp; F.cf = cf; F.of = 0; } }")
+
+    def i_rcl(self, ops, p):
+        self._rotate_carry(ops, True)
+
+    def i_rcr(self, ops, p):
+        self._rotate_carry(ops, False)
+
     def i_std(self, ops, p):
         self.e("F.df = 1;")
 

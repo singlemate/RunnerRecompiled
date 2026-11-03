@@ -92,6 +92,74 @@ static DWORD WINAPI thread_entry(void *p)
     return 0;
 }
 
+/* ---- Direct3D 9: the system d3d9.dll of the Windows host (bring-up of the bridge) ---- */
+void *host_d3d9_create(uint32_t sdk_version)
+{
+    HMODULE m = LoadLibraryA("d3d9.dll");
+    if (!m) return NULL;
+    void *(WINAPI *create)(UINT) = (void *(WINAPI *)(UINT))(void *)GetProcAddress(m, "Direct3DCreate9");
+    return create ? create(sdk_version) : NULL;
+}
+
+/* ---- windows: one real top-level window per guest top-level window ---- */
+static LRESULT CALLBACK host_wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (msg == WM_DESTROY) {
+        rt_log("host window closed: exiting");
+        ExitProcess(0);
+    }
+    return DefWindowProcW(h, msg, wp, lp);
+}
+
+void *host_window_create(int w, int h, const char *title)
+{
+    static int registered;
+    if (!registered) {
+        WNDCLASSW c = {0};
+        c.lpfnWndProc = host_wndproc;
+        c.hInstance = GetModuleHandleW(NULL);
+        c.hCursor = LoadCursor(NULL, IDC_ARROW);
+        c.lpszClassName = L"RunnerRecompiledPC";
+        RegisterClassW(&c);
+        registered = 1;
+    }
+    RECT r = {0, 0, w, h};
+    AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
+    wchar_t wt[128];
+    MultiByteToWideChar(CP_UTF8, 0, title, -1, wt, 128);
+    HWND hw = CreateWindowExW(0, L"RunnerRecompiledPC", wt, WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT,
+                              CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, NULL, NULL, GetModuleHandleW(NULL), NULL);
+    return hw;
+}
+
+static MSG last_msg;
+
+/* Next queued host message of this thread (removed if remove). */
+int host_peek_message(void **hwnd, uint32_t *msg, uint32_t *wp, uint32_t *lp, uint32_t *time, int32_t *x, int32_t *y,
+                      int remove)
+{
+    MSG m;
+    if (!PeekMessageW(&m, NULL, 0, 0, remove ? PM_REMOVE : PM_NOREMOVE)) return 0;
+    if (remove) last_msg = m;
+    *hwnd = m.hwnd;
+    *msg = m.message;
+    *wp = (uint32_t)m.wParam;
+    *lp = (uint32_t)m.lParam;
+    *time = m.time;
+    *x = m.pt.x;
+    *y = m.pt.y;
+    return 1;
+}
+
+void host_translate_last(void) { TranslateMessage(&last_msg); }
+
+uint32_t host_def_window_proc(void *hwnd, uint32_t msg, uint32_t wp, uint32_t lp)
+{
+    return (uint32_t)DefWindowProcW((HWND)hwnd, msg, (WPARAM)wp, (LPARAM)(int32_t)lp);
+}
+
+void host_window_show(void *hwnd, int show) { ShowWindow((HWND)hwnd, show ? SW_SHOW : SW_HIDE); }
+
 int host_thread_start(void (*fn)(void *), void *arg)
 {
     ThreadStart *s = malloc(sizeof *s);

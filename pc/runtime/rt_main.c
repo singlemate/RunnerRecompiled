@@ -14,6 +14,7 @@ void rt_kernel32_register(void);
 void rt_sync_register(void);
 void rt_files_register(void);
 void rt_user32_register(void);
+void rt_d3d9_register(void);
 void rt_fs_init(const char *game, const char *user);
 
 int main(int argc, char **argv)
@@ -29,6 +30,7 @@ int main(int argc, char **argv)
     rt_files_register();
     rt_kernel32_register();
     rt_user32_register();
+    rt_d3d9_register();
     snprintf(path, sizeof path, "%s/..", argv[1]);
     rt_fs_init(path, argc > 3 ? argv[3] : "pc-user");
 

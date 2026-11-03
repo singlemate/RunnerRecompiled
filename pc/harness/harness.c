@@ -240,6 +240,10 @@ static const char *known_kind(uint32_t flags, const Outcome *a, const Outcome *b
        is unused and the compiler dropped the load (CHECKLIST). */
     if (native_only_fault && a->rw == 0 && a->eip >= text_va && a->eip < text_end)
         return "dead load";
+    /* A write that changes nothing (x += 0) is dropped together with its load; a real lost write
+       would show as a memory difference in the cases that do not fault. */
+    if (native_only_fault && a->rw == 1 && a->eip >= text_va && a->eip < text_end)
+        return "no-op store optimized away";
     if ((flags & KNOWN_FSTSW) && !strncmp(why, "eax ", 4) && !((a->r[0] ^ b->r[0]) & ~0xFFu))
         return "x87 exception flags";
     if ((flags & KNOWN_MMX) && !strncmp(why, "x87 ST(", 7))

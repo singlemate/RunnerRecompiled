@@ -13,7 +13,14 @@
 #define SCREEN_H 720
 
 typedef struct { char name[64]; uint32_t atom, wndproc; } WinClass;
-typedef struct { int used; uint32_t wndproc, style, exstyle, x, y, w, h, userdata, visible; } Win;
+typedef struct { int used; uint32_t wndproc, style, exstyle, x, y, w, h, userdata, visible; void *host; } Win;
+
+void *host_window_create(int w, int h, const char *title);
+int host_peek_message(void **hwnd, uint32_t *msg, uint32_t *wp, uint32_t *lp, uint32_t *time, int32_t *x, int32_t *y,
+                      int remove);
+void host_translate_last(void);
+uint32_t host_def_window_proc(void *hwnd, uint32_t msg, uint32_t wp, uint32_t lp);
+void host_window_show(void *hwnd, int show);
 
 static WinClass classes[64];
 static int nclasses;
@@ -27,6 +34,20 @@ static Win *win(uint32_t h)
     uint32_t i = (h - HWND_BASE) / 4;
     if (h < HWND_BASE || (h & 3) || i >= 256 || !wins[i].used) return NULL;
     return &wins[i];
+}
+
+/* Guest <-> host windows (Direct3D presents into the host window of a guest window). */
+void *rt_user32_host_hwnd(uint32_t h)
+{
+    Win *w = win(h);
+    return w ? w->host : NULL;
+}
+
+uint32_t rt_user32_guest_hwnd(void *host)
+{
+    for (int i = 0; host && i < 256; i++)
+        if (wins[i].used && wins[i].host == host) return HWND_BASE + 4 * (uint32_t)i;
+    return 0;
 }
 
 static void class_name(uint32_t p, int wide, char *out, size_t n)
@@ -91,6 +112,10 @@ static void create_window(X86Ctx *ctx, int wide)
     uint32_t h = HWND_BASE + 4 * (uint32_t)i;
     char cn[64];
     class_name(ARG(1), wide, cn, sizeof cn);
+    if (!(w->style & 0x40000000u)) { /* not WS_CHILD: a real window on the host */
+        w->host = host_window_create((int)w->w, (int)w->h, "Mirror's Edge (RunnerRecompiled PC)");
+        w->visible = 1;
+    }
     rt_log("CreateWindowEx class \"%s\" %ux%u style %#x -> hwnd %#x (wndproc %#x)", cn, w->w, w->h, w->style, h, proc);
     /* The caller's registers survive the nested guest calls: rt_call works on a copy of the stack. */
     uint32_t cs = rt_heap_alloc(48, 1); /* CREATESTRUCT */
@@ -187,7 +212,13 @@ static void u_MoveWindow(X86Ctx *ctx)
     RET(1);
 }
 
-static void u_ShowWindow(X86Ctx *ctx) { Win *w = win(ARG(0)); uint32_t was = w ? w->visible : 0; if (w) w->visible = ARG(1) != 0; RET(was); }
+static void u_ShowWindow(X86Ctx *ctx)
+{
+    Win *w = win(ARG(0));
+    uint32_t was = w ? w->visible : 0;
+    if (w) { w->visible = ARG(1) != 0; if (w->host) host_window_show(w->host, (int)w->visible); }
+    RET(was);
+}
 
 static void u_GetWindowLong(X86Ctx *ctx)
 {
@@ -219,14 +250,28 @@ static void u_SetCapture(X86Ctx *ctx) { uint32_t o = capture; capture = ARG(0); 
 static void u_GetCapture(X86Ctx *ctx) { RET(capture); }
 static void u_ReleaseCapture(X86Ctx *ctx) { capture = 0; RET(1); }
 
-static void u_PeekMessageW(X86Ctx *ctx) { RET(0); } /* empty queue */
+/* Messages of the host queue for our windows, as guest MSGs. */
+static int next_message(uint32_t m, int remove)
+{
+    void *hh;
+    uint32_t msg, wp, lp, t;
+    int32_t x, y;
+    while (host_peek_message(&hh, &msg, &wp, &lp, &t, &x, &y, remove)) {
+        uint32_t g = rt_user32_guest_hwnd(hh);
+        if (!g && hh) { if (!remove) host_peek_message(&hh, &msg, &wp, &lp, &t, &x, &y, 1); continue; }
+        st32(m, g); st32(m + 4, msg); st32(m + 8, wp); st32(m + 12, lp);
+        st32(m + 16, t); st32(m + 20, (uint32_t)x); st32(m + 24, (uint32_t)y);
+        return 1;
+    }
+    return 0;
+}
+
+static void u_PeekMessageW(X86Ctx *ctx) { RET(next_message(ARG(0), (ARG(4) & 1) != 0)); }
 
 static void u_GetMessageW(X86Ctx *ctx)
 {
-    host_sleep_ms(10); /* nothing ever arrives: behave like an idle queue with a timer */
-    memset(rt_ptr(ARG(0)), 0, 28);
-    st32(ARG(0) + 4, 0x0113); /* WM_TIMER keeps a GetMessage loop alive */
-    RET(1);
+    while (!next_message(ARG(0), 1)) host_sleep_ms(1);
+    RET(ld32(ARG(0) + 4) != 0x0012); /* WM_QUIT ends the loop */
 }
 
 static void u_DispatchMessageW(X86Ctx *ctx)
@@ -237,7 +282,19 @@ static void u_DispatchMessageW(X86Ctx *ctx)
 
 static void u_SendMessageW(X86Ctx *ctx) { RET(send(ctx, ARG(0), ARG(1), ARG(2), ARG(3))); }
 static void u_PostMessageW(X86Ctx *ctx) { RET(1); }
-static void u_DefWindowProc(X86Ctx *ctx) { RET(0); }
+static void u_TranslateMessage(X86Ctx *ctx) { host_translate_last(); RET(1); }
+
+/* Only messages whose parameters are plain values go to the host's default handling. */
+static void u_DefWindowProc(X86Ctx *ctx)
+{
+    Win *w = win(ARG(0));
+    uint32_t msg = ARG(1);
+    if (msg == 0x0081) { RET(1); return; } /* WM_NCCREATE: continue creation */
+    static const uint32_t pass[] = {0x0006, 0x0010, 0x0020, 0x0084, 0x00A1, 0x00A2, 0x0104, 0x0105, 0x0106, 0x0112};
+    for (unsigned i = 0; w && w->host && i < sizeof pass / sizeof *pass; i++)
+        if (msg == pass[i]) { RET(host_def_window_proc(w->host, msg, ARG(2), ARG(3))); return; }
+    RET(0);
+}
 
 static void u_GetCursorPos(X86Ctx *ctx) { st32(ARG(0), (uint32_t)cursor_x); st32(ARG(0) + 4, (uint32_t)cursor_y); RET(1); }
 static void u_SetCursorPos(X86Ctx *ctx) { cursor_x = (int32_t)ARG(0); cursor_y = (int32_t)ARG(1); RET(1); }
@@ -408,7 +465,7 @@ static const HleDef user32[] = {
     {"user32.dll", "ReleaseCapture", u_ReleaseCapture, 0},
     {"user32.dll", "PeekMessageW", u_PeekMessageW, 5},
     {"user32.dll", "GetMessageW", u_GetMessageW, 4},
-    {"user32.dll", "TranslateMessage", u_Zero, 1},
+    {"user32.dll", "TranslateMessage", u_TranslateMessage, 1},
     {"user32.dll", "DispatchMessageW", u_DispatchMessageW, 1},
     {"user32.dll", "SendMessageW", u_SendMessageW, 4},
     {"user32.dll", "PostMessageW", u_PostMessageW, 4},
@@ -444,6 +501,9 @@ static const HleDef user32[] = {
     {"user32.dll", "GetWindowThreadProcessId", u_GetWindowThreadProcessId, 2},
     {"user32.dll", "GetTopWindow", u_Zero, 1},
     {"gdi32.dll", "GetDeviceCaps", g_GetDeviceCaps, 2},
+    {"gdi32.dll", "CreateDCA", u_FakeHandle, 4},
+    {"gdi32.dll", "DeleteDC", u_True, 1},
+    {"gdi32.dll", "ExtEscape", u_Zero, 6},
 };
 
 void rt_user32_register(void) { rt_hle_register(user32, sizeof user32 / sizeof *user32); }
