@@ -276,3 +276,79 @@ int host_audio_start(uint32_t rate, void (*mix)(int16_t *out, uint32_t frames))
     SetEvent(audio_event);
     return 1;
 }
+
+/* ---- mouse and pads for the guest's DirectInput/XInput (rt_dinput.c) ---- */
+
+/* Relative mouse while a window of ours is in front: the cursor is hidden, held in the middle of
+   the window and confined to it; motion is measured from the middle. Returns 0 (no capture) when
+   another program is in front or ME_PC_MOUSE_CAPTURE=0. */
+int host_mouse_poll(int32_t *dx, int32_t *dy, uint8_t buttons[3])
+{
+    static int captured, disabled = -1;
+    if (disabled < 0) { const char *e = getenv("ME_PC_MOUSE_CAPTURE"); disabled = e && e[0] == '0'; }
+    HWND fg = GetForegroundWindow();
+    DWORD pid = 0;
+    if (fg) GetWindowThreadProcessId(fg, &pid);
+    if (disabled || !fg || pid != GetCurrentProcessId() || IsIconic(fg)) {
+        if (captured) { ClipCursor(NULL); ShowCursor(TRUE); captured = 0; }
+        return 0;
+    }
+    RECT r;
+    GetClientRect(fg, &r);
+    POINT c = {(r.right - r.left) / 2, (r.bottom - r.top) / 2}, tl = {0, 0}, br = {r.right, r.bottom}, p;
+    ClientToScreen(fg, &c);
+    ClientToScreen(fg, &tl);
+    ClientToScreen(fg, &br);
+    GetCursorPos(&p);
+    *dx = captured ? p.x - c.x : 0;
+    *dy = captured ? p.y - c.y : 0;
+    if (!captured) {
+        RECT clip = {tl.x, tl.y, br.x, br.y};
+        ClipCursor(&clip);
+        ShowCursor(FALSE);
+        captured = 1;
+    }
+    SetCursorPos(c.x, c.y);
+    buttons[0] = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) ? 0x80 : 0;
+    buttons[1] = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) ? 0x80 : 0;
+    buttons[2] = (GetAsyncKeyState(VK_MBUTTON) & 0x8000) ? 0x80 : 0;
+    return 1;
+}
+
+/* XInput of the host (xinput1_4.dll, Windows 8+): XINPUT_STATE is 16 bytes in both ABIs. */
+typedef DWORD (WINAPI *XGetState)(DWORD, void *);
+typedef DWORD (WINAPI *XSetState)(DWORD, void *);
+static XGetState x_get;
+static XSetState x_set;
+static int x_loaded;
+
+static void xinput_load(void)
+{
+    if (x_loaded) return;
+    x_loaded = 1;
+    HMODULE h = LoadLibraryA("xinput1_4.dll");
+    if (!h) h = LoadLibraryA("xinput9_1_0.dll");
+    if (h) { x_get = (XGetState)(void *)GetProcAddress(h, "XInputGetState"); x_set = (XSetState)(void *)GetProcAddress(h, "XInputSetState"); }
+}
+
+uint32_t host_pad_get(uint32_t index, uint8_t state[16])
+{
+    xinput_load();
+    return x_get ? x_get(index, state) : 1167u; /* ERROR_DEVICE_NOT_CONNECTED */
+}
+
+uint32_t host_pad_rumble(uint32_t index, uint16_t left, uint16_t right)
+{
+    xinput_load();
+    uint16_t v[2] = {left, right};
+    return x_set ? x_set(index, v) : 1167u;
+}
+
+void *host_focus_window(void) { return GetFocus(); }   /* of the calling thread's queue */
+void *host_foreground_window(void)
+{
+    HWND fg = GetForegroundWindow();
+    DWORD pid = 0;
+    if (fg) GetWindowThreadProcessId(fg, &pid);
+    return pid == GetCurrentProcessId() ? fg : NULL;
+}

@@ -1,7 +1,7 @@
 /* DirectInput 8, implemented by the runtime (Android has no DirectInput). Guest COM objects:
    +0 vtable (HLE thunks), +4 kind (0 = IDirectInput8, 1 = keyboard, 2 = mouse, 3 = other),
-   +8 reference count. Device state comes from rt_input_* (all keys up and a still mouse until a
-   host input source is attached); there are no buffered events and no joysticks (pads go
+   +8 reference count. Device state comes from rt_input_* (filled from the window messages; on
+   Windows the mouse is captured and read relative, host_mouse_poll); no buffered events, no joysticks (pads go
    through XInput). */
 #include "rt.h"
 
@@ -16,6 +16,9 @@
 enum { K_DINPUT, K_KEYBOARD, K_MOUSE, K_OTHER };
 
 static uint32_t vt_dinput, vt_device;
+int host_mouse_poll(int32_t *dx, int32_t *dy, uint8_t buttons[3]);
+uint32_t host_pad_get(uint32_t index, uint8_t state[16]);
+uint32_t host_pad_rumble(uint32_t index, uint16_t left, uint16_t right);
 
 /* Host input state, filled from the window messages (rt_user32.c) or the platform layer. */
 uint8_t rt_input_keys[256];      /* DIK_* scan codes, 0x80 = down */
@@ -49,6 +52,17 @@ static void d_CreateDevice(X86Ctx *ctx)
     RET(DI_OK);
 }
 
+/* Mouse motion since the last read: the captured host mouse, else the window-message totals. */
+static void mouse_take(int32_t *dx, int32_t *dy, int32_t *dz, uint8_t b[3])
+{
+    int32_t hx, hy;
+    uint8_t hb[3];
+    if (host_mouse_poll(&hx, &hy, hb)) { rt_input_mouse[0] += hx; rt_input_mouse[1] += hy; memcpy(rt_input_buttons, hb, 3); }
+    *dx = rt_input_mouse[0]; *dy = rt_input_mouse[1]; *dz = rt_input_mouse[2];
+    rt_input_mouse[0] = rt_input_mouse[1] = rt_input_mouse[2] = 0;
+    memcpy(b, rt_input_buttons, 3);
+}
+
 /* IDirectInputDevice8::GetDeviceState(this, size, data) */
 static void v_GetDeviceState(X86Ctx *ctx)
 {
@@ -57,16 +71,47 @@ static void v_GetDeviceState(X86Ctx *ctx)
     if (kind == K_KEYBOARD) {
         memcpy(rt_ptr(data), rt_input_keys, size < 256 ? size : 256);
     } else if (kind == K_MOUSE && size >= 16) {
-        st32(data, (uint32_t)rt_input_mouse[0]); st32(data + 4, (uint32_t)rt_input_mouse[1]);
-        st32(data + 8, (uint32_t)rt_input_mouse[2]);
-        memcpy(rt_ptr(data + 12), rt_input_buttons, size >= 20 ? 8 : 4);
-        rt_input_mouse[0] = rt_input_mouse[1] = rt_input_mouse[2] = 0;
+        int32_t dx, dy, dz;
+        uint8_t b[3];
+        mouse_take(&dx, &dy, &dz, b);
+        st32(data, (uint32_t)dx); st32(data + 4, (uint32_t)dy); st32(data + 8, (uint32_t)dz);
+        memcpy(rt_ptr(data + 12), b, 3);
     }
     RET(DI_OK);
 }
 
-/* GetDeviceData(this, cbObjectData, rgdod, pdwInOut, flags): no buffered events. */
-static void v_GetDeviceData(X86Ctx *ctx) { if (ARG(3)) st32(ARG(3), 0); RET(DI_OK); }
+/* GetDeviceData(this, cbObjectData, rgdod, pdwInOut, flags): buffered mouse events, made from the
+   motion and button changes since the previous call (DIDEVICEOBJECTDATA: ofs, data, time, seq, app;
+   DIMOFS_X 0, Y 4, Z 8, BUTTON0.. 12..). The keyboard is read from window messages: none. */
+static void v_GetDeviceData(X86Ctx *ctx)
+{
+    uint32_t o = ARG(0), cb = ARG(1), out = ARG(2), io = ARG(3), flags = ARG(4), kind = ld32(o + 4);
+    uint32_t room = io ? ld32(io) : 0, n = 0;
+    static uint8_t prev[3];
+    static uint32_t seq;
+    if (kind == K_MOUSE && !(flags & 1)) { /* DIGDD_PEEK leaves the data: report none */
+        int32_t dx, dy, dz;
+        uint8_t b[3];
+        mouse_take(&dx, &dy, &dz, b);
+        uint32_t ev[6][2];
+        uint32_t k = 0;
+        if (dx) { ev[k][0] = 0; ev[k][1] = (uint32_t)dx; k++; }
+        if (dy) { ev[k][0] = 4; ev[k][1] = (uint32_t)dy; k++; }
+        if (dz) { ev[k][0] = 8; ev[k][1] = (uint32_t)dz; k++; }
+        for (int i = 0; i < 3; i++)
+            if (b[i] != prev[i]) { ev[k][0] = 12u + (uint32_t)i; ev[k][1] = b[i]; k++; prev[i] = b[i]; }
+        if (k && getenv("ME_PC_LOG_INPUT")) rt_log("DirectInput mouse: %u events (dx %d dy %d dz %d), room %u", k, dx, dy, dz, room);
+        uint32_t now = (uint32_t)(host_ticks_ns() / 1000000u);
+        for (uint32_t i = 0; i < k && n < room; i++, n++) {
+            if (!out) continue;
+            uint32_t e = out + n * cb;
+            memset(rt_ptr(e), 0, cb);
+            st32(e, ev[i][0]); st32(e + 4, ev[i][1]); st32(e + 8, now); st32(e + 12, ++seq);
+        }
+    }
+    if (io) st32(io, n);
+    RET(DI_OK);
+}
 
 /* GetCapabilities(this, DIDEVCAPS*) */
 static void v_GetCapabilities(X86Ctx *ctx)
@@ -137,12 +182,21 @@ static void i_DirectInput8Create(X86Ctx *ctx)
     RET(DI_OK);
 }
 
-/* XInput 1.3 by ordinal: #2 XInputGetState, #3 XInputSetState. No pad source yet: not connected. */
-static void x_NotConnected(X86Ctx *ctx) { RET(1167u); } /* ERROR_DEVICE_NOT_CONNECTED */
+/* XInput 1.3 by ordinal: #2 XInputGetState(index, XINPUT_STATE*), #3 XInputSetState(index,
+   XINPUT_VIBRATION*), passed to the host's pads (the structures have the same layout). */
+static void x_GetState(X86Ctx *ctx)
+{
+    uint8_t st[16];
+    uint32_t r = host_pad_get(ARG(0), st);
+    if (r == 0 && ARG(1)) memcpy(rt_ptr(ARG(1)), st, 16);
+    RET(r);
+}
+
+static void x_SetState(X86Ctx *ctx) { RET(ARG(1) ? host_pad_rumble(ARG(0), ld16(ARG(1)), ld16(ARG(1) + 2)) : 87u); }
 
 static const HleDef dinput_exports[] = {
     {"dinput8.dll", "DirectInput8Create", i_DirectInput8Create, 5},
-    {"xinput1_3.dll", "#2", x_NotConnected, 2}, {"xinput1_3.dll", "#3", x_NotConnected, 2},
+    {"xinput1_3.dll", "#2", x_GetState, 2}, {"xinput1_3.dll", "#3", x_SetState, 2},
 };
 
 void rt_dinput_register(void) { rt_hle_register(dinput_exports, sizeof dinput_exports / sizeof *dinput_exports); }

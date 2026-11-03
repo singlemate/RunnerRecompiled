@@ -246,9 +246,29 @@ static void u_SetWindowLong(X86Ctx *ctx)
 }
 
 static void u_SetFocus(X86Ctx *ctx) { uint32_t o = focus; focus = ARG(0); RET(o); }
-static void u_GetFocus(X86Ctx *ctx) { RET(focus); }
+/* Focus and activation follow the host windows (a window shown in front has the keyboard focus,
+   as on Windows); ME_PC_ASSUME_FOCUS=1 reports the main window focused even when another program
+   is in front (automated tests that post input to a background window). */
+void *host_focus_window(void);
+void *host_foreground_window(void);
+static uint32_t assumed_focus(void)
+{
+    static int assume = -1;
+    if (assume < 0) { const char *e = getenv("ME_PC_ASSUME_FOCUS"); assume = e && e[0] == '1'; }
+    return assume ? (foreground ? foreground : rt_user32_guest_hwnd(NULL)) : 0;
+}
+
+static void u_GetFocus(X86Ctx *ctx)
+{
+    uint32_t g = rt_user32_guest_hwnd(host_focus_window());
+    RET(g ? g : focus ? focus : assumed_focus());
+}
 static void u_SetForegroundWindow(X86Ctx *ctx) { foreground = ARG(0); RET(1); }
-static void u_GetForegroundWindow(X86Ctx *ctx) { RET(foreground); }
+static void u_GetForegroundWindow(X86Ctx *ctx)
+{
+    uint32_t g = rt_user32_guest_hwnd(host_foreground_window());
+    RET(g ? g : assumed_focus() ? assumed_focus() : foreground);
+}
 static void u_SetActiveWindow(X86Ctx *ctx) { uint32_t o = foreground; foreground = ARG(0); RET(o); }
 static void u_SetCapture(X86Ctx *ctx) { uint32_t o = capture; capture = ARG(0); RET(o); }
 static void u_GetCapture(X86Ctx *ctx) { RET(capture); }
