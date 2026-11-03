@@ -20,7 +20,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "tools"))
 import lift  # noqa: E402
 
-LEAF_BAD = re.compile(r"x86_dispatch|x86_import|x86_trap|fs_base|\bf_[0-9A-F]{8}\(ctx\)")
+LEAF_BAD = re.compile(r"x86_dispatch|x86_trap|x86_cpuid|fs_base|\bf_[0-9A-F]{8}\(ctx\)")
 FP_USE = re.compile(r"ST\(|x87_|ctx->xmm|ctx->mm|ctx->fcw|ctx->mxcsr")
 
 

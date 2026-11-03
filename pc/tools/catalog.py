@@ -20,8 +20,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pe32 import PE32  # noqa: E402
 import x86cfg as X  # noqa: E402
 
+# RaiseException is not here: a handler may return EXCEPTION_CONTINUE_EXECUTION.
 NORETURN_IMPORTS = {
-    "ExitProcess", "ExitThread", "FatalAppExitA", "FatalAppExitW", "RaiseException", "TerminateProcess",
+    "ExitProcess", "ExitThread", "FatalAppExitA", "FatalAppExitW", "TerminateProcess",
     "_CxxThrowException", "_exit", "exit", "abort", "_invoke_watson", "_invalid_parameter_noinfo_noreturn",
     "?terminate@@YAXXZ", "_amsg_exit", "longjmp", "_longjmp",
     "?_Xlen@std@@YAXXZ", "?_Xran@std@@YAXXZ", "?_Xmem@tr1@std@@YAXXZ",
@@ -68,11 +69,23 @@ def main():
             problem_sites[kind].append(f"{va:#x}")
 
     def add_seed(va, why):
-        if in_text(va) and va not in origin:
+        # A strong seed (a call, the entry, an export, a SafeSEH handler) also revives an address
+        # that an earlier weak seed (named only by a relocation) failed to decode.
+        if in_text(va) and (va not in origin or (why in STRONG and origin[va] not in STRONG and va not in functions)):
             origin[va] = why
+            rejected_va.discard(va)
             pending.append(va)
 
-    STRONG = ("call", "entry", "safeseh")
+    STRONG = ("call", "entry", "safeseh", "export")
+    rejected_va = set()
+    reject_log = []
+    last_reason = [None, 0]
+
+    def fail(reason, va):
+        last_reason[0], last_reason[1] = reason, va
+        return None
+
+    STRONG = ("call", "entry", "safeseh", "export")
 
     table_cache = {}
 
@@ -82,6 +95,10 @@ def main():
             return table_cache[table_va]
         targets = []
         p = table_va
+        # Leading entries for impossible indices may be left unrelocated ("dd ?" in asm).
+        for _ in range(3):
+            if p not in reloc_set and p + 4 in reloc_set:
+                p += 4
         while p in reloc_set and len(targets) < 4096:
             t = pe.u32(p)
             if not in_text(t):
@@ -92,6 +109,15 @@ def main():
                     owner_mark[p - tva + i] = 2
             targets.append(t)
             p += 4
+        # Negative indices (asm memcpy: "sub ecx, 4 / jb" then jmp [ecx*4 + table]).
+        p = table_va - 4
+        while p in reloc_set and len(targets) < 4096 and table_va - p <= 64:
+            t = pe.u32(p)
+            if not in_text(t):
+                break
+            table_sites.add(p)
+            targets.append(t)
+            p -= 4
         table_cache[table_va] = targets
         return targets
 
@@ -118,18 +144,18 @@ def main():
             while True:
                 if not in_text(va):
                     if weak:
-                        return None
+                        return fail("runs out of .text", va)
                     fn["flags"].add("runs-out-of-text")
                     note("runs-out-of-text", va)
                     break
                 off = va - tva
                 if owner_mark[off] == 2 or (weak and va in reloc_set):
                     if weak:
-                        return None
+                        return fail("instruction on data or a relocation", va)
                 n, txt = dis.decode(va)
                 if not n:
                     if weak:
-                        return None
+                        return fail("decode error", va)
                     fn["flags"].add("decode-error")
                     note("decode-error", va)
                     break
@@ -141,7 +167,7 @@ def main():
                     if in_text(tgt):
                         calls.append(tgt)
                     elif weak:
-                        return None
+                        return fail("call outside .text", va)
                     else:
                         note("call-outside-text", va)
                 elif kind == X.K_CALL_IAT:
@@ -155,7 +181,7 @@ def main():
                     if in_text(tgt):
                         stack.append(tgt)
                     elif weak:
-                        return None
+                        return fail("jmp outside .text", va)
                     else:
                         note("jmp-outside-text", va)
                     break
@@ -198,6 +224,8 @@ def main():
     add_seed(base + pe.entry_rva, "entry")
     for h in pe.safeseh_handlers():
         add_seed(h, "safeseh")
+    for name, va in sorted(pe.exports().items()):
+        add_seed(va, "export")
 
     def run_pending():
         while pending:
@@ -205,11 +233,18 @@ def main():
             if e in functions:
                 continue
             weak = origin.get(e) not in STRONG
-            if weak and owner_mark[e - tva]:
-                continue  # weak seed pointing inside already decoded code or data
+            # A weak seed inside decoded code is dropped only when it points into the middle of an
+            # instruction or at data. A relocated pointer to an instruction start is a real
+            # function pointer (a vtable entry), even when another function reached that code
+            # through a jmp before it was known as a function.
+            if weak and owner_mark[e - tva] and not insn_len[e - tva]:
+                continue
             fn = descend(e, weak)
             if fn is None:
                 rejected[origin[e]] += 1
+                rejected_va.add(e)
+                if len(reject_log) < 400:
+                    reject_log.append(f"{e:#x} {origin[e]}: {last_reason[0]} at {last_reason[1]:#x}")
                 continue
             functions[e] = fn
 
@@ -324,6 +359,7 @@ def main():
         "relocations": len(relocs), "jump_table_entries": len(table_sites),
         "imports": len(imports),
         "problems": dict(problems), "problem_sites": {k: v for k, v in problem_sites.items()},
+        "rejected_seeds": reject_log,
         "largest_gaps": [{"va": f"{va:#x}", "bytes": n, "non_padding": u} for u, va, n in gaps[:40]],
         "seconds": round(time.time() - t0, 1),
     }

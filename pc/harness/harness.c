@@ -55,7 +55,6 @@ static uint32_t text_va, text_end;
 static HANDLE test_thread;
 
 void x86_dispatch(X86Ctx *ctx, uint32_t t) { (void)ctx; (void)t; fault_code = 0xD15; fault_landing(); for (;;) {} }
-void x86_import(X86Ctx *ctx, uint32_t s) { (void)ctx; (void)s; fault_code = 0x1A7; fault_landing(); for (;;) {} }
 void x86_trap(X86Ctx *ctx, uint32_t a, const char *w) { (void)ctx; (void)a; (void)w; fault_code = 0x7A9; fault_landing(); for (;;) {} }
 
 static LONG CALLBACK on_exception(EXCEPTION_POINTERS *ep)
@@ -233,6 +232,10 @@ static const char *known_kind(uint32_t flags, const Outcome *a, const Outcome *b
     int native_only_fault = a->faulted && !b->faulted && !b->hung && a->code == 0xC0000005;
     if (native_only_fault && (flags & KNOWN_NOCALL) && (a->eip < text_va || a->eip >= text_end))
         return "entered not by call: ret left the harness";
+    /* Random inputs can make a function write past a stack array over its own return address;
+       the original then returns into garbage, the lifted code does not read the return address. */
+    if (native_only_fault && a->eip == a->addr && (a->eip < text_va || a->eip >= text_end))
+        return "return address overwritten by random input";
     /* A read fault inside the game's code that the optimized C does not repeat: the loaded value
        is unused and the compiler dropped the load (CHECKLIST). */
     if (native_only_fault && a->rw == 0 && a->eip >= text_va && a->eip < text_end)

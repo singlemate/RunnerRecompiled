@@ -87,6 +87,27 @@ class PE32:
             d += 20
         return out
 
+    def exports(self):
+        """Returns {name_or_#ordinal: va} for exports that point into the image (not forwarders)."""
+        rva, size = self.dirs[0]
+        out = {}
+        if not rva:
+            return out
+        d = self.image_base + rva
+        _, _, _, _, _, base, nfuncs, nnames, funcs, names, ords = struct.unpack("<IIHHIIIIIII", self.read(d, 40))
+        addr = [self.u32(self.image_base + funcs + 4 * i) for i in range(nfuncs)]
+        named = set()
+        for i in range(nnames):
+            name = self.cstr(self.image_base + self.u32(self.image_base + names + 4 * i))
+            idx = struct.unpack("<H", self.read(self.image_base + ords + 2 * i, 2))[0]
+            if idx < nfuncs and addr[idx] and not (rva <= addr[idx] < rva + size):
+                out[name] = self.image_base + addr[idx]
+                named.add(idx)
+        for idx, a in enumerate(addr):
+            if a and not (rva <= a < rva + size):
+                out[f"#{base + idx}"] = self.image_base + a
+        return out
+
     def relocations(self):
         """VAs of 32-bit HIGHLOW relocation sites."""
         rva, size = self.dirs[5]

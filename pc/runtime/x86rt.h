@@ -38,6 +38,14 @@ typedef struct X86Ctx {
 
 typedef void (*X86Fn)(X86Ctx *);
 
+/* Registers live in C locals inside a lifted function and go through ctx around calls. */
+#define X86_LOCALS uint32_t eax = ctx->eax, ecx = ctx->ecx, edx = ctx->edx, ebx = ctx->ebx, \
+                        esp = ctx->esp, ebp = ctx->ebp, esi = ctx->esi, edi = ctx->edi
+#define X86_SPILL (ctx->eax = eax, ctx->ecx = ecx, ctx->edx = edx, ctx->ebx = ebx, \
+                   ctx->esp = esp, ctx->ebp = ebp, ctx->esi = esi, ctx->edi = edi)
+#define X86_RELOAD (eax = ctx->eax, ecx = ctx->ecx, edx = ctx->edx, ebx = ctx->ebx, \
+                    esp = ctx->esp, ebp = ctx->ebp, esi = ctx->esi, edi = ctx->edi)
+
 #define X86_PTR(a) ((uintptr_t)X86_MEM_BASE + (uint32_t)(a))
 static inline uint8_t ld8(uint32_t a) { uint8_t v; memcpy(&v, (void *)X86_PTR(a), 1); return v; }
 static inline uint16_t ld16(uint32_t a) { uint16_t v; memcpy(&v, (void *)X86_PTR(a), 2); return v; }
@@ -246,8 +254,9 @@ static inline float sse_max(float a, float b) { return a > b ? a : b; }
 
 /* Services the generated code calls; provided by the runtime (or the test harness). */
 void x86_dispatch(X86Ctx *ctx, uint32_t target);      /* indirect call/jmp: guest address -> lifted fn */
-void x86_import(X86Ctx *ctx, uint32_t iat_slot);      /* call/jmp through an import slot */
 void x86_trap(X86Ctx *ctx, uint32_t addr, const char *why) __attribute__((noreturn));
+/* cpuid: the runtime reports the processor the guest sees (leaf in *eax, subleaf in *ecx). */
+void x86_cpuid(X86Ctx *ctx, uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx);
 
 /* Lazy flags. Every flag-setting instruction stores its kind, operands and result; a condition
    is computed only where it is read. The kind is a constant in the generated code, so the
@@ -263,6 +272,7 @@ typedef struct X86Flags {
     uint32_t cin;  /* carry-in for ADC/SBB */
     int cf, of;    /* explicit CF/OF for FL_EXPL, and saved CF for INC/DEC */
     int zf, sf, pf; /* explicit for FL_EXPL only */
+    int df;         /* direction flag (std/cld); 0 at every call boundary, as the ABI requires */
 } X86Flags;
 
 static inline uint32_t x86_mask(int bits) { return bits == 32 ? 0xFFFFFFFFu : ((1u << bits) - 1); }

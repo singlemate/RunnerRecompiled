@@ -167,10 +167,10 @@ class FnLifter:
         self.lines.append("    " + s)
 
     def spill(self):
-        return " ".join(f"ctx->{r} = {r};" for r in REG32)
+        return "X86_SPILL;"
 
     def reload(self):
-        return " ".join(f"{r} = ctx->{r};" for r in REG32)
+        return "X86_RELOAD;"
 
     def flags(self, op, bits, a, b, r, cin=None):
         s = f"F.op = {op}; F.bits = {bits}; F.a = {a}; F.b = {b}; F.r = {r};"
@@ -240,7 +240,7 @@ class FnLifter:
                     break
                 va = nxt
         order.sort()
-        self.e("uint32_t " + ", ".join(f"{r} = ctx->{r}" for r in REG32) + ";")
+        self.e("X86_LOCALS;")
         self.e("X86Flags F = {0};")
         self.e("(void)F;")
         if order[0] != self.entry:
@@ -289,13 +289,12 @@ class FnLifter:
                 e(f"esp -= 4; st32(esp, 0x{nxt:X}u); {self.spill()} x86_dispatch(ctx, 0x{tgt:X}u); {self.reload()}")
             return
         if kind == X.K_CALL_IAT:
-            if tgt in self.L.imports:
-                e(f"esp -= 4; st32(esp, 0x{nxt:X}u); {self.spill()} x86_import(ctx, 0x{tgt:X}u); {self.reload()}")
-                if tgt in self.L.noreturn_slots:
-                    e(f"x86_trap(ctx, 0x{va:X}u, \"noreturn import returned\");")
-            else:
-                e(f"{{ uint32_t t = ld32(0x{tgt:X}u); esp -= 4; st32(esp, 0x{nxt:X}u); {self.spill()} "
-                  f"x86_dispatch(ctx, t); {self.reload()} }}")
+            # Import slots and global function pointers alike: the loader fills import slots
+            # with the guest address of the export (a lifted function or an HLE thunk).
+            e(f"{{ uint32_t t = ld32(0x{tgt:X}u); esp -= 4; st32(esp, 0x{nxt:X}u); {self.spill()} "
+              f"x86_dispatch(ctx, t); {self.reload()} }}")
+            if tgt in self.L.noreturn_slots:
+                e(f"x86_trap(ctx, 0x{va:X}u, \"noreturn import returned\");")
             return
         if kind == X.K_CALL_IND:
             op = Op(rest)
@@ -320,7 +319,16 @@ class FnLifter:
         if kind == X.K_JMP_TABLE:
             op = Op(rest)
             targets = self.L.table(tgt)
-            cases = " ".join(f"case 0x{t:X}u: goto L_{t:08X};" for t in sorted(set(targets)) if t in self.blockset)
+            parts = []
+            for t in sorted(set(targets)):
+                if t in self.blockset:
+                    parts.append(f"case 0x{t:X}u: goto L_{t:08X};")
+                elif t in self.L.entries:  # a case that is another function's entry: tail call
+                    self.calls.add(t)
+                    parts.append(f"case 0x{t:X}u: {self.spill()} f_{t:08X}(ctx); return;")
+                else:
+                    parts.append(f"case 0x{t:X}u: {self.spill()} x86_dispatch(ctx, 0x{t:X}u); return;")
+            cases = " ".join(parts)
             e(f"switch ({self.rd(op, 32)}) {{ {cases} default: x86_trap(ctx, 0x{va:X}u, \"jump table\"); }}")
             return
         if kind == X.K_JMP_IND:
@@ -328,10 +336,7 @@ class FnLifter:
             e(f"{{ uint32_t t = {self.rd(op, 32)}; {self.spill()} x86_dispatch(ctx, t); return; }}")
             return
         if kind == X.K_JMP_IAT:
-            if tgt in self.L.imports:
-                e(f"{self.spill()} x86_import(ctx, 0x{tgt:X}u); return;")
-            else:
-                e(f"{{ uint32_t t = ld32(0x{tgt:X}u); {self.spill()} x86_dispatch(ctx, t); return; }}")
+            e(f"{{ uint32_t t = ld32(0x{tgt:X}u); {self.spill()} x86_dispatch(ctx, t); return; }}")
             return
         if kind == X.K_RET:
             imm = num(rest) if rest else 0
@@ -1090,6 +1095,15 @@ class FnLifter:
     def i_leave(self, ops, p):
         self.e("esp = ebp; ebp = ld32(esp); esp += 4;")
 
+    def i_std(self, ops, p):
+        self.e("F.df = 1;")
+
+    def i_cld(self, ops, p):
+        self.e("F.df = 0;")
+
+    def i_cpuid(self, ops, p):
+        self.e("x86_cpuid(ctx, &eax, &ebx, &ecx, &edx);")
+
     def i_lahf(self, ops, p):
         self.e("eax = (eax & 0xFFFF00FFu) | ((x86_eflags(&F) & 0xFFu) << 8);")
 
@@ -1107,6 +1121,8 @@ class FnLifter:
         bits = {"b": 8, "w": 16, "d": 32}[mn[-1]]
         step = bits // 8
         kind = mn[:-1]
+        # Direction flag: F.df (std/cld); the step is negative when it is set.
+        step = f"(F.df ? {-step & 0xFFFFFFFF}u : {step}u)"
         if kind == "movs":
             body = f"st{bits}(edi, ld{bits}(esi)); esi += {step}; edi += {step};"
         elif kind == "stos":
@@ -1173,12 +1189,25 @@ class Lifter:
     def table(self, va):
         if va not in self.tables:
             ts, p = [], va
+            # Leading entries for impossible indices may be left unrelocated ("dd ?" in asm).
+            for _ in range(3):
+                if p not in self._relocs and p + 4 in self._relocs:
+                    p += 4
             while p in self._relocs and len(ts) < 4096:
                 t = self.pe.u32(p)
                 if not (self.tva <= t < self.tva + len(self.code)):
                     break
                 ts.append(t)
                 p += 4
+            # Negative indices (asm memcpy: "sub ecx, 4 / jb" then jmp [ecx*4 + table]): entries
+            # sit right before the base.
+            p = va - 4
+            while p in self._relocs and len(ts) < 4096 and va - p <= 64:
+                t = self.pe.u32(p)
+                if not (self.tva <= t < self.tva + len(self.code)):
+                    break
+                ts.append(t)
+                p -= 4
             self.tables[va] = ts
         return self.tables[va]
 
