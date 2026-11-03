@@ -721,6 +721,10 @@ static void stall_watch(void *arg)
             extern void rt_ue_dump_names(const char *pattern);
             rt_ue_dump_names(getenv("ME_PC_UE_NAMES"));
         }
+        if (getenv("ME_PC_UE_FOV") && ticks == atoi(getenv("ME_PC_UE_FOV"))) { /* value: the 10 s tick to probe at */
+            extern void rt_ue_fov_probe(void);
+            rt_ue_fov_probe();
+        }
     }
 }
 

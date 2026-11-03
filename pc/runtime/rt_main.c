@@ -58,6 +58,8 @@ int main(int argc, char **argv)
     rt_module_init_tree(game, ctx);
 
     rt_start_stall_watch();
+    extern void rt_ue_start_fov(void);
+    rt_ue_start_fov(); /* ME_PC_FOV */
     rt_log("entering the game at %#x", game->entry);
     uint32_t r = rt_call(ctx, game->entry, 0, NULL);
     rt_log("game entry returned %u", r);

@@ -95,7 +95,7 @@ def main():
                 jobs.append((os.path.join(src_dir, f), os.path.join(od, f[:-2] + ".o")))
     od = os.path.join(obj_root, "runtime")
     os.makedirs(od, exist_ok=True)
-    for f in ("rt_core.c", "rt_kernel32.c", "rt_sync.c", "rt_files.c", "rt_user32.c", "rt_d3d9.c", "rt_d3d9_gen.c", "rt_physx_support.c", "rt_dinput.c", "rt_stubs.c", "rt_host_win.c", "rt_main.c"):
+    for f in ("rt_core.c", "rt_kernel32.c", "rt_sync.c", "rt_files.c", "rt_user32.c", "rt_d3d9.c", "rt_d3d9_gen.c", "rt_physx_support.c", "rt_dinput.c", "rt_ue3.c", "rt_stubs.c", "rt_host_win.c", "rt_main.c"):
         jobs.append((os.path.join(RUNTIME, f), os.path.join(od, f[:-2] + ".o")))
 
     errors = 0
