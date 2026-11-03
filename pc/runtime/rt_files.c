@@ -72,8 +72,11 @@ static void canonical(const char *in, char *out, size_t n)
     for (char *p = tmp; *p; p++) if (*p == '/') *p = '\\';
     char *parts[128];
     int np = 0;
-    char *save = tmp + 2;
-    for (char *tok = strtok(save, "\\"); tok; tok = strtok(NULL, "\\")) {
+    /* split in place on backslashes (strtok is not thread-safe: guest threads open files at once) */
+    char *p = tmp + 2;
+    for (char *tok = p; tok; tok = p) {
+        p = strchr(tok, '\\');
+        if (p) *p++ = 0;
         if (!strcmp(tok, ".") || !*tok) continue;
         if (!strcmp(tok, "..")) { if (np) np--; continue; }
         if (np < 128) parts[np++] = tok;

@@ -11,6 +11,12 @@
 #include "x86rt.h"
 #include "x86rt_module.h"
 
+#ifndef _WIN32
+#include <strings.h>
+#define _stricmp strcasecmp
+#define _strnicmp strncasecmp
+#endif
+
 /* --- host layer (rt_host_*.c) --- */
 void *host_reserve(size_t size);
 int host_commit(void *p, size_t size);       /* read/write */

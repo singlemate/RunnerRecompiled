@@ -232,6 +232,7 @@ int host_list_dir(const char *path, void (*fn)(void *u, const char *name), void 
 }
 #endif
 
+#ifdef _WIN32
 /* ---- audio output: waveOut, 16-bit stereo, four blocks of 1024 frames (about 85 ms queued) ---- */
 #include <mmsystem.h>
 
@@ -352,3 +353,4 @@ void *host_foreground_window(void)
     if (fg) GetWindowThreadProcessId(fg, &pid);
     return pid == GetCurrentProcessId() ? fg : NULL;
 }
+#endif

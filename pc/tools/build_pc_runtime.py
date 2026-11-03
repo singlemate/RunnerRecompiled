@@ -62,11 +62,14 @@ def write_module_table(path):
         open(path, "w").write(new)
 
 
-def compile_one(cc, src, obj):
+def compile_one(cc, src, obj, extra=()):
     if os.path.exists(obj) and os.path.getmtime(obj) >= os.path.getmtime(src) and \
             os.path.getmtime(obj) >= os.path.getmtime(os.path.join(RUNTIME, "x86rt.h")):
         return obj, None
-    r = subprocess.run([cc, *CFLAGS, "-I", RUNTIME, "-c", src, "-o", obj], capture_output=True, text=True)
+    flags = list(extra)
+    if os.path.basename(src) == "rt_main.c" and "-fPIC" in flags:
+        flags.append("-Dmain=me_pc_main")  # Android: a library entry the app calls on its thread
+    r = subprocess.run([cc, *CFLAGS, *flags, "-I", RUNTIME, "-c", src, "-o", obj], capture_output=True, text=True)
     return obj, (r.stderr if r.returncode else None)
 
 
@@ -77,11 +80,20 @@ def main():
     ap.add_argument("--regen", action="store_true", help="regenerate the lifted C even if present")
     ap.add_argument("--regen-only", help="comma-separated module tags to regenerate")
     ap.add_argument("--jobs", type=int, default=os.cpu_count() or 8)
+    ap.add_argument("--android", metavar="NDK", help="build libmepc.so for Android ARM64 with this NDK "
+                    "(the lifted C is generated with --toolchain's LLVM as usual)")
     args = ap.parse_args()
     bindir = os.path.join(args.toolchain, "bin")
     cc = os.path.join(bindir, "x86_64-w64-mingw32-clang.exe")
+    extra = ()
     gen_root = os.path.join(args.work, "gen")
     obj_root = os.path.join(args.work, "obj")
+    host_file = "rt_host_win.c"
+    if args.android:
+        cc = os.path.join(args.android, "toolchains", "llvm", "prebuilt", "windows-x86_64", "bin", "clang.exe")
+        extra = ("--target=aarch64-linux-android26", "-fPIC")
+        obj_root = os.path.join(args.work, "obj-android")
+        host_file = "rt_host_android.c"
     t0 = time.time()
 
     regen = set(args.regen_only.split(",")) if args.regen_only else None
@@ -104,12 +116,12 @@ def main():
                 jobs.append((os.path.join(src_dir, f), os.path.join(od, f[:-2] + ".o")))
     od = os.path.join(obj_root, "runtime")
     os.makedirs(od, exist_ok=True)
-    for f in ("rt_core.c", "rt_kernel32.c", "rt_sync.c", "rt_files.c", "rt_user32.c", "rt_d3d9.c", "rt_d3d9_gen.c", "rt_physx_support.c", "rt_dinput.c", "rt_ue3.c", "rt_openal.c", "rt_stubs.c", "rt_host_win.c", "rt_main.c"):
+    for f in ("rt_core.c", "rt_kernel32.c", "rt_sync.c", "rt_files.c", "rt_user32.c", "rt_d3d9.c", "rt_d3d9_gen.c", "rt_physx_support.c", "rt_dinput.c", "rt_ue3.c", "rt_openal.c", "rt_stubs.c", host_file, "rt_main.c"):
         jobs.append((os.path.join(RUNTIME, f), os.path.join(od, f[:-2] + ".o")))
 
     errors = 0
     with cf.ThreadPoolExecutor(args.jobs) as ex:
-        for i, (obj, err) in enumerate(ex.map(lambda j: compile_one(cc, *j), jobs)):
+        for i, (obj, err) in enumerate(ex.map(lambda j: compile_one(cc, *j, extra), jobs)):
             if err:
                 errors += 1
                 print(f"error in {obj}:\n{err[:3000]}")
@@ -118,6 +130,17 @@ def main():
     if errors:
         sys.exit(f"{errors} files failed to compile")
 
+    if args.android:
+        lib = os.path.join(args.work, "bin-android", "libmepc.so")
+        os.makedirs(os.path.dirname(lib), exist_ok=True)
+        rsp = os.path.join(obj_root, "link.rsp")
+        with open(rsp, "w") as fp:
+            for _, obj in jobs:
+                fp.write(obj.replace("\\", "/") + "\n")
+        subprocess.run([cc, "--target=aarch64-linux-android26", "-shared", f"@{rsp}", "-o", lib,
+                        "-Wl,-z,max-page-size=16384", "-llog", "-landroid", "-ldl", "-lm"], check=True)
+        print(f"built {lib} in {time.time() - t0:.0f} s")
+        return
     exe = os.path.join(args.work, "bin", "me_pc.exe")
     os.makedirs(os.path.dirname(exe), exist_ok=True)
     rsp = os.path.join(obj_root, "link.rsp")

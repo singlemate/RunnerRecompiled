@@ -6,6 +6,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 
 uintptr_t x86_mem_base;
 
@@ -17,10 +20,15 @@ void rt_log(const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
+#ifdef __ANDROID__
+    __android_log_vprint(ANDROID_LOG_INFO, "me_pc", fmt, ap);
+#else
     vfprintf(stderr, fmt, ap);
-    va_end(ap);
     fputc('\n', stderr);
-    if (!rt_logfile) rt_logfile = fopen("pc-runtime.log", "w");
+#endif
+    va_end(ap);
+    /* ME_PC_LOG_PATH: the log file (default pc-runtime.log in the working folder) */
+    if (!rt_logfile) rt_logfile = fopen(getenv("ME_PC_LOG_PATH") ? getenv("ME_PC_LOG_PATH") : "pc-runtime.log", "w");
     if (rt_logfile) {
         va_start(ap, fmt);
         vfprintf(rt_logfile, fmt, ap);
