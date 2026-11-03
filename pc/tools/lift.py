@@ -211,38 +211,63 @@ class FnLifter:
                 self.blockset.add(a)
                 work.append(a)
 
-        while work:
-            va = work.pop()
-            while va not in insns:
-                n, txt = L.dis.decode(va)
-                if not n:
-                    raise Unsupported(f"decode {va:#x}")
-                kind, tgt = X.branch(L.code, va - L.tva, va, n)
-                insns[va] = (n, txt, kind, tgt)
-                order.append(va)
-                nxt = va + n
-                if kind == X.K_JCC:
-                    add_block(tgt)
-                    add_block(nxt)
-                    break
-                if kind == X.K_JMP:
-                    add_block(tgt)
-                    break
-                if kind == X.K_JMP_TABLE:
-                    for t in L.table(tgt):
-                        add_block(t)
-                    break
-                if kind in (X.K_JMP_IND, X.K_JMP_IAT, X.K_RET, X.K_STOP):
-                    break
-                if kind == X.K_CALL_IAT and tgt in L.noreturn_slots:
-                    break
-                if foreign(nxt):
-                    break
-                va = nxt
+        def descend():
+            while work:
+                va = work.pop()
+                while va not in insns:
+                    n, txt = L.dis.decode(va)
+                    if not n:
+                        raise Unsupported(f"decode {va:#x}")
+                    kind, tgt = X.branch(L.code, va - L.tva, va, n)
+                    insns[va] = (n, txt, kind, tgt)
+                    order.append(va)
+                    nxt = va + n
+                    if kind == X.K_JCC:
+                        add_block(tgt)
+                        add_block(nxt)
+                        break
+                    if kind == X.K_JMP:
+                        add_block(tgt)
+                        break
+                    if kind == X.K_JMP_TABLE:
+                        for t in L.table(tgt):
+                            add_block(t)
+                        break
+                    if kind in (X.K_JMP_IND, X.K_JMP_IAT, X.K_RET, X.K_STOP):
+                        break
+                    if kind == X.K_CALL_IAT and tgt in L.noreturn_slots:
+                        break
+                    if foreign(nxt):
+                        break
+                    va = nxt
+        descend()
+        # EH resume points (eh.py): blocks of their own, unless one falls inside an instruction.
+        resume = []
+        for t in L.resume.get(self.entry, ()):
+            if not in_text(t) or foreign(t):
+                self.unsupported["eh resume point outside the function"] += 1
+                continue
+            if t not in insns and any(a < t < a + insns[a][0] for a in range(t - 15, t) if a in insns):
+                self.unsupported["eh resume point inside an instruction"] += 1
+                continue
+            resume.append(t)
+            add_block(t)
+        descend()
+        if resume and any(a < t < a + insns[a][0] for t in insns for a in range(t - 15, t) if a in insns):
+            raise Unsupported("eh resume point decodes overlapping code")
         order.sort()
         self.e("X86_LOCALS;")
         self.e("X86Flags F = {0};")
         self.e("(void)F;")
+        if resume:
+            # The EH runtime jumps here with ebp/esp of this frame (x86_resume_jump in rt_core.c).
+            ts = ", ".join(f"0x{t:X}u" for t in resume)
+            cases = " ".join(f"case 0x{t:X}u: goto L_{t:08X};" for t in resume)
+            self.e(f"static const uint32_t resume_targets[] = {{{ts}}};")
+            self.e("X86Resume rs_;")
+            self.e(f"x86_resume_push(ctx, &rs_, resume_targets, {len(resume)});")
+            self.e(f"if (setjmp(rs_.jb)) {{ {self.reload()} switch (rs_.target) {{ {cases} }} "
+                   f"x86_trap(ctx, 0x{self.entry:X}u, \"bad resume target\"); }}")
         if order[0] != self.entry:
             self.e(f"goto L_{self.entry:08X};")  # code below the entry (shared tails) comes first in C
         for i, va in enumerate(order):
@@ -264,6 +289,8 @@ class FnLifter:
             if not terminal and (i + 1 == len(order) or order[i + 1] != nxt):
                 self.goto_or_tail(nxt)
         body = "\n".join(self.lines)
+        if resume:
+            body = body.replace(" return;", " { x86_resume_pop(ctx, &rs_); return; }")
         return f"void f_{self.entry:08X}(X86Ctx *ctx)\n{{\n{body}\n}}\n"
 
     def insn(self, va, n, txt, kind, tgt):
@@ -458,6 +485,7 @@ class FnLifter:
                 0xE0: "ST(0) = -ST(0);",
                 0xE1: "ST(0) = __builtin_fabs(ST(0));",
                 0xE4: "x87_compare(ctx, ST(0), 0.0);",
+                0xE5: "x87_examine(ctx);",
                 0xF0: "ST(0) = __builtin_exp2(ST(0)) - 1.0;",
                 0xF1: "ST(1) = ST(1) * __builtin_log2(ST(0)); x87_pop(ctx);",
                 0xF2: "x87_trig(ctx, 3);",
@@ -947,11 +975,16 @@ class FnLifter:
             cf = f"(int)(((int32_t)({STYPE[bits]})a >> (n - 1 < {bits} ? n - 1 : {bits} - 1)) & 1)"
             of = "0"
         elif mn in ("rol", "ror"):
-            if bits != 32:
-                raise Unsupported(f"{mn}{bits}")
-            r = "(a << n) | (a >> ((32 - n) & 31))" if mn == "rol" else "(a >> n) | (a << ((32 - n) & 31))"
-            cf = "(int)(r & 1u)" if mn == "rol" else "(int)(r >> 31)"
-            of = "(int)((r >> 31) ^ (r & 1u))" if mn == "rol" else "(int)(((r >> 31) ^ (r >> 30)) & 1u)"
+            # The count (masked to 5 bits) rotates modulo the operand size.
+            m = f"(n % {bits}u)"
+            if mn == "rol":
+                r = f"({m} ? ((a << {m}) | (a >> ({bits}u - {m}))) & {MASK[bits]} : a)"
+                cf = "(int)(r & 1u)"
+                of = f"(int)(((r >> {bits - 1}) ^ r) & 1u)"
+            else:
+                r = f"({m} ? ((a >> {m}) | (a << ({bits}u - {m}))) & {MASK[bits]} : a)"
+                cf = f"(int)((r >> {bits - 1}) & 1u)"
+                of = f"(int)(((r >> {bits - 1}) ^ (r >> {bits - 2})) & 1u)"
         else:
             raise Unsupported(f"mnemonic {mn}")
         o = ops[0]
@@ -1004,18 +1037,25 @@ class FnLifter:
 
     def i_imul(self, ops, p):
         if len(ops) == 1:
-            if ops[0].bits != 32:
-                raise Unsupported("imul8/16")
-            self.e(f"{{ int64_t r = (int64_t)(int32_t)eax * (int32_t){self.rd(ops[0], 32)}; eax = (uint32_t)r; "
-                   "edx = (uint32_t)((uint64_t)r >> 32); int ov = r != (int64_t)(int32_t)r; x86_expl(&F, 32, eax, ov, ov); }")
+            bits = ops[0].bits
+            if bits == 32:
+                self.e(f"{{ int64_t r = (int64_t)(int32_t)eax * (int32_t){self.rd(ops[0], 32)}; eax = (uint32_t)r; "
+                       "edx = (uint32_t)((uint64_t)r >> 32); int ov = r != (int64_t)(int32_t)r; x86_expl(&F, 32, eax, ov, ov); }")
+            elif bits == 16:  # dx:ax = ax * src
+                self.e(f"{{ int32_t r = (int32_t)(int16_t)eax * (int16_t){self.rd(ops[0], 16)}; "
+                       "eax = (eax & 0xFFFF0000u) | ((uint32_t)r & 0xFFFFu); edx = (edx & 0xFFFF0000u) | (((uint32_t)r >> 16) & 0xFFFFu); "
+                       "int ov = r != (int32_t)(int16_t)r; x86_expl(&F, 16, (uint32_t)r, ov, ov); }")
+            else:  # ax = al * src
+                self.e(f"{{ int32_t r = (int32_t)(int8_t)eax * (int8_t){self.rd(ops[0], 8)}; "
+                       "eax = (eax & 0xFFFF0000u) | ((uint32_t)r & 0xFFFFu); int ov = r != (int32_t)(int8_t)r; "
+                       "x86_expl(&F, 8, (uint32_t)r, ov, ov); }")
             return
         bits = self.size(ops[0])
-        if bits != 32:
-            raise Unsupported("imul16")
-        a = self.rd(ops[0], 32) if len(ops) == 2 else self.rd(ops[1], 32)
-        b = self.rd(ops[1], 32) if len(ops) == 2 else self.rd(ops[2], 32)
-        self.e(f"{{ int64_t r = (int64_t)(int32_t){a} * (int32_t){b}; int ov = r != (int64_t)(int32_t)r; "
-               f"{self.wr(ops[0], 32, '(uint32_t)r')} x86_expl(&F, 32, (uint32_t)r, ov, ov); }}")
+        st = STYPE[bits]
+        a = self.rd(ops[0], bits) if len(ops) == 2 else self.rd(ops[1], bits)
+        b = self.rd(ops[1], bits) if len(ops) == 2 else self.rd(ops[2], bits)
+        self.e(f"{{ int64_t r = (int64_t)({st}){a} * ({st}){b}; int ov = r != (int64_t)({st})r; "
+               f"{self.wr(ops[0], bits, '(uint32_t)r')} x86_expl(&F, {bits}, (uint32_t)r, ov, ov); }}")
 
     def i_mul(self, ops, p):
         bits = self.size(ops[0])
@@ -1025,8 +1065,9 @@ class FnLifter:
         elif bits == 8:
             self.e(f"{{ uint32_t r = (uint32_t)(uint8_t)eax * {self.rd(ops[0], 8)}; eax = (eax & 0xFFFF0000u) | (r & 0xFFFFu); "
                    "int ov = (r >> 8) != 0; x86_expl(&F, 8, r, ov, ov); }")
-        else:
-            raise Unsupported("mul16")
+        else:  # dx:ax = ax * src
+            self.e(f"{{ uint32_t r = (uint32_t)(uint16_t)eax * {self.rd(ops[0], 16)}; eax = (eax & 0xFFFF0000u) | (r & 0xFFFFu); "
+                   "edx = (edx & 0xFFFF0000u) | (r >> 16); int ov = (r >> 16) != 0; x86_expl(&F, 16, r, ov, ov); }")
 
     def _div(self, ops, signed):
         bits = self.size(ops[0])
@@ -1041,14 +1082,26 @@ class FnLifter:
         elif bits == 8 and not signed:
             self.e(f"{{ uint32_t d = {d}; uint32_t n = (uint16_t)eax; if (d == 0) x86_trap(ctx, 0u, \"div by zero\"); "
                    "eax = (eax & 0xFFFF0000u) | ((n % d) << 8) | (n / d); }")
+        elif bits == 8:
+            self.e(f"{{ int32_t d = (int8_t){d}; int32_t n = (int16_t)eax; if (d == 0) x86_trap(ctx, 0u, \"idiv by zero\"); "
+                   "eax = (eax & 0xFFFF0000u) | (((uint32_t)(n % d) & 0xFFu) << 8) | ((uint32_t)(n / d) & 0xFFu); }")
+        elif not signed:  # 16-bit: dx:ax / src
+            self.e(f"{{ uint32_t d = {d}; uint32_t n = ((edx & 0xFFFFu) << 16) | (eax & 0xFFFFu); "
+                   "if (d == 0) x86_trap(ctx, 0u, \"div by zero\"); "
+                   "eax = (eax & 0xFFFF0000u) | ((n / d) & 0xFFFFu); edx = (edx & 0xFFFF0000u) | ((n % d) & 0xFFFFu); }")
         else:
-            raise Unsupported(f"div{bits}")
+            self.e(f"{{ int32_t d = (int16_t){d}; int32_t n = (int32_t)(((edx & 0xFFFFu) << 16) | (eax & 0xFFFFu)); "
+                   "if (d == 0) x86_trap(ctx, 0u, \"idiv by zero\"); "
+                   "eax = (eax & 0xFFFF0000u) | ((uint32_t)(n / d) & 0xFFFFu); edx = (edx & 0xFFFF0000u) | ((uint32_t)(n % d) & 0xFFFFu); }")
 
     def i_div(self, ops, p):
         self._div(ops, False)
 
     def i_idiv(self, ops, p):
         self._div(ops, True)
+
+    def i_xlatb(self, ops, p):
+        self.e("eax = (eax & 0xFFFFFF00u) | ld8(ebx + (eax & 0xFFu));")
 
     def i_cdq(self, ops, p):
         self.e("edx = (uint32_t)((int32_t)eax >> 31);")
@@ -1216,6 +1269,16 @@ class Lifter:
         # Jump tables: re-read from relocations (same rule as the catalog).
         self._relocs = set(pe.relocations())
         self.tables = {}
+        import eh
+        self.resume, self.eh_stats = eh.continuations(self)
+        # A continuation or __except block is not a function, although the catalog may have seeded
+        # one from the relocated scope table: the EH runtime jumps there inside its parent's frame.
+        for ts in self.resume.values():
+            for t in ts:
+                if t in self.functions:
+                    del self.functions[t]
+                    self.entries.discard(t)
+                    self.eh_stats["resume_points_removed_from_functions"] += 1
 
     def table(self, va):
         if va not in self.tables:

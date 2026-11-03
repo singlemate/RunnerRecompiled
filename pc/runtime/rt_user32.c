@@ -21,6 +21,10 @@ int host_peek_message(void **hwnd, uint32_t *msg, uint32_t *wp, uint32_t *lp, ui
 void host_translate_last(void);
 uint32_t host_def_window_proc(void *hwnd, uint32_t msg, uint32_t wp, uint32_t lp);
 void host_window_show(void *hwnd, int show);
+void host_dispatch_last(void);
+int host_post_message(void *hwnd, uint32_t msg, uint32_t wp, uint32_t lp);
+void host_post_quit(int code);
+void host_validate(void *hwnd);
 
 static WinClass classes[64];
 static int nclasses;
@@ -258,7 +262,12 @@ static int next_message(uint32_t m, int remove)
     int32_t x, y;
     while (host_peek_message(&hh, &msg, &wp, &lp, &t, &x, &y, remove)) {
         uint32_t g = rt_user32_guest_hwnd(hh);
-        if (!g && hh) { if (!remove) host_peek_message(&hh, &msg, &wp, &lp, &t, &x, &y, 1); continue; }
+        if (!g && hh) {
+            if (!remove) host_peek_message(&hh, &msg, &wp, &lp, &t, &x, &y, 1);
+            host_dispatch_last();
+            continue;
+        }
+        if (msg == 0x000F && hh) host_validate(hh); /* WM_PAINT: deliver once, then validated */
         st32(m, g); st32(m + 4, msg); st32(m + 8, wp); st32(m + 12, lp);
         st32(m + 16, t); st32(m + 20, (uint32_t)x); st32(m + 24, (uint32_t)y);
         return 1;
@@ -281,7 +290,22 @@ static void u_DispatchMessageW(X86Ctx *ctx)
 }
 
 static void u_SendMessageW(X86Ctx *ctx) { RET(send(ctx, ARG(0), ARG(1), ARG(2), ARG(3))); }
-static void u_PostMessageW(X86Ctx *ctx) { RET(1); }
+static void u_PostMessageW(X86Ctx *ctx)
+{
+    void *hh = ARG(0) ? rt_user32_host_hwnd(ARG(0)) : NULL;
+    if (ARG(0) && !hh) { RET(0); return; } /* not a window of ours */
+    RET(host_post_message(hh, ARG(1), ARG(2), ARG(3)));
+}
+
+/* Thread messages: only to the calling thread (guest thread ids are not host ids). */
+static void u_PostThreadMessageW(X86Ctx *ctx)
+{
+    if (ARG(0) == rt_thread_self()->id) { RET(host_post_message(NULL, ARG(1), ARG(2), ARG(3))); return; }
+    rt_log("PostThreadMessageW(thread %#x, msg %#x) to another thread: dropped", ARG(0), ARG(1));
+    RET(1);
+}
+
+static void u_PostQuitMessage(X86Ctx *ctx) { host_post_quit((int)ARG(0)); }
 static void u_TranslateMessage(X86Ctx *ctx) { host_translate_last(); RET(1); }
 
 /* Only messages whose parameters are plain values go to the host's default handling. */
@@ -417,7 +441,34 @@ static void p_CallNtPowerInformation(X86Ctx *ctx)
     RET(0);
 }
 
+/* WINDOWPLACEMENT: length, flags, showCmd, ptMin, ptMax, rcNormalPosition (44 bytes). */
+static void u_GetWindowPlacement(X86Ctx *ctx)
+{
+    Win *w = win(ARG(0));
+    uint32_t p = ARG(1);
+    if (!w) { RET(0); return; }
+    memset(rt_ptr(p + 4), 0, 40);
+    st32(p + 8, w->visible ? 1 : 0); /* SW_SHOWNORMAL / SW_HIDE */
+    st32(p + 28, w->x); st32(p + 32, w->y); st32(p + 36, w->x + w->w); st32(p + 40, w->y + w->h);
+    RET(1);
+}
+
+static void u_SetWindowPlacement(X86Ctx *ctx)
+{
+    Win *w = win(ARG(0));
+    uint32_t p = ARG(1);
+    if (w) { w->x = ld32(p + 28); w->y = ld32(p + 32); w->w = ld32(p + 36) - w->x; w->h = ld32(p + 40) - w->y; }
+    RET(w != NULL);
+}
+
 static const HleDef user32[] = {
+    {"user32.dll", "GetWindowPlacement", u_GetWindowPlacement, 2},
+    {"user32.dll", "SetWindowPlacement", u_SetWindowPlacement, 2},
+    {"user32.dll", "OpenClipboard", u_Zero, 1},
+    {"user32.dll", "CloseClipboard", u_True, 0},
+    {"user32.dll", "EmptyClipboard", u_Zero, 0},
+    {"user32.dll", "GetClipboardData", u_Zero, 1},
+    {"user32.dll", "SetClipboardData", u_Zero, 2},
     {"powrprof.dll", "CallNtPowerInformation", p_CallNtPowerInformation, 5},
     {"oleaut32.dll", "#2", o_SysAllocString, 1},
     {"oleaut32.dll", "#6", o_SysFreeString, 1},
@@ -469,8 +520,12 @@ static const HleDef user32[] = {
     {"user32.dll", "DispatchMessageW", u_DispatchMessageW, 1},
     {"user32.dll", "SendMessageW", u_SendMessageW, 4},
     {"user32.dll", "PostMessageW", u_PostMessageW, 4},
-    {"user32.dll", "PostThreadMessageW", u_True, 4},
-    {"user32.dll", "PostQuitMessage", u_Zero, 1},
+    {"user32.dll", "PostThreadMessageW", u_PostThreadMessageW, 4},
+    {"user32.dll", "PostQuitMessage", u_PostQuitMessage, 1},
+    /* IMM32: no input method editor; the window has no input context. */
+    {"imm32.dll", "ImmGetContext", u_Zero, 1}, {"imm32.dll", "ImmReleaseContext", u_True, 2},
+    {"imm32.dll", "ImmAssociateContext", u_Zero, 2}, {"imm32.dll", "ImmCreateContext", u_Zero, 0},
+    {"imm32.dll", "ImmDestroyContext", u_True, 1}, {"imm32.dll", "ImmGetCompositionStringW", u_Zero, 4},
     {"user32.dll", "DefWindowProcW", u_DefWindowProc, 4},
     {"user32.dll", "DefWindowProcA", u_DefWindowProc, 4},
     {"user32.dll", "LoadCursorW", u_FakeHandle, 2},
@@ -501,6 +556,26 @@ static const HleDef user32[] = {
     {"user32.dll", "GetWindowThreadProcessId", u_GetWindowThreadProcessId, 2},
     {"user32.dll", "GetTopWindow", u_Zero, 1},
     {"gdi32.dll", "GetDeviceCaps", g_GetDeviceCaps, 2},
+    /* GDI drawing (the start-up splash): handles exist, nothing is drawn. */
+    {"gdi32.dll", "GetStockObject", u_FakeHandle, 1},
+    {"gdi32.dll", "SelectObject", u_FakeHandle, 2},
+    {"gdi32.dll", "DeleteObject", u_True, 1},
+    {"gdi32.dll", "CreateFontW", u_FakeHandle, 14},
+    {"gdi32.dll", "CreateCompatibleDC", u_FakeHandle, 1},
+    {"gdi32.dll", "CreateSolidBrush", u_FakeHandle, 1},
+    {"gdi32.dll", "CreateBitmap", u_FakeHandle, 5},
+    {"gdi32.dll", "CreateDIBSection", u_Zero, 6},
+    {"gdi32.dll", "SetTextColor", u_Zero, 2},
+    {"gdi32.dll", "SetBkColor", u_Zero, 2},
+    {"gdi32.dll", "TextOutW", u_True, 5},
+    {"gdi32.dll", "GetPixel", u_Zero, 3},
+    {"gdi32.dll", "GetObjectW", u_Zero, 3},
+    {"user32.dll", "FillRect", u_True, 3},
+    {"user32.dll", "DrawStateW", u_True, 10},
+    {"user32.dll", "BeginPaint", u_FakeHandle, 2},
+    {"user32.dll", "EndPaint", u_True, 2},
+    {"user32.dll", "SetDlgItemTextW", u_True, 3},
+    {"user32.dll", "GetDlgItem", u_Zero, 2},
     {"gdi32.dll", "CreateDCA", u_FakeHandle, 4},
     {"gdi32.dll", "DeleteDC", u_True, 1},
     {"gdi32.dll", "ExtEscape", u_Zero, 6},

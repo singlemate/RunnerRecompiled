@@ -30,6 +30,36 @@ void rt_log(const char *fmt, ...)
     }
 }
 
+/* Heuristic guest backtrace: words on the guest stack that point into a module's image. */
+static void guest_backtrace(void)
+{
+    extern RtThread *rt_thread_self(void);
+    RtThread *t = rt_thread_self();
+    if (!t) return;
+    uint32_t sp = t->ctx.esp, top = t->stack_base + t->stack_size, shown = 0;
+    char line[1024];
+    size_t o = 0;
+    for (uint32_t p = sp; p + 4 <= top && shown < 40; p += 4) {
+        uint32_t v = ld32(p);
+        RtModule *m = rt_module_at(v);
+        if (m && v - m->base > 0x1000) {
+            o += (size_t)snprintf(line + o, sizeof line - o, " %#x", v);
+            if (++shown % 10 == 0) { rt_log("  guest stack:%s", line); o = 0; }
+        }
+    }
+    if (o) rt_log("  guest stack:%s", line);
+    /* Frame-pointer chain: exact where functions keep an EBP frame (most of the game's do). */
+    o = 0; shown = 0;
+    for (uint32_t fp = t->ctx.ebp; fp >= sp && (uint64_t)fp + 8 <= top && shown < 24; fp = ld32(fp)) {
+        o += (size_t)snprintf(line + o, sizeof line - o, " %#x", ld32(fp + 4));
+        shown++;
+        if (ld32(fp) <= fp) break;
+    }
+    if (o) rt_log("  ebp chain:%s", line);
+}
+
+static void rt_dump_hle_ring(void);
+
 void rt_fatal(const char *fmt, ...)
 {
     char buf[1024];
@@ -38,6 +68,8 @@ void rt_fatal(const char *fmt, ...)
     vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
     rt_log("FATAL: %s", buf);
+    guest_backtrace();
+    rt_dump_hle_ring();
     exit(3);
 }
 
@@ -286,7 +318,7 @@ static X86Fn fn_find(uint32_t addr)
     return NULL;
 }
 
-typedef struct { char dll[64], name[512]; HleFn fn; uint8_t nargs, stub, called; } Thunk;
+typedef struct { char dll[64], name[512]; HleFn fn; uint8_t nargs, stub, called; uint32_t calls; } Thunk;
 int rt_stub_for(const char *dll, const char *name, HleFn *fn, uint8_t *nargs, int *is_data);
 static Thunk *thunks;
 static uint32_t nthunks, cap_thunks;
@@ -296,10 +328,18 @@ static HostMutex *thunk_lock;
 
 volatile uint32_t rt_last_dispatch, rt_last_dispatch_ret;
 
+/* Ring of the last HLE calls (thunk index, esp before the call, return address), for fatal reports. */
+static struct { uint32_t thunk, esp, ret, eax_after; } hle_ring[64];
+static volatile uint32_t hle_ring_pos;
+
+static void resume_jump(RtThread *t, X86Ctx *ctx, uint32_t target);
+
 void x86_dispatch(X86Ctx *ctx, uint32_t target)
 {
     rt_last_dispatch = target;
     rt_last_dispatch_ret = ld32(ctx->esp);
+    RtThread *self = rt_thread_self();
+    if (self) { self->last_target = target; self->last_ret = ld32(ctx->esp); }
     if (target >= RT_THUNK_BASE && target < RT_THUNK_BASE + 0x01000000u) {
         uint32_t i = (target - RT_THUNK_BASE) / RT_THUNK_STEP;
         if (i >= nthunks) rt_fatal("call to unknown thunk %#x", target);
@@ -310,13 +350,32 @@ void x86_dispatch(X86Ctx *ctx, uint32_t target)
             t->called = 1;
             rt_log("stub %s!%s (return address %#x)", t->dll, t->name, ld32(ctx->esp));
         }
+        uint32_t slot = __atomic_fetch_add(&hle_ring_pos, 1, __ATOMIC_RELAXED) & 63;
+        hle_ring[slot].thunk = i;
+        hle_ring[slot].esp = ctx->esp;
+        hle_ring[slot].ret = ld32(ctx->esp);
+        if (self) self->in_hle = i + 1;
+        __atomic_fetch_add(&t->calls, 1, __ATOMIC_RELAXED);
         t->fn(ctx);
+        if (self) self->in_hle = 0;
+        hle_ring[slot].eax_after = ctx->eax;
         ctx->esp += 4 + 4u * t->nargs; /* stdcall: the callee pops the return address and its arguments */
         return;
     }
     X86Fn fn = fn_find(target);
+    if (!fn && self) resume_jump(self, ctx, target);
     if (!fn) rt_fatal("no lifted function at %#x (return address %#x)", target, ld32(ctx->esp));
     fn(ctx);
+}
+
+static void rt_dump_hle_ring(void)
+{
+    uint32_t pos = hle_ring_pos;
+    for (uint32_t k = pos > 64 ? pos - 64 : 0; k < pos; k++) {
+        uint32_t sl = k & 63;
+        rt_log("  hle %s!%s esp %#x ret %#x -> %#x", thunks[hle_ring[sl].thunk].dll, thunks[hle_ring[sl].thunk].name,
+               hle_ring[sl].esp, hle_ring[sl].ret, hle_ring[sl].eax_after);
+    }
 }
 
 void rt_hle_register(const HleDef *defs, size_t n)
@@ -375,6 +434,12 @@ uint32_t rt_hle_thunk(const char *dll, const char *name)
 }
 
 const char *rt_str(uint32_t a) { return a ? (const char *)rt_ptr(a) : NULL; }
+
+const char *rt_thunk_name(uint32_t t)
+{
+    uint32_t i = (t - RT_THUNK_BASE) / RT_THUNK_STEP;
+    return t >= RT_THUNK_BASE && i < nthunks ? thunks[i].name : "";
+}
 
 int rt_thunk_implemented(uint32_t t)
 {
@@ -476,6 +541,26 @@ RtModule *rt_load_module(const char *path, const char *name, const X86FnEntry *f
     return m;
 }
 
+void rt_module_init(RtModule *m, X86Ctx *ctx)
+{
+    if (!m || m->initialized || !m->is_dll || !m->entry) return;
+    m->initialized = 1;
+    uint32_t args[3] = {m->base, 1, 0};
+    uint32_t r = rt_call(ctx, m->entry, 3, args);
+    rt_log("%s DllMain(PROCESS_ATTACH) = %u", m->name, r);
+}
+
+void rt_module_init_tree(RtModule *m, X86Ctx *ctx)
+{
+    if (!m || m->initialized) return;
+    m->initialized = -1; /* visiting: breaks import cycles */
+    for (int i = 0; i < m->ndeps; i++)
+        if (!m->deps[i]->initialized) rt_module_init_tree(m->deps[i], ctx);
+    m->initialized = 0;
+    if (m->is_dll) rt_module_init(m, ctx);
+    else m->initialized = 1;
+}
+
 void rt_resolve_imports(RtModule *m)
 {
     uint32_t pe = ld32(m->base + 0x3C);
@@ -486,6 +571,11 @@ void rt_resolve_imports(RtModule *m)
         const char *dll = rt_str(m->base + ld32(d + 12));
         uint32_t lookup = ld32(d) ? ld32(d) : ld32(d + 16), iat = ld32(d + 16);
         RtModule *target = rt_find_module(dll);
+        if (target && target != m && m->ndeps < 16) {
+            int known = 0;
+            for (int k = 0; k < m->ndeps; k++) known |= m->deps[k] == target;
+            if (!known) m->deps[m->ndeps++] = target;
+        }
         for (uint32_t i = 0;; i++) {
             uint32_t ent = ld32(m->base + lookup + 4 * i);
             if (!ent) break;
@@ -521,6 +611,97 @@ static HostMutex *tls_lock;
 
 RtThread *rt_thread_self(void) { return self_thread; }
 
+/* ---- EH resume points (x86rt.h) ---- */
+void x86_resume_push(X86Ctx *ctx, X86Resume *r, const uint32_t *targets, uint32_t n)
+{
+    RtThread *t = self_thread;
+    r->targets = targets;
+    r->ntargets = n;
+    r->entry_esp = ctx->esp;
+    r->target = 0;
+    r->prev = t->resume_top;
+    t->resume_top = r;
+}
+
+void x86_resume_pop(X86Ctx *ctx, X86Resume *r)
+{
+    (void)ctx;
+    RtThread *t = self_thread;
+    if (t->resume_top == r) t->resume_top = r->prev;
+}
+
+/* An indirect jump to a non-entry: the EH runtime resuming a frame at a catch continuation or an
+   __except block, with that frame's ebp in ctx. The innermost live frame that owns the target and
+   lies above ebp is the one (deeper invocations of the same function have entry esp <= ebp). */
+static void resume_jump(RtThread *t, X86Ctx *ctx, uint32_t target)
+{
+    if (getenv("ME_PC_LOG_EH")) {
+        int depth = 0;
+        for (X86Resume *r = t->resume_top; r; r = r->prev) depth++;
+        rt_log("EH resume %#x: ebp %#x esp %#x, %d live frames", target, ctx->ebp, ctx->esp, depth);
+        for (X86Resume *r = t->resume_top; r; r = r->prev) rt_log("  frame entry esp %#x first target %#x", r->entry_esp, r->targets[0]);
+    }
+    for (X86Resume *r = t->resume_top; r; r = r->prev) {
+        if (r->entry_esp <= ctx->ebp) continue;
+        for (uint32_t i = 0; i < r->ntargets; i++)
+            if (r->targets[i] == target) {
+                t->resume_top = r;
+                t->in_hle = 0;
+                r->target = target;
+                longjmp(r->jb, 1);
+            }
+    }
+}
+
+static RtThread *all_threads[64];
+static int nall_threads;
+
+static void register_thread(RtThread *t)
+{
+    if (nall_threads < 64) all_threads[nall_threads++] = t;
+}
+
+/* ME_PC_STALL_DUMP=1: every 10 s, what each guest thread is doing. */
+static void stall_watch(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        host_sleep_ms(10000);
+        for (int i = 0; i < nall_threads; i++) {
+            RtThread *t = all_threads[i];
+            uint32_t h = t->in_hle;
+            rt_log("watch: thread %#x last dispatch %#x (return %#x)%s%s", t->id, t->last_target, t->last_ret,
+                   h ? " in HLE " : "", h ? thunks[h - 1].name : "");
+        }
+        /* The busiest HLE functions of the last interval (Present, Sleep, ... tell the loop). */
+        static uint32_t *prev;
+        if (!prev) prev = calloc(65536, sizeof *prev);
+        uint32_t top[8] = {0}, topn[8] = {0};
+        for (uint32_t k = 0; k < nthunks && k < 65536; k++) {
+            uint32_t d = thunks[k].calls - prev[k];
+            prev[k] = thunks[k].calls;
+            for (int j = 0; j < 8; j++)
+                if (d > topn[j]) {
+                    memmove(top + j + 1, top + j, (7 - j) * sizeof *top); memmove(topn + j + 1, topn + j, (7 - j) * sizeof *topn);
+                    top[j] = k; topn[j] = d; break;
+                }
+        }
+        char line[1024]; size_t o = 0;
+        for (int j = 0; j < 8 && topn[j]; j++) o += (size_t)snprintf(line + o, sizeof line - o, " %s=%u", thunks[top[j]].name, topn[j]);
+        rt_log("watch: busiest HLE in 10 s:%s", o ? line : " none");
+        o = 0;
+        for (uint32_t k = 0; k < nthunks && k < 65536; k++)
+            if (strstr(thunks[k].name, "::Present") || strstr(thunks[k].name, "::EndScene"))
+                o += (size_t)snprintf(line + o, sizeof line - o, " %s=%u", thunks[k].name, thunks[k].calls);
+        if (o) rt_log("watch: frames so far:%s", line);
+    }
+}
+
+void rt_start_stall_watch(void)
+{
+    if (getenv("ME_PC_STALL_DUMP")) host_thread_start(stall_watch, NULL);
+}
+
 uint32_t rt_peb(void) { return peb_addr; }
 
 static void thread_setup(RtThread *t, uint32_t stack_size)
@@ -542,6 +723,7 @@ static void thread_setup(RtThread *t, uint32_t stack_size)
     x87_init(&t->ctx);
     t->ctx.mxcsr = 0x1F80;
     self_thread = t;
+    register_thread(t);
 }
 
 RtThread *rt_thread_new(uint32_t stack_size)

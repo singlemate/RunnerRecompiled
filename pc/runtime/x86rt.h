@@ -8,6 +8,7 @@
 #define X86RT_H
 
 #include <stdint.h>
+#include <setjmp.h>
 #include <string.h>
 
 #ifndef X86_MEM_BASE
@@ -82,6 +83,21 @@ static inline double x87_indefinite(void)
     double v;
     memcpy(&v, &u, 8);
     return v;
+}
+
+/* fxam: class of st(0) in C3 C2 C0, sign in C1. Values are kept as double, and every nonzero
+   finite double is a normal number in the x87's extended format. */
+static inline void x87_examine(X86Ctx *c)
+{
+    double v = c->st[c->ftop];
+    uint32_t cc;
+    if (!((c->ftag >> c->ftop) & 1)) cc = 0x4100u;          /* empty: C3, C0 */
+    else if (__builtin_isnan(v)) cc = 0x0100u;               /* NaN: C0 */
+    else if (__builtin_isinf(v)) cc = 0x0500u;               /* infinity: C2, C0 */
+    else if (v == 0.0) cc = 0x4000u;                         /* zero: C3 */
+    else cc = 0x0400u;                                       /* normal: C2 */
+    if (__builtin_signbit(v)) cc |= 0x0200u;                 /* C1: sign */
+    c->fsw = (c->fsw & ~0x4700u) | cc;
 }
 
 static inline void x87_pop(X86Ctx *c)
@@ -257,6 +273,19 @@ void x86_dispatch(X86Ctx *ctx, uint32_t target);      /* indirect call/jmp: gues
 void x86_trap(X86Ctx *ctx, uint32_t addr, const char *why) __attribute__((noreturn));
 /* cpuid: the runtime reports the processor the guest sees (leaf in *eax, subleaf in *ecx). */
 void x86_cpuid(X86Ctx *ctx, uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx);
+
+/* EH resume points. A function with catch/__except continuations (tools/eh.py) registers its
+   host frame on entry; when the guest EH runtime jumps to one of them (an indirect jump to a
+   non-entry), the runtime longjmps back into this frame with the guest's new ebp/esp in ctx.
+   Every return of such a function pops the record. */
+typedef struct X86Resume {
+    jmp_buf jb;                   /* setjmp: __builtin_setjmp does not restore the frame on Win64 clang */
+    struct X86Resume *prev;
+    const uint32_t *targets;
+    uint32_t ntargets, entry_esp, target;
+} X86Resume;
+void x86_resume_push(X86Ctx *ctx, X86Resume *r, const uint32_t *targets, uint32_t n);
+void x86_resume_pop(X86Ctx *ctx, X86Resume *r);
 
 /* Lazy flags. Every flag-setting instruction stores its kind, operands and result; a condition
    is computed only where it is read. The kind is a constant in the generated code, so the

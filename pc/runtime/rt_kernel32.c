@@ -249,22 +249,32 @@ static void k_GetModuleHandleW(X86Ctx *ctx)
     RET(h);
 }
 
-static void k_LoadLibraryA(X86Ctx *ctx)
+/* A lifted DLL runs its DllMain on the first load, as on Windows. */
+static uint32_t load_library(X86Ctx *ctx, const char *name)
 {
-    const char *name = rt_str(ARG(0));
     uint32_t h = module_handle(name);
-    if (!h) { rt_log("LoadLibraryA(%s): not available", name); set_last_error(126); }
-    RET(h);
+    if (!h) { rt_log("LoadLibrary(%s): not available", name); set_last_error(126); return 0; }
+    RtModule *m = rt_module_at(h);
+    if (m && !m->initialized) {
+        X86Ctx saved = *ctx;
+        rt_module_init(m, ctx);
+        uint32_t esp = saved.esp;
+        *ctx = saved;
+        ctx->esp = esp;
+    }
+    return h;
 }
+
+static void k_LoadLibraryA(X86Ctx *ctx) { RET(load_library(ctx, rt_str(ARG(0)))); }
 
 static void k_LoadLibraryW(X86Ctx *ctx)
 {
     char name[260];
     wide_to_ascii(ARG(0), name, sizeof name);
-    uint32_t h = module_handle(name);
-    if (!h) { rt_log("LoadLibraryW(%s): not available", name); set_last_error(126); }
-    RET(h);
+    RET(load_library(ctx, name));
 }
+
+static void k_LoadLibraryExA(X86Ctx *ctx) { RET(load_library(ctx, rt_str(ARG(0)))); }
 
 static void k_FreeLibrary(X86Ctx *ctx) { RET(1); }
 static void k_DisableThreadLibraryCalls(X86Ctx *ctx) { RET(1); }
@@ -553,6 +563,199 @@ static void k_TerminateProcess(X86Ctx *ctx)
     exit((int)ARG(1));
 }
 
+/* ---- UE3 diagnostics for an appErrorf throw (ME_PC_UE_DEBUG=1): finds the FName table by its
+   first entry "None" and names the script function and object of the native that failed. ---- */
+static uint32_t ue_names, ue_nnames, ue_name_off;
+
+static int ue_ok(uint32_t a) { return a >= 0x10000 && (rt_vm_is_committed(a) || rt_module_at(a)); }
+
+static void ue_find_names(void)
+{
+    RtModule *m = rt_module_at(0x400000);
+    if (!m) return;
+    for (uint32_t p = m->base + 0x1000; p + 12 <= m->base + m->size; p += 4) {
+        uint32_t d = ld32(p), n = ld32(p + 4), mx = ld32(p + 8);
+        if (n < 1000 || n > 4000000 || mx < n || (d & 3) || !ue_ok(d) || !ue_ok(d + 4 * n - 4) || (ld32(d) & 3) || !ue_ok(ld32(d))) continue;
+        uint32_t e = ld32(d);
+        if (!ue_ok(e + 48)) continue;
+        for (uint32_t off = 0; off <= 32; off += 4)
+            if (!memcmp(rt_ptr(e + off), "None", 5) || !memcmp(rt_ptr(e + off), "N\0o\0n\0e\0\0", 10)) {
+                ue_names = d; ue_nnames = n; ue_name_off = off;
+                rt_log("UE: FName table %#x (%u names, string at +%u)", d, n, off);
+                return;
+            }
+    }
+}
+
+static const char *ue_name(uint32_t idx)
+{
+    static char buf[4][128]; static int k;
+    char *b = buf[k++ & 3];
+    if (!ue_names || idx >= ue_nnames || !ue_ok(ld32(ue_names + 4 * idx))) return NULL;
+    uint32_t e = ld32(ue_names + 4 * idx) + ue_name_off;
+    int wide = ld8(e + 1) == 0 && ld8(e) != 0;
+    uint32_t i = 0;
+    for (; i < 127; i++) { uint8_t c = wide ? (uint8_t)ld16(e + 2 * i) : ld8(e + i); if (!c) break; b[i] = (char)c; }
+    b[i] = 0;
+    return b;
+}
+
+static void ue_describe(const char *what, uint32_t obj)
+{
+    if (!ue_ok(obj) || !ue_ok(obj + 0x4c)) { rt_log("UE: %s %#x (not mapped)", what, obj); return; }
+    char line[1024]; size_t o = 0;
+    for (uint32_t off = 0x10; off <= 0x48; off += 4) {
+        const char *n = ue_name(ld32(obj + off));
+        if (n && *n) o += (size_t)snprintf(line + o, sizeof line - o, " +%#x=%s", off, n);
+    }
+    rt_log("UE: %s %#x:%s", what, obj, line);
+}
+
+static void ue_debug_throw(X86Ctx *ctx)
+{
+    if (!getenv("ME_PC_UE_DEBUG")) return;
+    if (!ue_names) ue_find_names();
+    extern RtThread *rt_thread_self(void);
+    RtThread *t = rt_thread_self();
+    uint32_t top = t->stack_base + t->stack_size;
+    rt_log("UE: ebp %#x/%#x esp %#x/%#x top %#x", ctx->ebp, t->ctx.ebp, ctx->esp, t->ctx.esp, top);
+    for (uint32_t fp = ctx->ebp; fp >= ctx->esp && (uint64_t)fp + 8 <= top; fp = ld32(fp)) {
+        rt_log("UE: frame %#x ret %#x", fp, ld32(fp + 4));
+        if (ld32(fp + 4) == 0x114f39eu) { /* StaticLoadObject called from execDynamicLoadObject */
+            char w[512]; size_t o = 0;
+            for (uint32_t k = 8; k <= 96; k += 4) o += (size_t)snprintf(w + o, sizeof w - o, " %#x", ld32(fp + k));
+            rt_log("UE: words after frame:%s", w);
+            uint32_t stack = ld32(fp - 124); /* the exec function keeps Stack in esi, saved by StaticLoadObject */
+            if (!ue_ok(stack) || !ue_ok(stack + 16)) { rt_log("UE: FFrame %#x not mapped", stack); break; }
+            rt_log("UE: DynamicLoadObject FFrame %#x code %#x", stack, ld32(stack + 12));
+            for (uint32_t fr = stack, lvl = 0; lvl < 6 && ue_ok(fr) && ue_ok(fr + 28); fr = ld32(fr + 20), lvl++) {
+                uint32_t code = ld32(fr + 12), node = ld32(fr + 4);
+                if (!ue_ok(node) || !ue_ok(node + 0x60)) break;
+                uint32_t outer = ld32(node + 0x28);
+                rt_log("UE: script frame %u: %s.%s code %#x", lvl, ue_ok(outer) ? ue_name(ld32(outer + 0x2c)) : "?", ue_name(ld32(node + 0x2c)), code);
+                uint32_t script = 0, sn = 0;
+                /* UStruct::Script (TArray<BYTE>) somewhere in the function: the array containing code. */
+                for (uint32_t off = 0x54; off <= 0x54; off += 4) {
+                    uint32_t d = ld32(node + off), n = ld32(node + off + 4);
+                    if (ue_ok(d) && n < 0x100000 && code >= d && code <= d + n) { script = d; sn = n; rt_log("UE: Script at node+%#x: %#x (%u bytes)", off, d, n); break; }
+                }
+                if (script && lvl < 3) {
+                    uint32_t lo = code - script > 160 ? code - 160 : script, hi = code + 64 < script + sn ? code + 64 : script + sn;
+                    for (uint32_t q = lo; q < hi; q += 32) {
+                        char hx[200]; size_t o = 0;
+                        for (uint32_t k = 0; k < 32 && q + k < hi; k++) o += (size_t)snprintf(hx + o, sizeof hx - o, "%02x%s", ld8(q + k), q + k + 1 == code ? "|" : " ");
+                        rt_log("UE: %04x %s", q - script, hx);
+                    }
+                    rt_log("UE: code offset %#x", code - script);
+                    /* Object references in the bytecode are linked pointers: name what resolves. */
+                    for (uint32_t q = lo; q + 4 <= hi; q++) {
+                        uint32_t v = ld32(q);
+                        if ((v & 3) == 0 && ue_ok(v) && ue_ok(v + 0x30)) {
+                            const char *nm = ue_name(ld32(v + 0x2c));
+                            uint32_t outer = ld32(v + 0x28);
+                            const char *on = ue_ok(outer) && ue_ok(outer + 0x30) ? ue_name(ld32(outer + 0x2c)) : NULL;
+                            if (nm && *nm) rt_log("UE:   ref @%04x %#x %s.%s", q - script, v, on ? on : "?", nm);
+                        }
+                    }
+                }
+            }
+            ue_describe("Stack+4 (Node)", ld32(stack + 4));
+            ue_describe("Stack+8 (Object)", ld32(stack + 8));
+            ue_describe("Stack+16", ld32(stack + 16));
+            uint32_t node = ld32(stack + 4);
+            if (ue_ok(node)) for (uint32_t off = 0x10; off <= 0x48; off += 4) ue_describe("Node field", ld32(node + off));
+            break;
+        }
+        if (ld32(fp) <= fp) break;
+    }
+}
+
+/* ---- structured exceptions: the x86 fs:[0] chain of EXCEPTION_REGISTRATION {next, handler}.
+   The handlers are guest code (msvcr80's __CxxFrameHandler3 / _except_handler4); a handler that
+   takes the exception does not return: it unwinds (RtlUnwind) and jumps to the continuation,
+   which the runtime turns into a longjmp to the frame's resume point (x86_resume_* in rt_core). */
+#define SEH_CHAIN_END 0xFFFFFFFFu
+
+typedef struct { uint32_t esp, ebx, esi, edi, ebp; } SehSaved;
+
+/* Exception and context records below the guest stack pointer; handlers run below them. */
+static uint32_t seh_records(X86Ctx *ctx, SehSaved *sv, uint32_t eip, uint32_t esp_after)
+{
+    *sv = (SehSaved){ctx->esp, ctx->ebx, ctx->esi, ctx->edi, ctx->ebp};
+    uint32_t base = (ctx->esp - 0x400u) & ~15u;
+    memset(rt_ptr(base), 0, 0x400);
+    uint32_t cr = base + 0x60; /* CONTEXT (x86, 0x2CC bytes) */
+    st32(cr, 0x10007u);        /* CONTEXT_FULL */
+    st32(cr + 0x90, 0x3B); st32(cr + 0x94, 0x23); st32(cr + 0x98, 0x23); st32(cr + 0xBC, 0x1B); st32(cr + 0xC8, 0x23);
+    st32(cr + 0x9C, ctx->edi); st32(cr + 0xA0, ctx->esi); st32(cr + 0xA4, ctx->ebx); st32(cr + 0xA8, ctx->edx);
+    st32(cr + 0xAC, ctx->ecx); st32(cr + 0xB0, ctx->eax); st32(cr + 0xB4, ctx->ebp); st32(cr + 0xB8, eip);
+    st32(cr + 0xC0, 0x202); st32(cr + 0xC4, esp_after);
+    ctx->esp = base - 16;
+    return base;
+}
+
+static void seh_restore(X86Ctx *ctx, const SehSaved *sv)
+{
+    ctx->esp = sv->esp; ctx->ebx = sv->ebx; ctx->esi = sv->esi; ctx->edi = sv->edi; ctx->ebp = sv->ebp;
+}
+
+static int seh_frame_ok(uint32_t reg)
+{
+    extern RtThread *rt_thread_self(void);
+    RtThread *t = rt_thread_self();
+    return reg && reg != SEH_CHAIN_END && !(reg & 3) && reg >= t->stack_base && reg + 8 <= t->stack_base + t->stack_size;
+}
+
+static uint32_t seh_call(X86Ctx *ctx, uint32_t reg, uint32_t er, uint32_t cr, uint32_t disp)
+{
+    uint32_t args[4] = {er, reg, cr, disp};
+    return rt_call(ctx, ld32(reg + 4), 4, args);
+}
+
+/* RaiseException: offers the exception to each registered handler, innermost first. */
+static void seh_dispatch(X86Ctx *ctx, uint32_t code, uint32_t flags, uint32_t nparams, uint32_t params)
+{
+    uint32_t ret = ld32(ctx->esp);
+    SehSaved sv;
+    uint32_t base = seh_records(ctx, &sv, ret, ctx->esp + 4 + 16);
+    uint32_t er = base, cr = base + 0x60, disp = base + 0x340;
+    if (nparams > 15) nparams = 15;
+    st32(er, code); st32(er + 4, flags); st32(er + 12, ret); st32(er + 16, nparams);
+    for (uint32_t i = 0; i < nparams; i++) st32(er + 20 + 4 * i, ld32(params + 4 * i));
+    uint32_t reg = ld32(ctx->fs_base);
+    for (; seh_frame_ok(reg); reg = ld32(reg)) {
+        uint32_t r = seh_call(ctx, reg, er, cr, disp);
+        if (r == 0) { /* ExceptionContinueExecution */
+            if (flags & 1) rt_fatal("handler %#x continued a noncontinuable exception %#x", ld32(reg + 4), code);
+            seh_restore(ctx, &sv);
+            return;
+        }
+        /* ExceptionContinueSearch (1) or ExceptionNestedException (2): next frame. */
+    }
+    seh_restore(ctx, &sv);
+    rt_fatal("unhandled guest exception %#x (flags %#x, %u params, raised from %#x; chain ended at %#x)",
+             code, flags, nparams, ret, reg);
+}
+
+/* RtlUnwind(TargetFrame, TargetIp, ExceptionRecord, ReturnValue): calls the handlers of the frames
+   above TargetFrame with EXCEPTION_UNWINDING and unlinks them; returns to the caller. */
+static void seh_unwind(X86Ctx *ctx, uint32_t target, uint32_t er_in)
+{
+    uint32_t ret = ld32(ctx->esp);
+    SehSaved sv;
+    uint32_t base = seh_records(ctx, &sv, ret, ctx->esp + 4 + 16);
+    uint32_t er = er_in ? er_in : base, cr = base + 0x60, disp = base + 0x340;
+    if (!er_in) st32(er, 0xC0000027u); /* STATUS_UNWIND */
+    st32(er + 4, ld32(er + 4) | 2u | (target ? 0u : 4u)); /* EXCEPTION_UNWINDING, EXIT_UNWIND */
+    uint32_t reg = ld32(ctx->fs_base);
+    while (seh_frame_ok(reg) && reg != target) {
+        seh_call(ctx, reg, er, cr, disp);
+        reg = ld32(reg);
+        st32(ctx->fs_base, reg);
+    }
+    seh_restore(ctx, &sv);
+}
+
 static void k_RaiseException(X86Ctx *ctx)
 {
     /* MS_VC_EXCEPTION: "name this thread" for a debugger, raised inside
@@ -563,9 +766,25 @@ static void k_RaiseException(X86Ctx *ctx)
             rt_log("thread %#x named \"%s\"", ld32(info + 8), rt_str(ld32(info + 4)) ? rt_str(ld32(info + 4)) : "");
         return;
     }
-    rt_fatal("guest RaiseException(code %#x, flags %#x, %u args) - SEH is not implemented yet (return %#x)",
-             ARG(0), ARG(1), ARG(2), ld32(ctx->esp));
+    /* MSVC C++ throw: args are magic 0x19930520, the object, ThrowInfo. Name the thrown type. */
+    if (ARG(0) == 0xE06D7363u && ARG(2) >= 3) {
+        uint32_t a = ARG(3), object = ld32(a + 4), ti = ld32(a + 8);
+        uint32_t cta = ti ? ld32(ti + 12) : 0, n = cta ? ld32(cta) : 0;
+        const char *type = n ? rt_str(ld32(ld32(cta + 4) + 4) + 8) : "?";
+        if (!strcmp(type, ".PA_W")) { /* const wchar_t*: UE3 appThrowf/appErrorf */
+            char msg[1024]; uint32_t w = ld32(object), k = 0;
+            for (; w && k < sizeof msg - 1; k++, w += 2) { uint16_t c = ld16(w); if (!c) break; msg[k] = c < 128 ? (char)c : '?'; }
+            msg[k] = 0;
+            rt_log("C++ throw %s \"%s\" (return %#x)", type, msg, ld32(ctx->esp));
+        } else {
+            rt_log("C++ throw %s (object %#x, return %#x)", type, object, ld32(ctx->esp));
+        }
+        ue_debug_throw(ctx);
+    }
+    seh_dispatch(ctx, ARG(0), ARG(1) & 1, ARG(2), ARG(3));
 }
+
+static void k_RtlUnwind(X86Ctx *ctx) { seh_unwind(ctx, ARG(0), ARG(2)); RET(ARG(3)); }
 
 /* ---- simple batch: spin counts, strings, Global/Local memory, time, affinity, console ---- */
 static void k_SetCriticalSectionSpinCount(X86Ctx *ctx) { RET(ld32(ARG(0) + 20)); st32(ARG(0) + 20, ARG(1)); }
@@ -948,6 +1167,7 @@ static const HleDef kernel32[] = {
     {"kernel32.dll", "GetModuleHandleW", k_GetModuleHandleW, 1},
     {"kernel32.dll", "LoadLibraryA", k_LoadLibraryA, 1},
     {"kernel32.dll", "LoadLibraryW", k_LoadLibraryW, 1},
+    {"kernel32.dll", "LoadLibraryExA", k_LoadLibraryExA, 3},
     {"kernel32.dll", "FreeLibrary", k_FreeLibrary, 1},
     {"kernel32.dll", "DisableThreadLibraryCalls", k_DisableThreadLibraryCalls, 1},
     {"kernel32.dll", "GetProcAddress", k_GetProcAddress, 2},
@@ -996,7 +1216,7 @@ static const HleDef kernel32[] = {
     {"kernel32.dll", "OutputDebugStringA", k_OutputDebugStringA, 1},
     {"kernel32.dll", "ExitProcess", k_ExitProcess, 1},
     {"kernel32.dll", "TerminateProcess", k_TerminateProcess, 2},
-    {"kernel32.dll", "RaiseException", k_RaiseException, 4},
+    {"kernel32.dll", "RaiseException", k_RaiseException, 4}, {"kernel32.dll", "RtlUnwind", k_RtlUnwind, 4},
 };
 
 void rt_kernel32_register(void)

@@ -20,11 +20,37 @@ RUNTIME = os.path.normpath(os.path.join(HERE, "..", "runtime"))
 CFLAGS = ["-O2", "-g0", "-fwrapv", "-ffp-contract=off", "-fno-strict-aliasing", "-Wno-unused-label",
           "-Wno-unused-variable", "-Wno-unused-but-set-variable", "-Wno-unused-function"]
 
-MODULES = [  # name, input binary, catalog
-    ("msvcr80", "work/pc-deps/msvcr80.dll", "msvcr80/catalog.json"),
-    ("msvcp80", "work/pc-deps/msvcp80.dll", "msvcp80/catalog.json"),
-    ("game", "work/pc/Binaries/MirrorsEdge.exe", "catalog.json"),
+# tag, binary to lift, catalog, guest module name, folder at run time (game | deps | rebased),
+# DllMain at start-up (1) or on the first LoadLibrary (0). The PhysX DLLs all ask for 0x10000000:
+# they are lifted from copies rebased with rebase_pe.py (0x20000000 + n * 0x01000000).
+MODULES = [
+    ("msvcr80", "work/pc-deps/msvcr80.dll", "msvcr80/catalog.json", "msvcr80.dll", "deps", 1),
+    ("msvcp80", "work/pc-deps/msvcp80.dll", "msvcp80/catalog.json", "msvcp80.dll", "deps", 1),
+    ("physxloader", "work/pc-deps/rebased/PhysXLoader.dll", "physxloader/catalog.json", "physxloader.dll", "rebased", 0),
+    ("physxcore", "work/pc-deps/rebased/PhysXCore.dll", "physxcore/catalog.json", "physxcore.dll", "rebased", 0),
+    ("physxcooking", "work/pc-deps/rebased/PhysXCooking.dll", "physxcooking/catalog.json", "physxcooking.dll", "rebased", 0),
+    ("nxcooking", "work/pc-deps/rebased/NxCooking.dll", "nxcooking/catalog.json", "nxcooking.dll", "rebased", 0),
+    ("physxextensions", "work/pc-deps/rebased/PhysXExtensions.dll", "physxextensions/catalog.json", "physxextensions.dll", "rebased", 0),
+    ("nxcharacter", "work/pc-deps/rebased/NxCharacter.dll", "nxcharacter/catalog.json", "nxcharacter.dll", "rebased", 0),
+    ("game", "work/pc/Binaries/MirrorsEdge.exe", "catalog.json", "mirrorsedge.exe", "game", 0),
 ]
+
+
+def write_module_table(path):
+    """rt_modules_gen.c: the modules rt_main loads, in load order (the game last)."""
+    lines = ['#include "rt.h"', ""]
+    for tag, *_ in MODULES:
+        lines.append(f"extern const X86FnEntry x86_fns_{tag}[];")
+        lines.append(f"extern const uint32_t x86_fns_{tag}_count;")
+    lines.append("")
+    lines.append("const RtModuleSpec rt_module_specs[] = {")
+    for tag, binary, _, name, kind, init in MODULES:
+        lines.append(f'    {{"{name}", "{kind}", "{os.path.basename(binary)}", x86_fns_{tag}, &x86_fns_{tag}_count, {init}}},')
+    lines.append("};")
+    lines.append(f"const int rt_module_spec_count = {len(MODULES)};")
+    new = "\n".join(lines) + "\n"
+    if not os.path.exists(path) or open(path).read() != new:
+        open(path, "w").write(new)
 
 
 def compile_one(cc, src, obj):
@@ -40,6 +66,7 @@ def main():
     ap.add_argument("--toolchain", required=True)
     ap.add_argument("--work", required=True)
     ap.add_argument("--regen", action="store_true", help="regenerate the lifted C even if present")
+    ap.add_argument("--regen-only", help="comma-separated module tags to regenerate")
     ap.add_argument("--jobs", type=int, default=os.cpu_count() or 8)
     args = ap.parse_args()
     bindir = os.path.join(args.toolchain, "bin")
@@ -48,14 +75,18 @@ def main():
     obj_root = os.path.join(args.work, "obj")
     t0 = time.time()
 
-    for name, binary, cat in MODULES:
+    regen = set(args.regen_only.split(",")) if args.regen_only else None
+    for name, binary, cat, *_ in MODULES:
         out = os.path.join(gen_root, name)
-        if args.regen or not os.path.exists(os.path.join(out, f"dispatch_{name}.c")):
+        if args.regen or (regen and name in regen) or not os.path.exists(os.path.join(out, f"dispatch_{name}.c")):
             subprocess.run([sys.executable, "-I", os.path.join(HERE, "gen_module.py"), binary, "--llvm", bindir,
                             "--catalog", os.path.join(args.work, cat), "--name", name, "--out", out], check=True)
 
-    jobs = []
-    for name, _, _ in MODULES:
+    os.makedirs(gen_root, exist_ok=True)
+    write_module_table(os.path.join(gen_root, "rt_modules_gen.c"))
+    jobs = [(os.path.join(gen_root, "rt_modules_gen.c"), os.path.join(obj_root, "rt_modules_gen.o"))]
+    os.makedirs(obj_root, exist_ok=True)
+    for name, *_ in MODULES:
         src_dir = os.path.join(gen_root, name)
         od = os.path.join(obj_root, name)
         os.makedirs(od, exist_ok=True)
@@ -64,7 +95,7 @@ def main():
                 jobs.append((os.path.join(src_dir, f), os.path.join(od, f[:-2] + ".o")))
     od = os.path.join(obj_root, "runtime")
     os.makedirs(od, exist_ok=True)
-    for f in ("rt_core.c", "rt_kernel32.c", "rt_sync.c", "rt_files.c", "rt_user32.c", "rt_d3d9.c", "rt_d3d9_gen.c", "rt_stubs.c", "rt_host_win.c", "rt_main.c"):
+    for f in ("rt_core.c", "rt_kernel32.c", "rt_sync.c", "rt_files.c", "rt_user32.c", "rt_d3d9.c", "rt_d3d9_gen.c", "rt_physx_support.c", "rt_dinput.c", "rt_stubs.c", "rt_host_win.c", "rt_main.c"):
         jobs.append((os.path.join(RUNTIME, f), os.path.join(od, f[:-2] + ".o")))
 
     errors = 0

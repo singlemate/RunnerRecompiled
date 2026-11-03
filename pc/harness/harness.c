@@ -56,6 +56,9 @@ static HANDLE test_thread;
 
 void x86_dispatch(X86Ctx *ctx, uint32_t t) { (void)ctx; (void)t; fault_code = 0xD15; fault_landing(); for (;;) {} }
 void x86_trap(X86Ctx *ctx, uint32_t a, const char *w) { (void)ctx; (void)a; (void)w; fault_code = 0x7A9; fault_landing(); for (;;) {} }
+/* EH resume points are never reached in single-function runs. */
+void x86_resume_push(X86Ctx *ctx, X86Resume *r, const uint32_t *t, uint32_t n) { (void)ctx; (void)r; (void)t; (void)n; }
+void x86_resume_pop(X86Ctx *ctx, X86Resume *r) { (void)ctx; (void)r; }
 
 static LONG CALLBACK on_exception(EXCEPTION_POINTERS *ep)
 {

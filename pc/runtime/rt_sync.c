@@ -187,6 +187,23 @@ static void k_SetEvent(X86Ctx *ctx) { set_event(ARG(0), 1, 0); RET(1); }
 static void k_ResetEvent(X86Ctx *ctx) { set_event(ARG(0), 0, 0); RET(1); }
 static void k_PulseEvent(X86Ctx *ctx) { set_event(ARG(0), 1, 1); RET(1); }
 
+/* WSA events are manual-reset Win32 events. */
+static void ws_WSACreateEvent(X86Ctx *ctx)
+{
+    uint32_t h = rt_handle_new(RT_H_EVENT, NULL);
+    obj(h)->manual = 1;
+    RET(h);
+}
+
+/* WSAWaitForMultipleEvents(n, events, all, timeout, alertable): no APCs, so alertable is ignored. */
+static void ws_WSAWaitForMultipleEvents(X86Ctx *ctx)
+{
+    uint32_t n = ARG(0), hs[64];
+    if (n == 0 || n > 64) { RET(WAIT_FAILED); return; }
+    for (uint32_t i = 0; i < n; i++) hs[i] = ld32(ARG(1) + 4 * i);
+    RET(wait_objects(n, hs, ARG(2) != 0, ARG(3)));
+}
+
 static void k_CreateMutex(X86Ctx *ctx)
 {
     uint32_t h = rt_handle_new(RT_H_MUTEX, NULL);
@@ -351,6 +368,9 @@ static const HleDef sync_defs[] = {
     {"kernel32.dll", "GetExitCodeThread", k_GetExitCodeThread, 2},
     {"kernel32.dll", "TerminateThread", k_TerminateThread, 2},
     {"kernel32.dll", "CloseHandle", k_CloseHandle, 1},
+    {"ws2_32.dll", "WSACreateEvent", ws_WSACreateEvent, 0}, {"ws2_32.dll", "WSACloseEvent", k_CloseHandle, 1},
+    {"ws2_32.dll", "WSASetEvent", k_SetEvent, 1}, {"ws2_32.dll", "WSAResetEvent", k_ResetEvent, 1},
+    {"ws2_32.dll", "WSAWaitForMultipleEvents", ws_WSAWaitForMultipleEvents, 5},
     {"kernel32.dll", "DuplicateHandle", k_DuplicateHandle, 7},
 };
 

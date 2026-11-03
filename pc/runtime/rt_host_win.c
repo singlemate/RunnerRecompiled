@@ -57,11 +57,14 @@ static LONG CALLBACK on_fault(EXCEPTION_POINTERS *ep)
     uintptr_t a = ep->ExceptionRecord->NumberParameters >= 2 ? ep->ExceptionRecord->ExceptionInformation[1] : 0;
     uintptr_t base = x86_mem_base;
     if (a >= base && a - base < 0x100000000ull)
-        rt_fatal("host fault %#lx: guest address %#x (%s), host rip %p; last dispatch %#x (return %#x)",
+        rt_fatal("host fault %#lx: guest address %#x (%s), host rip %p (image +%#llx); last dispatch %#x (return %#x)",
                  code, (uint32_t)(a - base), ep->ExceptionRecord->ExceptionInformation[0] ? "write" : "read",
-                 (void *)ep->ContextRecord->Rip, rt_last_dispatch, rt_last_dispatch_ret);
-    rt_fatal("host fault %#lx at host address %p, rip %p; last dispatch %#x (return %#x)", code, (void *)a,
-             (void *)ep->ContextRecord->Rip, rt_last_dispatch, rt_last_dispatch_ret);
+                 (void *)ep->ContextRecord->Rip,
+                 (unsigned long long)(ep->ContextRecord->Rip - (uintptr_t)GetModuleHandleW(NULL)),
+                 rt_last_dispatch, rt_last_dispatch_ret);
+    extern const char *rt_thunk_name(uint32_t t);
+    rt_fatal("host fault %#lx at host address %p, rip %p; last dispatch %#x %s (return %#x)", code, (void *)a,
+             (void *)ep->ContextRecord->Rip, rt_last_dispatch, rt_thunk_name(rt_last_dispatch), rt_last_dispatch_ret);
 }
 
 void host_install_fault_handler(void) { AddVectoredExceptionHandler(1, on_fault); }
@@ -132,7 +135,7 @@ void *host_window_create(int w, int h, const char *title)
     return hw;
 }
 
-static MSG last_msg;
+static __thread MSG last_msg; /* per thread: each guest thread pumps its own host queue */
 
 /* Next queued host message of this thread (removed if remove). */
 int host_peek_message(void **hwnd, uint32_t *msg, uint32_t *wp, uint32_t *lp, uint32_t *time, int32_t *x, int32_t *y,
@@ -152,6 +155,20 @@ int host_peek_message(void **hwnd, uint32_t *msg, uint32_t *wp, uint32_t *lp, ui
 }
 
 void host_translate_last(void) { TranslateMessage(&last_msg); }
+
+/* Posted messages go through the host queue of the window's thread (or of this thread). */
+int host_post_message(void *hwnd, uint32_t msg, uint32_t wp, uint32_t lp)
+{
+    return PostMessageW((HWND)hwnd, msg, (WPARAM)wp, (LPARAM)lp) != 0;
+}
+
+void host_post_quit(int code) { PostQuitMessage(code); }
+
+/* A message of a host window the guest does not know (IME, Direct3D helpers): handled by the host. */
+void host_dispatch_last(void) { DispatchMessageW(&last_msg); }
+
+/* WM_PAINT stays queued until the window is validated. */
+void host_validate(void *hwnd) { ValidateRect((HWND)hwnd, NULL); }
 
 uint32_t host_def_window_proc(void *hwnd, uint32_t msg, uint32_t wp, uint32_t lp)
 {

@@ -51,6 +51,7 @@ void d3d_special_Reset(X86Ctx *ctx);
 void d3d_special_CreateAdditionalSwapChain(X86Ctx *ctx);
 void d3d_special_GetPresentParameters(X86Ctx *ctx);
 void d3d_special_GetCreationParameters(X86Ctx *ctx);
+void d3d_special_GetAdapterIdentifier(X86Ctx *ctx);
 void d3d_special_GetAdapterMonitor(X86Ctx *ctx);
 void d3d_special_LockRect(X86Ctx *ctx);
 void d3d_special_UnlockRect(X86Ctx *ctx);

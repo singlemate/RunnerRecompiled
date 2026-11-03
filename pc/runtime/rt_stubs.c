@@ -4,6 +4,7 @@
    returns 0. Imported data symbols get a zeroed guest block instead of a thunk. */
 #include "rt.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 typedef struct { const char *p; int fail; } Dm;
@@ -133,13 +134,22 @@ static void stub_ret0(X86Ctx *ctx) { ctx->eax = 0; }
 static void stub_ctor(X86Ctx *ctx) { ctx->eax = ctx->ecx; }
 static void stub_hidden(X86Ctx *ctx) { ctx->eax = rt_arg(ctx, 0); } /* returns the result buffer */
 
-int rt_stub_dll(const char *dll) { return !strncmp(dll, "wxmsw28u", 8); }
+/* wxWidgets (the editor) and, for now, Bink (movies: BinkOpen fails, so the game skips them). */
+int rt_stub_dll(const char *dll) { return !strncmp(dll, "wxmsw28u", 8) || !strcmp(dll, "binkw32.dll"); }
 
 /* Fills a stub for an unimplemented import of a stubbed DLL; returns 0 if the name cannot be
    understood (then the import stays "missing" and stops the run when called). */
 int rt_stub_for(const char *dll, const char *name, HleFn *fn, uint8_t *nargs, int *is_data)
 {
     if (!rt_stub_dll(dll)) return 0;
+    /* __stdcall C names carry the argument size: _Name@N. */
+    const char *at = strrchr(name, '@');
+    if (name[0] == '_' && at && at[1] >= '0' && at[1] <= '9') {
+        *is_data = 0;
+        *fn = stub_ret0;
+        *nargs = (uint8_t)(atoi(at + 1) / 4);
+        return 1;
+    }
     Sig s = demangle(name);
     if (!s.ok) return 0;
     *is_data = s.is_data;

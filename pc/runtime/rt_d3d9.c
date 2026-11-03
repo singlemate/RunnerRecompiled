@@ -118,7 +118,39 @@ static void x_Fail(X86Ctx *ctx)
     RET(0x80004005u); /* E_FAIL */
 }
 
+/* D3DXMatrixInverse(out, determinant or NULL, m): cofactor expansion in double, stored as float;
+   NULL when the matrix is singular, as D3DX does. */
+static void x_MatrixInverse(X86Ctx *ctx)
+{
+    uint32_t out = ARG(0), pdet = ARG(1), mp = ARG(2);
+    double m[16], inv[16];
+    for (int i = 0; i < 16; i++) m[i] = ldf(mp + 4u * (uint32_t)i);
+    inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] + m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
+    inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] - m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
+    inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
+    inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
+    inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
+    inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
+    inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
+    inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
+    inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] + m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
+    inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] - m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
+    inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] + m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
+    inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] - m[4] * m[2] * m[13] - m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
+    inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] - m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
+    inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] + m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
+    inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] - m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
+    inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] + m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
+    double det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
+    if (pdet) stf(pdet, (float)det);
+    if (det == 0.0) { RET(0); return; }
+    for (int i = 0; i < 16; i++) stf(out + 4u * (uint32_t)i, (float)(inv[i] / det));
+    RET(out);
+}
+
 static const HleDef d3d9_exports[] = {
+    {"d3dx10_35.dll", "D3DXMatrixInverse", x_MatrixInverse, 3},
+    {"d3dx10_35.dll", "D3DX10CheckVersion", x_CheckVersion, 2},
     {"d3d9.dll", "Direct3DCreate9", d_Direct3DCreate9, 1},
     {"d3dx9_35.dll", "D3DXCheckVersion", x_CheckVersion, 2},
     {"d3dx9_35.dll", "D3DXDebugMute", x_DebugMute, 1},
@@ -229,7 +261,8 @@ void d3d_special_CreateDevice(X86Ctx *ctx)
     pp_in(ARG(5), &p, 1);
     uint32_t hr = ((FnCreateDevice)D3D_VT(self)[D3D_IDX_IDirect3D9_CreateDevice])(
         self, ARG(1), ARG(2), d3d_host_hwnd(ARG(3)), flags | 0x4 /* MULTITHREADED */, &p, &dev);
-    rt_log("D3D9 CreateDevice(adapter %u, type %u, flags %#x) = %#x, device %p", ARG(1), ARG(2), flags, hr, dev);
+    rt_log("D3D9 CreateDevice(adapter %u, type %u, focus %#x -> %p, device window %p, flags %#x) = %#x, device %p",
+           ARG(1), ARG(2), ARG(3), d3d_host_hwnd(ARG(3)), p.hwnd, flags, hr, dev);
     if (!(hr & 0x80000000u)) pp_out(ARG(5), &p);
     if (ARG(6)) st32(ARG(6), dev ? d3d_wrap(dev, D3D_IDirect3DDevice9) : 0);
     /* Without D3DCREATE_FPU_PRESERVE, D3D9 sets the calling thread's x87 to 24-bit precision,
@@ -282,6 +315,19 @@ void d3d_special_GetCreationParameters(X86Ctx *ctx)
     RET(hr);
 }
 
+/* D3DADAPTER_IDENTIFIER9 is packed to 4 bytes on x86 (1100 bytes) and naturally aligned on 64-bit
+   hosts (1104: the trailing padding after WHQLLevel); the fields line up, so the first 1100 bytes
+   are copied. Writing the host size straight into the guest overran a stack buffer by 4 bytes. */
+typedef uint32_t (D3D_CALL *FnAdapterId)(void *, uint32_t, uint32_t, void *);
+void d3d_special_GetAdapterIdentifier(X86Ctx *ctx)
+{
+    union { uint64_t align; uint8_t b[1112]; } id;
+    void *self = d3d_host(ARG(0));
+    uint32_t hr = CALL(self, D3D_IDX_IDirect3D9_GetAdapterIdentifier, FnAdapterId, ARG(1), ARG(2), id.b);
+    if (hr == 0 && ARG(3)) memcpy(rt_ptr(ARG(3)), id.b, 1100);
+    RET(hr);
+}
+
 void d3d_special_GetAdapterMonitor(X86Ctx *ctx) { RET(0x00020001u); } /* the HMONITOR USER32 reports */
 
 void d3d_special_GetDC(X86Ctx *ctx) { RET(D3DERR_INVALIDCALL); }
@@ -330,8 +376,11 @@ static void stage_end(void *host, uint32_t sub)
     Staging *s = stage_get(host, sub, 0);
     if (!s) return;
     if (!s->readonly && s->size) memcpy(s->bits, rt_ptr(s->guest), s->size);
-    /* The guest buffer is kept for the next lock of the same subresource. */
-    s->bits = NULL;
+    /* Only resources that are locked right now hold a slot and a guest buffer. */
+    host_lock(d3d_lock);
+    rt_heap_free(s->guest);
+    memset(s, 0, sizeof *s);
+    host_unlock(d3d_lock);
 }
 
 static int is_block_format(uint32_t fmt)

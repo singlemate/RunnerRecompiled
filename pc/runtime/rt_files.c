@@ -588,6 +588,69 @@ static void k_SHGetFolderPathW(X86Ctx *ctx)
     RET(0);
 }
 
+/* ---- file mappings: guest memory; a file's contents are read in, writes are not flushed back ---- */
+typedef struct { char name[128]; uint32_t size, view; uint32_t handle; int fd; int64_t file_size; } RtMapping;
+static RtMapping *mappings[64];
+
+static uint32_t create_mapping(uint32_t file, uint32_t size_hi, uint32_t size_lo, const char *name)
+{
+    if (name && *name)
+        for (int i = 0; i < 64; i++)
+            if (mappings[i] && !strcmp(mappings[i]->name, name)) { set_error(183); return mappings[i]->handle; }
+    RtMapping *m = calloc(1, sizeof *m);
+    snprintf(m->name, sizeof m->name, "%s", name ? name : "");
+    m->fd = -1;
+    m->size = size_lo;
+    if (size_hi) { free(m); set_error(8); return 0; }
+    if (file != INVALID_HANDLE) {
+        RtFile *f = rt_handle_data(file, RT_H_FILE);
+        if (!f || f->fd < 0) { free(m); set_error(6); return 0; }
+        m->fd = f->fd;
+        m->file_size = file_size(f);
+        if (!m->size) m->size = (uint32_t)m->file_size;
+    }
+    m->handle = rt_handle_new(RT_H_MAPPING, m);
+    for (int i = 0; i < 64; i++) if (!mappings[i]) { mappings[i] = m; break; }
+    rt_log("CreateFileMapping \"%s\" %u bytes%s -> %#x", m->name, m->size, m->fd >= 0 ? " (file)" : "", m->handle);
+    set_error(0);
+    return m->handle;
+}
+
+static void k_CreateFileMappingA(X86Ctx *ctx)
+{
+    char n[128];
+    guest_a(ARG(5), n, sizeof n);
+    RET(create_mapping(ARG(0), ARG(3), ARG(4), ARG(5) ? n : NULL));
+}
+
+static void k_CreateFileMappingW(X86Ctx *ctx)
+{
+    char n[128];
+    guest_w(ARG(5), n, sizeof n);
+    RET(create_mapping(ARG(0), ARG(3), ARG(4), ARG(5) ? n : NULL));
+}
+
+static void k_OpenFileMapping(X86Ctx *ctx) { set_error(2); RET(0); }
+
+static void k_MapViewOfFile(X86Ctx *ctx)
+{
+    RtMapping *m = rt_handle_data(ARG(0), RT_H_MAPPING);
+    if (!m) { set_error(6); RET(0); return; }
+    if (!m->view) {
+        m->view = rt_vm_reserve(0, m->size);
+        if (!m->view || !rt_vm_commit(m->view, m->size)) { set_error(8); RET(0); return; }
+        if (m->fd >= 0) {
+            int64_t cur = host_seek(m->fd, 0, 1);
+            host_seek(m->fd, 0, 0);
+            host_read(m->fd, rt_ptr(m->view), (uint32_t)(m->file_size < m->size ? m->file_size : m->size));
+            host_seek(m->fd, cur, 0);
+        }
+    }
+    RET(m->view + ARG(2)); /* offset low */
+}
+
+static void k_UnmapViewOfFile(X86Ctx *ctx) { RET(1); } /* the view stays until the process ends */
+
 /* ---- registry: empty; the game falls back to its defaults ---- */
 static void a_RegOpenKeyEx(X86Ctx *ctx) { RET(2); }
 static void a_RegCloseKey(X86Ctx *ctx) { RET(0); }
@@ -653,6 +716,12 @@ static const HleDef file_defs[] = {
     {"kernel32.dll", "GetTempPathA", k_GetTempPathA, 2},
     {"kernel32.dll", "GetEnvironmentVariableW", k_GetEnvironmentVariableW, 3},
     {"shell32.dll", "SHGetFolderPathW", k_SHGetFolderPathW, 5},
+    {"kernel32.dll", "CreateFileMappingA", k_CreateFileMappingA, 6},
+    {"kernel32.dll", "CreateFileMappingW", k_CreateFileMappingW, 6},
+    {"kernel32.dll", "OpenFileMappingA", k_OpenFileMapping, 3},
+    {"kernel32.dll", "OpenFileMappingW", k_OpenFileMapping, 3},
+    {"kernel32.dll", "MapViewOfFile", k_MapViewOfFile, 5},
+    {"kernel32.dll", "UnmapViewOfFile", k_UnmapViewOfFile, 1},
     {"advapi32.dll", "RegOpenKeyExA", a_RegOpenKeyEx, 5},
     {"advapi32.dll", "RegOpenKeyExW", a_RegOpenKeyEx, 5},
     {"advapi32.dll", "RegCloseKey", a_RegCloseKey, 1},
