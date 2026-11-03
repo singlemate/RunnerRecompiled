@@ -341,19 +341,23 @@ void d3d_special_ReleaseDC(X86Ctx *ctx) { RET(D3DERR_INVALIDCALL); }
 #define LOCK_DISCARD 0x2000u
 
 typedef struct { void *host; uint32_t sub; uint32_t guest, size, readonly; void *bits; } Staging;
-static Staging staging[256];
+/* Level streaming keeps many textures locked across frames; the scan stops at the high-water mark. */
+#define MAX_STAGING 8192
+static Staging staging[MAX_STAGING];
+static int staging_top;
 
 static Staging *stage_get(void *host, uint32_t sub, int create)
 {
     host_lock(d3d_lock);
     Staging *free_slot = NULL;
-    for (int i = 0; i < 256; i++) {
+    for (int i = 0; i < staging_top; i++) {
         if (staging[i].host == host && staging[i].sub == sub) { host_unlock(d3d_lock); return &staging[i]; }
         if (!staging[i].host && !free_slot) free_slot = &staging[i];
     }
+    if (create && !free_slot && staging_top < MAX_STAGING) free_slot = &staging[staging_top++];
     if (create && free_slot) { free_slot->host = host; free_slot->sub = sub; free_slot->guest = 0; free_slot->size = 0; }
     host_unlock(d3d_lock);
-    if (!free_slot && create) rt_fatal("D3D9: more than 256 resources locked at once");
+    if (!free_slot && create) rt_fatal("D3D9: more than %d resources locked at once", MAX_STAGING);
     return create ? free_slot : NULL;
 }
 

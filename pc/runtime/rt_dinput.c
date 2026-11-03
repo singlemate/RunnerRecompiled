@@ -17,7 +17,7 @@ enum { K_DINPUT, K_KEYBOARD, K_MOUSE, K_OTHER };
 
 static uint32_t vt_dinput, vt_device;
 
-/* Host input state, filled by the platform layer (not yet: zeros). */
+/* Host input state, filled from the window messages (rt_user32.c) or the platform layer. */
 uint8_t rt_input_keys[256];      /* DIK_* scan codes, 0x80 = down */
 int32_t rt_input_mouse[3];       /* relative x, y, wheel since the last read */
 uint8_t rt_input_buttons[8];
@@ -137,8 +137,12 @@ static void i_DirectInput8Create(X86Ctx *ctx)
     RET(DI_OK);
 }
 
+/* XInput 1.3 by ordinal: #2 XInputGetState, #3 XInputSetState. No pad source yet: not connected. */
+static void x_NotConnected(X86Ctx *ctx) { RET(1167u); } /* ERROR_DEVICE_NOT_CONNECTED */
+
 static const HleDef dinput_exports[] = {
     {"dinput8.dll", "DirectInput8Create", i_DirectInput8Create, 5},
+    {"xinput1_3.dll", "#2", x_NotConnected, 2}, {"xinput1_3.dll", "#3", x_NotConnected, 2},
 };
 
 void rt_dinput_register(void) { rt_hle_register(dinput_exports, sizeof dinput_exports / sizeof *dinput_exports); }

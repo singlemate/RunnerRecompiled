@@ -600,6 +600,27 @@ static const char *ue_name(uint32_t idx)
     return b;
 }
 
+/* Diagnostics: every FName containing pattern (case-insensitive). */
+void rt_ue_dump_names(const char *pattern)
+{
+    ue_names = 0; /* the table grows while packages load: find it again for the current count */
+    ue_find_names();
+    if (!ue_names) { rt_log("UE: FName table not found"); return; }
+    char line[1024]; size_t o = 0;
+    uint32_t n = ue_nnames;
+    for (uint32_t i = 0; i < n; i++) {
+        const char *nm = ue_name(i);
+        if (!nm || !*nm) continue;
+        char low[128], pat[64]; size_t k;
+        for (k = 0; nm[k] && k < 127; k++) low[k] = (char)(nm[k] | 0x20); low[k] = 0;
+        for (k = 0; pattern[k] && k < 63; k++) pat[k] = (char)(pattern[k] | 0x20); pat[k] = 0;
+        if (!strstr(low, pat)) continue;
+        if (o > 900) { rt_log("UE names:%s", line); o = 0; }
+        o += (size_t)snprintf(line + o, sizeof line - o, " %s", nm);
+    }
+    if (o) rt_log("UE names:%s", line);
+}
+
 static void ue_describe(const char *what, uint32_t obj)
 {
     if (!ue_ok(obj) || !ue_ok(obj + 0x4c)) { rt_log("UE: %s %#x (not mapped)", what, obj); return; }

@@ -68,6 +68,19 @@ void rt_fatal(const char *fmt, ...)
     vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
     rt_log("FATAL: %s", buf);
+    {
+        RtThread *t = rt_thread_self();
+        if (t) rt_log("  thread %#x: eax %#x ecx %#x edx %#x ebx %#x esp %#x ebp %#x esi %#x edi %#x (as last spilled)", t->id,
+                      t->ctx.eax, t->ctx.ecx, t->ctx.edx, t->ctx.ebx, t->ctx.esp, t->ctx.ebp, t->ctx.esi, t->ctx.edi);
+        const char *peek = getenv("ME_PC_PEEK"); /* comma-separated guest addresses to show */
+        for (const char *q = peek; q && *q;) {
+            char *end;
+            uint32_t a = (uint32_t)strtoul(q, &end, 16);
+            if (end == q) break;
+            if (rt_vm_is_committed(a) || rt_module_at(a)) rt_log("  peek [%#x] = %#x", a, ld32(a));
+            q = *end == ',' ? end + 1 : end;
+        }
+    }
     guest_backtrace();
     rt_dump_hle_ring();
     exit(3);
@@ -653,12 +666,21 @@ static void resume_jump(RtThread *t, X86Ctx *ctx, uint32_t target)
     }
 }
 
-static RtThread *all_threads[64];
+static HostMutex *thread_list_lock(void)
+{
+    static HostMutex *m;
+    if (!m) m = host_mutex_new(); /* first created on the main thread, before any other */
+    return m;
+}
+
+static RtThread *all_threads[256];
 static int nall_threads;
 
 static void register_thread(RtThread *t)
 {
-    if (nall_threads < 64) all_threads[nall_threads++] = t;
+    host_lock(thread_list_lock());
+    if (nall_threads < 256) all_threads[nall_threads++] = t;
+    host_unlock(thread_list_lock());
 }
 
 /* ME_PC_STALL_DUMP=1: every 10 s, what each guest thread is doing. */
@@ -694,6 +716,11 @@ static void stall_watch(void *arg)
             if (strstr(thunks[k].name, "::Present") || strstr(thunks[k].name, "::EndScene"))
                 o += (size_t)snprintf(line + o, sizeof line - o, " %s=%u", thunks[k].name, thunks[k].calls);
         if (o) rt_log("watch: frames so far:%s", line);
+        static int ticks;
+        if (++ticks == 12 && getenv("ME_PC_UE_NAMES")) { /* after two minutes: names of the loaded game */
+            extern void rt_ue_dump_names(const char *pattern);
+            rt_ue_dump_names(getenv("ME_PC_UE_NAMES"));
+        }
     }
 }
 
@@ -755,20 +782,37 @@ RtThread *rt_thread_create_main(uint32_t stack_size)
     return t;
 }
 
+static void tls_clear_all(uint32_t slot);
+
 uint32_t rt_tls_alloc(void)
 {
     if (!tls_lock) tls_lock = host_mutex_new();
     host_lock(tls_lock);
     for (uint32_t i = 0; i < RT_TLS_SLOTS; i++)
-        if (!tls_used[i]) { tls_used[i] = 1; host_unlock(tls_lock); return i; }
+        if (!tls_used[i]) { tls_used[i] = 1; host_unlock(tls_lock); tls_clear_all(i); return i; }
     host_unlock(tls_lock);
     return 0xFFFFFFFFu; /* TLS_OUT_OF_INDEXES */
+}
+
+/* Windows zeroes a slot in every thread when it is freed and when it is allocated again, so a
+   new owner never sees the previous owner's values (PhysXCore reads its per-thread object with
+   "TlsGetValue, create if 0"). */
+static void tls_clear_all(uint32_t slot)
+{
+    host_lock(thread_list_lock());
+    for (int i = 0; i < nall_threads; i++) {
+        uint32_t teb = all_threads[i]->teb;
+        if (slot < 64) st32(teb + 0xE10 + 4 * slot, 0);
+        else if (ld32(teb + 0xF94)) st32(ld32(teb + 0xF94) + 4 * (slot - 64), 0);
+    }
+    host_unlock(thread_list_lock());
 }
 
 int rt_tls_free(uint32_t slot)
 {
     if (slot >= RT_TLS_SLOTS || !tls_used[slot]) return 0;
     tls_used[slot] = 0;
+    tls_clear_all(slot);
     return 1;
 }
 

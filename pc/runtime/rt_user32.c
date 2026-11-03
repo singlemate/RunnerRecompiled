@@ -254,6 +254,39 @@ static void u_SetCapture(X86Ctx *ctx) { uint32_t o = capture; capture = ARG(0); 
 static void u_GetCapture(X86Ctx *ctx) { RET(capture); }
 static void u_ReleaseCapture(X86Ctx *ctx) { capture = 0; RET(1); }
 
+/* Input state seen through the window messages, shared with DirectInput (rt_dinput.c): virtual
+   keys for GetKeyState/GetAsyncKeyState, DIK scan codes for the DirectInput keyboard, mouse
+   buttons and relative motion for the DirectInput mouse. */
+extern uint8_t rt_input_keys[256];
+extern int32_t rt_input_mouse[3];
+extern uint8_t rt_input_buttons[8];
+static volatile uint8_t vk_down[256];
+static int32_t last_mx, last_my, have_mouse;
+
+static void track_input(uint32_t msg, uint32_t wp, uint32_t lp)
+{
+    if (msg == 0x0100 || msg == 0x0104 || msg == 0x0101 || msg == 0x0105) { /* WM_(SYS)KEYDOWN/UP */
+        int down = msg == 0x0100 || msg == 0x0104;
+        vk_down[wp & 0xFF] = (uint8_t)down;
+        uint32_t sc = ((lp >> 16) & 0x7F) | ((lp >> 17) & 0x80); /* scan code, 0x80 = extended key */
+        rt_input_keys[sc & 0xFF] = down ? 0x80 : 0;
+        return;
+    }
+    static const struct { uint32_t down, up, vk, button; } mb[] = {
+        {0x0201, 0x0202, 0x01, 0}, {0x0204, 0x0205, 0x02, 1}, {0x0207, 0x0208, 0x04, 2}};
+    for (int i = 0; i < 3; i++)
+        if (msg == mb[i].down || msg == mb[i].up) {
+            vk_down[mb[i].vk] = msg == mb[i].down;
+            rt_input_buttons[mb[i].button] = msg == mb[i].down ? 0x80 : 0;
+        }
+    if (msg == 0x0200 || (msg >= 0x0201 && msg <= 0x0208)) { /* WM_MOUSEMOVE and buttons: relative motion */
+        int32_t x = (int16_t)(lp & 0xFFFF), y = (int16_t)(lp >> 16);
+        if (have_mouse) { rt_input_mouse[0] += x - last_mx; rt_input_mouse[1] += y - last_my; }
+        last_mx = x; last_my = y; have_mouse = 1;
+    }
+    if (msg == 0x020A) rt_input_mouse[2] += (int16_t)(wp >> 16); /* WM_MOUSEWHEEL */
+}
+
 /* Messages of the host queue for our windows, as guest MSGs. */
 static int next_message(uint32_t m, int remove)
 {
@@ -268,6 +301,7 @@ static int next_message(uint32_t m, int remove)
             continue;
         }
         if (msg == 0x000F && hh) host_validate(hh); /* WM_PAINT: deliver once, then validated */
+        if (remove) track_input(msg, wp, lp);
         st32(m, g); st32(m + 4, msg); st32(m + 8, wp); st32(m + 12, lp);
         st32(m + 16, t); st32(m + 20, (uint32_t)x); st32(m + 24, (uint32_t)y);
         return 1;
@@ -351,7 +385,7 @@ static void u_ClientToScreen(X86Ctx *ctx)
 }
 
 static void u_MapWindowPoints(X86Ctx *ctx) { RET(0); } /* windows sit at the origin */
-static void u_GetKeyState(X86Ctx *ctx) { RET(0); }
+static void u_GetKeyState(X86Ctx *ctx) { RET(vk_down[ARG(0) & 0xFF] ? 0xFFFF8000u : 0); }
 static void u_GetWindowThreadProcessId(X86Ctx *ctx) { if (ARG(1)) st32(ARG(1), 1); RET(rt_thread_self()->id); }
 
 static void u_MessageBox(X86Ctx *ctx)
