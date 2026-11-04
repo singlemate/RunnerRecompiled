@@ -354,18 +354,38 @@ static const HleDef **hle_sets;
 static size_t *hle_set_len, n_hle_sets;
 static HostMutex *thunk_lock;
 
-volatile uint32_t rt_last_dispatch, rt_last_dispatch_ret;
+/* The last guest target and return address that went through the dispatcher, per thread (for
+   fault reports); a global pair written by every thread made each dispatch a contended write. */
+uint32_t rt_self_last_target(void) { RtThread *t = rt_thread_self(); return t ? t->last_target : 0; }
+uint32_t rt_self_last_ret(void) { RtThread *t = rt_thread_self(); return t ? t->last_ret : 0; }
+
+/* Per-thread direct-mapped cache in front of fn_hash (16 MB, a cache miss on almost every look-up). */
+#define DCACHE_BITS 13
+typedef struct { uint32_t addr; X86Fn fn; } DCacheEntry;
+
+static X86Fn fn_find_cached(RtThread *t, uint32_t addr)
+{
+    if (!t) return fn_find(addr);
+    DCacheEntry *c = t->dcache;
+    if (!c) c = t->dcache = calloc(1u << DCACHE_BITS, sizeof *c);
+    DCacheEntry *e = &c[(addr ^ (addr >> DCACHE_BITS)) & ((1u << DCACHE_BITS) - 1)];
+    if (e->addr == addr && e->fn) return e->fn;
+    X86Fn fn = fn_find(addr);
+    if (fn) { e->addr = addr; e->fn = fn; }
+    return fn;
+}
 
 /* Ring of the last HLE calls (thunk index, esp before the call, return address), for fatal reports. */
-static struct { uint32_t thunk, esp, ret, eax_after; } hle_ring[64];
-static volatile uint32_t hle_ring_pos;
+/* HLE call counts are kept only for the stall watch (ME_PC_STALL_DUMP); the ring of recent HLE
+   calls is per thread. Both used to be shared atomics written by every thread on every call. */
+static int count_hle_calls;
+static struct { uint32_t thunk, esp, ret, eax_after; } no_thread_ring[64];
+static uint32_t no_thread_pos;
 
 static void resume_jump(RtThread *t, X86Ctx *ctx, uint32_t target);
 
 void x86_dispatch(X86Ctx *ctx, uint32_t target)
 {
-    rt_last_dispatch = target;
-    rt_last_dispatch_ret = ld32(ctx->esp);
     RtThread *self = rt_thread_self();
     if (self) { self->last_target = target; self->last_ret = ld32(ctx->esp); }
     if (target >= RT_THUNK_BASE && target < RT_THUNK_BASE + 0x01000000u) {
@@ -378,29 +398,32 @@ void x86_dispatch(X86Ctx *ctx, uint32_t target)
             t->called = 1;
             rt_log("stub %s!%s (return address %#x)", t->dll, t->name, ld32(ctx->esp));
         }
-        uint32_t slot = __atomic_fetch_add(&hle_ring_pos, 1, __ATOMIC_RELAXED) & 63;
-        hle_ring[slot].thunk = i;
-        hle_ring[slot].esp = ctx->esp;
-        hle_ring[slot].ret = ld32(ctx->esp);
+        uint32_t ret = ld32(ctx->esp);
+        __typeof__(no_thread_ring[0]) *rec = self ? (void *)&self->hle_ring[self->hle_pos++ & 63]
+                                                  : (void *)&no_thread_ring[no_thread_pos++ & 63];
+        rec->thunk = i;
+        rec->esp = ctx->esp;
+        rec->ret = ret;
         if (self) self->in_hle = i + 1;
-        __atomic_fetch_add(&t->calls, 1, __ATOMIC_RELAXED);
+        if (count_hle_calls) __atomic_fetch_add(&t->calls, 1, __ATOMIC_RELAXED);
         /* ME_PC_TRACE_DLL=<dll>: the first 20000 calls into that DLL with arguments and result. */
         static const char *trace_dll;
         static int trace_checked, traced;
         if (!trace_checked) { trace_checked = 1; trace_dll = getenv("ME_PC_TRACE_DLL"); }
-        uint32_t a0 = ld32(ctx->esp + 4), a1 = ld32(ctx->esp + 8), a2 = ld32(ctx->esp + 12), a3 = ld32(ctx->esp + 16);
-        uint32_t ret = ld32(ctx->esp);
-        t->fn(ctx);
         if (trace_dll && traced < 20000 && !strcmp(t->dll, trace_dll)) {
+            uint32_t a0 = ld32(ctx->esp + 4), a1 = ld32(ctx->esp + 8), a2 = ld32(ctx->esp + 12), a3 = ld32(ctx->esp + 16);
+            t->fn(ctx);
             traced++;
             rt_log("trace %s(%#x, %#x, %#x, %#x) -> %#x (from %#x)", t->name, a0, a1, a2, a3, ctx->eax, ret);
+        } else {
+            t->fn(ctx);
         }
         if (self) self->in_hle = 0;
-        hle_ring[slot].eax_after = ctx->eax;
+        rec->eax_after = ctx->eax;
         ctx->esp += 4 + 4u * t->nargs; /* stdcall: the callee pops the return address and its arguments */
         return;
     }
-    X86Fn fn = fn_find(target);
+    X86Fn fn = fn_find_cached(self, target);
     if (!fn && self) resume_jump(self, ctx, target);
     if (!fn) rt_fatal("no lifted function at %#x (return address %#x)", target, ld32(ctx->esp));
     /* ME_PC_TRACE_MOD=<module>: calls of that lifted module's exports (first 2000), with result. */
@@ -434,13 +457,17 @@ void x86_dispatch(X86Ctx *ctx, uint32_t target)
     fn(ctx);
 }
 
+/* The calling thread's last 64 HLE calls (fatal errors). */
 static void rt_dump_hle_ring(void)
 {
-    uint32_t pos = hle_ring_pos;
+    RtThread *self = rt_thread_self();
+    uint32_t pos = self ? self->hle_pos : no_thread_pos;
     for (uint32_t k = pos > 64 ? pos - 64 : 0; k < pos; k++) {
         uint32_t sl = k & 63;
-        rt_log("  hle %s!%s esp %#x ret %#x -> %#x", thunks[hle_ring[sl].thunk].dll, thunks[hle_ring[sl].thunk].name,
-               hle_ring[sl].esp, hle_ring[sl].ret, hle_ring[sl].eax_after);
+        uint32_t th = self ? self->hle_ring[sl].thunk : no_thread_ring[sl].thunk;
+        rt_log("  hle %s!%s esp %#x ret %#x -> %#x", thunks[th].dll, thunks[th].name,
+               self ? self->hle_ring[sl].esp : no_thread_ring[sl].esp, self ? self->hle_ring[sl].ret : no_thread_ring[sl].ret,
+               self ? self->hle_ring[sl].eax_after : no_thread_ring[sl].eax_after);
     }
 }
 
@@ -792,7 +819,7 @@ static void stall_watch(void *arg)
 
 void rt_start_stall_watch(void)
 {
-    if (getenv("ME_PC_STALL_DUMP")) host_thread_start(stall_watch, NULL);
+    if (getenv("ME_PC_STALL_DUMP")) { count_hle_calls = 1; host_thread_start(stall_watch, NULL); }
 }
 
 uint32_t rt_peb(void) { return peb_addr; }
@@ -816,6 +843,7 @@ static void thread_setup(RtThread *t, uint32_t stack_size)
     x87_init(&t->ctx);
     t->ctx.mxcsr = 0x1F80;
     self_thread = t;
+    t->host_tid = host_thread_id(); /* the main thread; others are bound again on their own thread */
     register_thread(t);
 }
 
@@ -830,7 +858,28 @@ RtThread *rt_thread_new(uint32_t stack_size)
     return t;
 }
 
-void rt_thread_bind(RtThread *t) { self_thread = t; }
+void rt_thread_bind(RtThread *t) { self_thread = t; t->host_tid = host_thread_id(); }
+
+void rt_thread_set_name(uint32_t id, const char *name)
+{
+    host_lock(thread_list_lock());
+    for (int i = 0; i < nall_threads; i++)
+        if (all_threads[i]->id == id || (id == 0xFFFFFFFFu && all_threads[i] == self_thread))
+            snprintf(all_threads[i]->name, sizeof all_threads[i]->name, "%s", name);
+    host_unlock(thread_list_lock());
+}
+
+int rt_thread_list(uint32_t *host_tids, const char **names, int max)
+{
+    host_lock(thread_list_lock());
+    int n = 0;
+    for (int i = 0; i < nall_threads && n < max; i++, n++) {
+        host_tids[n] = all_threads[i]->host_tid;
+        names[n] = all_threads[i]->name[0] ? all_threads[i]->name : NULL;
+    }
+    host_unlock(thread_list_lock());
+    return n;
+}
 
 RtThread *rt_thread_create_main(uint32_t stack_size)
 {

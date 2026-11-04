@@ -526,6 +526,26 @@ static void k_Sleep(X86Ctx *ctx) { rt_ue_fov_tick(); host_sleep_ms(ARG(0)); }
 static void k_GetTimeZoneInformation(X86Ctx *ctx) { memset(rt_ptr(ARG(0)), 0, 172); RET(0); }
 
 /* ---- system ---- */
+/* Processors the guest sees (ME_PC_CPUS, 1..8). UE3 starts its rendering thread only with more
+   than one (in the tutorial level +45% frames on the PC). Its command queue between the game and
+   rendering threads relies on x86 memory ordering: an x86-64 host keeps it, an ARM64 host does
+   not without barriers in the lifted code, so Android defaults to 1 until that is done. */
+static uint32_t guest_cpus(void)
+{
+    static uint32_t n;
+    if (!n) {
+        const char *e = getenv("ME_PC_CPUS");
+#ifdef __ANDROID__
+        n = e ? (uint32_t)atoi(e) : 1;
+#else
+        n = e ? (uint32_t)atoi(e) : 4;
+#endif
+        if (n < 1) n = 1;
+        if (n > 8) n = 8;
+    }
+    return n;
+}
+
 static void k_GetSystemInfo(X86Ctx *ctx)
 {
     uint32_t p = ARG(0);
@@ -533,8 +553,8 @@ static void k_GetSystemInfo(X86Ctx *ctx)
     st32(p + 4, RT_PAGE);
     st32(p + 8, 0x10000);
     st32(p + 12, 0x7FFEFFFF);
-    st32(p + 16, 1);         /* active processor mask */
-    st32(p + 20, 1);         /* number of processors */
+    st32(p + 16, (1u << guest_cpus()) - 1); /* active processor mask */
+    st32(p + 20, guest_cpus());             /* number of processors */
     st32(p + 24, 586);       /* PROCESSOR_INTEL_PENTIUM */
     st32(p + 28, RT_GRANULE);
     st16(p + 32, 6);         /* processor level */
@@ -663,6 +683,7 @@ static void k_RaiseException(X86Ctx *ctx)
         uint32_t info = ARG(3);
         if (ARG(2) >= 3 && ld32(info) == 0x1000)
             rt_log("thread %#x named \"%s\"", ld32(info + 8), rt_str(ld32(info + 4)) ? rt_str(ld32(info + 4)) : "");
+        if (ARG(2) >= 3 && ld32(info) == 0x1000 && rt_str(ld32(info + 4))) rt_thread_set_name(ld32(info + 8), rt_str(ld32(info + 4)));
         return;
     }
     /* MSVC C++ throw: args are magic 0x19930520, the object, ThrowInfo. Name the thrown type. */
@@ -768,8 +789,8 @@ static void k_FileTimeCopy(X86Ctx *ctx) /* FileTimeToLocalFileTime / LocalFileTi
     RET(1);
 }
 
-static void k_GetProcessAffinityMask(X86Ctx *ctx) { st32(ARG(1), 0xF); st32(ARG(2), 0xF); RET(1); }
-static void k_SetThreadAffinityMask(X86Ctx *ctx) { RET(0xF); }
+static void k_GetProcessAffinityMask(X86Ctx *ctx) { uint32_t m = (1u << guest_cpus()) - 1; st32(ARG(1), m); st32(ARG(2), m); RET(1); }
+static void k_SetThreadAffinityMask(X86Ctx *ctx) { RET((1u << guest_cpus()) - 1); }
 static void k_SetProcessAffinityMask(X86Ctx *ctx) { RET(1); }
 static void k_SetThreadPriority(X86Ctx *ctx) { RET(1); }
 static void k_SetThreadIdealProcessor(X86Ctx *ctx) { RET(0); }

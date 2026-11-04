@@ -85,7 +85,7 @@ def main():
     # -mllvm -fast-isel: clang 23.1.3's i686 SelectionDAG drops the `and` in
     # (x & 0xFFFFFF00) | zext(load i8 [x + k]) and emits a bare movzx (the IR is correct; x86-64
     # and AArch64 are not affected). FastISel keeps the IR-level -O2 optimizations.
-    cmd = [cc, args.opt, "-mllvm", "-fast-isel", "-g0", "-DX86_MEM_BASE=0", "-I", rt, "-Wno-unused-label", "-Wno-unused-variable",
+    cmd = [cc, args.opt, "-mllvm", "-fast-isel", "-g0", "-DX86_MEM_BASE=0", "-DX86_TSO=0", "-I", rt, "-Wno-unused-label", "-Wno-unused-variable",
            "-Wno-unused-but-set-variable", "-fwrapv", "-msse2", "-mfpmath=sse", "-ffp-contract=off",
            os.path.join(HERE, "harness.c"), os.path.join(HERE, "trampoline.S"), c_path,
            "-o", exe, "-Wl,--image-base,0x10000000", "-Wl,--disable-dynamicbase"]

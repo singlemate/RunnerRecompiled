@@ -62,6 +62,8 @@ int main(int argc, char **argv)
     rt_start_stall_watch();
     extern void rt_ue_start_fov(void);
     rt_ue_start_fov(); /* ME_PC_FOV */
+    extern void host_profile_start(void);
+    host_profile_start(); /* ME_PC_PROFILE: samples of this (the game) thread */
     rt_log("entering the game at %#x", game->entry);
     uint32_t r = rt_call(ctx, game->entry, 0, NULL);
     rt_log("game entry returned %u", r);

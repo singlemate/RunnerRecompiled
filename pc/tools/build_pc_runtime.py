@@ -63,8 +63,11 @@ def write_module_table(path):
 
 
 def compile_one(cc, src, obj, extra=()):
+    # headers every file depends on (runtime files also on rt.h and the D3D9 bridge headers)
+    headers = ["x86rt.h"] + (["rt.h", "rt_d3d9.h", "rt_d3d9_idx.h"]
+                             if os.path.dirname(os.path.abspath(src)) == RUNTIME else [])
     if os.path.exists(obj) and os.path.getmtime(obj) >= os.path.getmtime(src) and \
-            os.path.getmtime(obj) >= os.path.getmtime(os.path.join(RUNTIME, "x86rt.h")):
+            all(os.path.getmtime(obj) >= os.path.getmtime(os.path.join(RUNTIME, h)) for h in headers):
         return obj, None
     flags = list(extra)
     if os.path.basename(src) == "rt_main.c" and "-fPIC" in flags:

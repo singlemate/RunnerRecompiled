@@ -143,7 +143,7 @@ int host_thread_start(void (*fn)(void *), void *arg)
 }
 
 /* ---- faults: report the guest address and the last dispatch, then stop ---- */
-extern volatile uint32_t rt_last_dispatch, rt_last_dispatch_ret;
+uint32_t rt_self_last_target(void), rt_self_last_ret(void); /* rt_core.c: the faulting thread's last dispatch */
 
 static void on_fault(int sig, siginfo_t *si, void *uc)
 {
@@ -153,10 +153,10 @@ static void on_fault(int sig, siginfo_t *si, void *uc)
     uintptr_t image = dladdr((void *)pc, &info) ? (uintptr_t)info.dli_fbase : 0;
     if (a >= base && a - base < 0x100000000ull)
         rt_fatal("host signal %d: guest address %#x, host pc %p (image +%#lx); last dispatch %#x (return %#x)", sig,
-                 (uint32_t)(a - base), (void *)pc, (unsigned long)(pc - image), rt_last_dispatch, rt_last_dispatch_ret);
+                 (uint32_t)(a - base), (void *)pc, (unsigned long)(pc - image), rt_self_last_target(), rt_self_last_ret());
     extern const char *rt_thunk_name(uint32_t t);
     rt_fatal("host signal %d at host address %p, pc %p (image +%#lx); last dispatch %#x %s (return %#x)", sig, (void *)a,
-             (void *)pc, (unsigned long)(pc - image), rt_last_dispatch, rt_thunk_name(rt_last_dispatch), rt_last_dispatch_ret);
+             (void *)pc, (unsigned long)(pc - image), rt_self_last_target(), rt_thunk_name(rt_self_last_target()), rt_self_last_ret());
 }
 
 void host_install_fault_handler(void)
@@ -441,6 +441,9 @@ int host_list_dir(const char *path, void (*fn)(void *u, const char *name), void 
     closedir(d);
     return 1;
 }
+
+/* profiling: not on Android yet (simpleperf from the NDK works on the device) */
+void host_profile_start(void) {}
 
 /* ---- audio: AAudio (loaded at run time so the library also loads on systems without it) ---- */
 static void (*audio_mix)(int16_t *out, uint32_t frames);

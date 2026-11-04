@@ -109,6 +109,11 @@ typedef struct RtThread {
     uint32_t last_error;
     volatile uint32_t last_target, last_ret, in_hle; /* diagnostics: last dispatch; inside an HLE call */
     X86Resume *resume_top;   /* innermost live frame with EH resume points */
+    void *dcache;            /* dispatch cache (rt_core.c) */
+    uint32_t host_tid;       /* host thread id (profiler) */
+    struct { uint32_t thunk, esp, ret, eax_after; } hle_ring[64]; /* this thread's last HLE calls */
+    uint32_t hle_pos;
+    char name[32];           /* set by the guest (MS_VC_EXCEPTION), for diagnostics */
 } RtThread;
 void rt_start_stall_watch(void);
 RtThread *rt_thread_self(void);
@@ -116,6 +121,8 @@ uint32_t rt_peb(void);
 RtThread *rt_thread_create_main(uint32_t stack_size);
 RtThread *rt_thread_new(uint32_t stack_size);   /* guest stack and TEB for a new thread */
 void rt_thread_bind(RtThread *t);               /* make t the current guest thread of this host thread */
+void rt_thread_set_name(uint32_t id, const char *name);    /* guest thread id (0xFFFFFFFF = calling thread) */
+int rt_thread_list(uint32_t *host_tids, const char **names, int max); /* registered guest threads */
 #define RT_TLS_SLOTS 1088 /* 64 in the TEB + 1024 expansion slots, as on Windows */
 uint32_t rt_tls_alloc(void);
 int rt_tls_free(uint32_t slot);

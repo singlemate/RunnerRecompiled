@@ -18,7 +18,11 @@ param(
  # Diagnostic build only: folder with the libadrenotools files above plus the Turnip driver
  # libvulkan_freedreno.so (ME_TURNIP=1 without an imported package). Goes to work\private-apk\
  # as RunnerRecompiled-turnip.apk, never published.
- [string]$Turnip = ''
+ [string]$Turnip = '',
+ # Private build only: the PC version (work\pc-recomp\bin-android\libmepc.so, lifted from the
+ # user's GOG copy) and DXVK Native (libdxvk_d3d9.so, pc/dxvk). Goes to work\private-apk\.
+ [string]$PcRuntime = '',
+ [string]$PcDxvk = ''
 )
 $ErrorActionPreference='Stop'
 $root=$PSScriptRoot
@@ -33,12 +37,18 @@ New-Item -ItemType Directory -Force "$build\classes","$build\dex","$build\native
 $sources=Get-ChildItem (Join-Path $root 'src') -Recurse -Filter '*.java' | ForEach-Object FullName
 & "$java\javac.exe" -encoding UTF-8 --release 8 -classpath $android -d "$build\classes" @sources
 Check
-$classFiles=Get-ChildItem "$build\classes" -Recurse -Filter '*.class' | ForEach-Object FullName
-& "$bt\d8.bat" --lib $android --min-api 26 --output "$build\dex" @classFiles
+# All classes in one jar for d8: a list of class files outgrows cmd.exe's command line (d8.bat).
+Remove-Item -Force -ErrorAction SilentlyContinue "$build\classes.jar"
+& "$java\jar.exe" --create --file "$build\classes.jar" -C "$build\classes" .
+Check
+& "$bt\d8.bat" --lib $android --min-api 26 --output "$build\dex" "$build\classes.jar"
 Check
 & $clang --target=aarch64-linux-android26 -c -fPIC -O2 (Join-Path $root 'native\probe.c') -o "$build\probe.o"
 Check
 & $clang --target=aarch64-linux-android26 -shared '-Wl,-z,max-page-size=16384' "$build\probe.o" -o "$build\native\lib\arm64-v8a\libmeprobe.so"
+Check
+# JNI glue of the PC variant (loads libmepc.so when the APK has it; no game code itself).
+& $clang --target=aarch64-linux-android26 -shared -fPIC -O2 '-Wl,-z,max-page-size=16384' (Join-Path $root 'native\pc_jni.c') -o "$build\native\lib\arm64-v8a\libmepcjni.so" -llog -landroid
 Check
 # Resources (adaptive launcher icon in res/): compile to flat files, then link with the manifest.
 Remove-Item -Force -ErrorAction SilentlyContinue "$build\res.zip"
@@ -47,7 +57,13 @@ Check
 $manifest=Join-Path $root 'AndroidManifest.xml'
 & "$bt\aapt2.exe" link "$build\res.zip" -I $android --manifest $manifest --min-sdk-version 26 --target-sdk-version 35 --version-code 1 --version-name '0.1-research' -o "$build\base.apk"
 Check
-$nativeLibs = @('lib/arm64-v8a/libmeprobe.so')
+$nativeLibs = @('lib/arm64-v8a/libmeprobe.so', 'lib/arm64-v8a/libmepcjni.so')
+foreach ($lib in 'libmepc.so','libdxvk_d3d9.so') { Remove-Item -Force -ErrorAction SilentlyContinue "$build\native\lib\arm64-v8a\$lib" }
+if ($PcRuntime) {
+ Copy-Item -Force $PcRuntime "$build\native\lib\arm64-v8a\libmepc.so"
+ Copy-Item -Force $PcDxvk "$build\native\lib\arm64-v8a\libdxvk_d3d9.so"
+ $nativeLibs += 'lib/arm64-v8a/libmepc.so', 'lib/arm64-v8a/libdxvk_d3d9.so'
+}
 if ($Runtime) {
  Copy-Item -Force $Runtime "$build\native\lib\arm64-v8a\libmeruntime.so"
  $nativeLibs += 'lib/arm64-v8a/libmeruntime.so'
@@ -80,10 +96,10 @@ if(!(Test-Path -LiteralPath $KeyStore)){
  Check
 }
 $apk=Join-Path (Split-Path $root -Parent) 'RunnerRecompiled.apk'
-if ($Runtime -or $Layer -or $Turnip) {
+if ($Runtime -or $Layer -or $Turnip -or $PcRuntime) {
  $privateDir=Join-Path (Split-Path (Split-Path (Split-Path $root -Parent) -Parent) -Parent) 'work\private-apk'
  New-Item -ItemType Directory -Force $privateDir | Out-Null
- $apk=Join-Path $privateDir $(if ($Turnip -and $Layer) { 'RunnerRecompiled-turnip-layer.apk' } elseif ($Turnip) { 'RunnerRecompiled-turnip.apk' } elseif ($Layer -like '*khronos_validation*') { 'RunnerRecompiled-validation.apk' } elseif ($Layer) { 'RunnerRecompiled-renderdoc.apk' } else { 'RunnerRecompiled-private.apk' })
+ $apk=Join-Path $privateDir $(if ($Turnip -and $Layer) { 'RunnerRecompiled-turnip-layer.apk' } elseif ($Turnip) { 'RunnerRecompiled-turnip.apk' } elseif ($Layer -like '*khronos_validation*') { 'RunnerRecompiled-validation.apk' } elseif ($Layer) { 'RunnerRecompiled-renderdoc.apk' } elseif ($PcRuntime -and -not $Runtime) { 'RunnerRecompiled-pc-private.apk' } else { 'RunnerRecompiled-private.apk' })
 }
 & "$bt\apksigner.bat" sign --ks $KeyStore --ks-pass pass:android --key-pass pass:android --out $apk "$build\aligned.apk"
 Check

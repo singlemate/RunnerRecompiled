@@ -48,18 +48,48 @@ typedef void (*X86Fn)(X86Ctx *);
                     esp = ctx->esp, ebp = ctx->ebp, esi = ctx->esi, edi = ctx->edi)
 
 #define X86_PTR(a) ((uintptr_t)X86_MEM_BASE + (uint32_t)(a))
-static inline uint8_t ld8(uint32_t a) { uint8_t v; memcpy(&v, (void *)X86_PTR(a), 1); return v; }
-static inline uint16_t ld16(uint32_t a) { uint16_t v; memcpy(&v, (void *)X86_PTR(a), 2); return v; }
-static inline uint32_t ld32(uint32_t a) { uint32_t v; memcpy(&v, (void *)X86_PTR(a), 4); return v; }
-static inline uint64_t ld64(uint32_t a) { uint64_t v; memcpy(&v, (void *)X86_PTR(a), 8); return v; }
-static inline void st8(uint32_t a, uint8_t v) { memcpy((void *)X86_PTR(a), &v, 1); }
-static inline void st16(uint32_t a, uint16_t v) { memcpy((void *)X86_PTR(a), &v, 2); }
-static inline void st32(uint32_t a, uint32_t v) { memcpy((void *)X86_PTR(a), &v, 4); }
-static inline void st64(uint32_t a, uint64_t v) { memcpy((void *)X86_PTR(a), &v, 8); }
-static inline float ldf(uint32_t a) { float v; memcpy(&v, (void *)X86_PTR(a), 4); return v; }
-static inline double ldd(uint32_t a) { double v; memcpy(&v, (void *)X86_PTR(a), 8); return v; }
-static inline void stf(uint32_t a, float v) { memcpy((void *)X86_PTR(a), &v, 4); }
-static inline void std_(uint32_t a, double v) { memcpy((void *)X86_PTR(a), &v, 8); }
+
+/* Memory ordering. The guest's threads are host threads and its lock-free code (UE3's rendering
+   command queue, PhysX workers) relies on x86 ordering: loads are not reordered with loads, stores
+   not with stores. With X86_TSO (the default) every guest load is an acquire and every store a
+   release: plain moves on an x86-64 host (only the compiler is kept from reordering), LDAR/STLR
+   on ARM64. An unaligned access cannot be atomic there: it is copied with a fence on its side.
+   128-bit SSE accesses stay plain (not used to publish data). -DX86_TSO=0 gives plain copies. */
+#ifndef X86_TSO
+#define X86_TSO 1
+#endif
+#if X86_TSO
+#define X86_LD(T, a) do { \
+        T v_; \
+        const void *p_ = (const void *)X86_PTR(a); \
+        if (((uintptr_t)p_ & (sizeof(T) - 1)) == 0) return __atomic_load_n((const T *)p_, __ATOMIC_ACQUIRE); \
+        memcpy(&v_, p_, sizeof(T)); \
+        __atomic_thread_fence(__ATOMIC_ACQUIRE); \
+        return v_; \
+    } while (0)
+#define X86_ST(T, a, v) do { \
+        void *p_ = (void *)X86_PTR(a); \
+        T v_ = (v); \
+        if (((uintptr_t)p_ & (sizeof(T) - 1)) == 0) { __atomic_store_n((T *)p_, v_, __ATOMIC_RELEASE); return; } \
+        __atomic_thread_fence(__ATOMIC_RELEASE); \
+        memcpy(p_, &v_, sizeof(T)); \
+    } while (0)
+#else
+#define X86_LD(T, a) do { T v_; memcpy(&v_, (const void *)X86_PTR(a), sizeof(T)); return v_; } while (0)
+#define X86_ST(T, a, v) do { T v_ = (v); memcpy((void *)X86_PTR(a), &v_, sizeof(T)); } while (0)
+#endif
+static inline uint8_t ld8(uint32_t a) { X86_LD(uint8_t, a); }
+static inline uint16_t ld16(uint32_t a) { X86_LD(uint16_t, a); }
+static inline uint32_t ld32(uint32_t a) { X86_LD(uint32_t, a); }
+static inline uint64_t ld64(uint32_t a) { X86_LD(uint64_t, a); }
+static inline void st8(uint32_t a, uint8_t v) { X86_ST(uint8_t, a, v); }
+static inline void st16(uint32_t a, uint16_t v) { X86_ST(uint16_t, a, v); }
+static inline void st32(uint32_t a, uint32_t v) { X86_ST(uint32_t, a, v); }
+static inline void st64(uint32_t a, uint64_t v) { X86_ST(uint64_t, a, v); }
+static inline float ldf(uint32_t a) { uint32_t u = ld32(a); float v; memcpy(&v, &u, 4); return v; }
+static inline double ldd(uint32_t a) { uint64_t u = ld64(a); double v; memcpy(&v, &u, 8); return v; }
+static inline void stf(uint32_t a, float v) { uint32_t u; memcpy(&u, &v, 4); st32(a, u); }
+static inline void std_(uint32_t a, double v) { uint64_t u; memcpy(&u, &v, 8); st64(a, u); }
 static inline X86Xmm ldx(uint32_t a) { X86Xmm v; memcpy(&v, (void *)X86_PTR(a), 16); return v; }
 static inline void stx(uint32_t a, X86Xmm v) { memcpy((void *)X86_PTR(a), &v, 16); }
 static inline uint32_t f2u(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }

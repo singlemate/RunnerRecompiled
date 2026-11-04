@@ -17,6 +17,9 @@ final class GuestInput {
  /** Right stick from the screen (camera), x right and y down in -1..1. */
  synchronized void touchRightStick(float x,float y){touchAxes[2]=full(x);touchAxes[3]=full(-y);}
  synchronized void touchTrigger(boolean left,boolean down){if(left){touchLt=down?255:0;ltLatch|=down;}else{touchRt=down?255:0;rtLatch|=down;}}
+ /** The on-screen state for the PC version, which polls it instead of starting the loopback sender:
+     buttons, lt, rt, lx, ly, rx, ry. Taps are consumed as a packet would. */
+ synchronized int[] takeTouch(){int[] s={touch|touchLatch,ltLatch?255:touchLt,rtLatch?255:touchRt,touchAxes[0],touchAxes[1],touchAxes[2],touchAxes[3]};touchLatch=0;ltLatch=rtLatch=false;return s;}
  synchronized void clear(){keys=touch=hat=lt=rt=keyLt=keyRt=touchLt=touchRt=touchLatch=0;ltLatch=rtLatch=false;java.util.Arrays.fill(axes,(short)0);java.util.Arrays.fill(touchAxes,(short)0);}
  void start(){active=true;Thread owner=new Thread(this::sendLoop,"guest-input");sender=owner;owner.start();}
  void stop(){active=false;clear();Thread old=sender;if(old!=null)old.interrupt();}

@@ -46,7 +46,7 @@ uint32_t host_thread_id(void) { return GetCurrentThreadId(); }
 
 /* Host faults: report the guest address and the last guest target that went through the
    dispatcher, then stop. */
-extern volatile uint32_t rt_last_dispatch, rt_last_dispatch_ret;
+uint32_t rt_self_last_target(void), rt_self_last_ret(void); /* rt_core.c: the faulting thread's last dispatch */
 
 static LONG CALLBACK on_fault(EXCEPTION_POINTERS *ep)
 {
@@ -61,10 +61,10 @@ static LONG CALLBACK on_fault(EXCEPTION_POINTERS *ep)
                  code, (uint32_t)(a - base), ep->ExceptionRecord->ExceptionInformation[0] ? "write" : "read",
                  (void *)ep->ContextRecord->Rip,
                  (unsigned long long)(ep->ContextRecord->Rip - (uintptr_t)GetModuleHandleW(NULL)),
-                 rt_last_dispatch, rt_last_dispatch_ret);
+                 rt_self_last_target(), rt_self_last_ret());
     extern const char *rt_thunk_name(uint32_t t);
     rt_fatal("host fault %#lx at host address %p, rip %p; last dispatch %#x %s (return %#x)", code, (void *)a,
-             (void *)ep->ContextRecord->Rip, rt_last_dispatch, rt_thunk_name(rt_last_dispatch), rt_last_dispatch_ret);
+             (void *)ep->ContextRecord->Rip, rt_self_last_target(), rt_thunk_name(rt_self_last_target()), rt_self_last_ret());
 }
 
 void host_install_fault_handler(void) { AddVectoredExceptionHandler(1, on_fault); }
@@ -352,5 +352,76 @@ void *host_foreground_window(void)
     DWORD pid = 0;
     if (fg) GetWindowThreadProcessId(fg, &pid);
     return pid == GetCurrentProcessId() ? fg : NULL;
+}
+
+/* ---- sampling profiler (ME_PC_PROFILE=<seconds>[,<delay seconds>]) ----
+   A host thread stops every guest thread once a millisecond and records its instruction pointer
+   as an offset in me_pc.exe; after the delay it collects for the given time and writes
+   pc-profile.bin (pairs of uint32: thread index, offset; 0xFFFFFFFF = outside the image) and
+   pc-profile-threads.txt (index, host id, guest name). pc/tools/profile_report.py names them. */
+static uint32_t prof_seconds, prof_delay;
+
+static DWORD WINAPI prof_run(LPVOID arg)
+{
+    (void)arg;
+    Sleep(prof_delay * 1000u);
+    uintptr_t base = (uintptr_t)GetModuleHandleW(NULL);
+    enum { MAXT = 64 };
+    uint32_t tids[MAXT];
+    const char *names[MAXT];
+    HANDLE hs[MAXT] = {0};
+    uint32_t got[MAXT] = {0}, fail_open[MAXT] = {0}, fail_suspend[MAXT] = {0}, fail_ctx[MAXT] = {0};
+    DWORD open_err[MAXT] = {0};
+    uint32_t cap = prof_seconds * 1200u * 16u, n = 0;
+    uint32_t *s = malloc(sizeof *s * 2 * cap);
+    timeBeginPeriod(1);
+    ULONGLONG end = GetTickCount64() + prof_seconds * 1000ull;
+    int nt = 0;
+    while (GetTickCount64() < end && n + MAXT < cap) {
+        nt = rt_thread_list(tids, names, MAXT);
+        for (int t = 0; t < nt; t++) {
+            if (!hs[t]) { hs[t] = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, tids[t]); if (!hs[t]) open_err[t] = GetLastError(); }
+            if (!hs[t] || tids[t] == GetCurrentThreadId()) { fail_open[t]++; continue; }
+            if (SuspendThread(hs[t]) == (DWORD)-1) { fail_suspend[t]++; continue; }
+            CONTEXT c;
+            c.ContextFlags = CONTEXT_CONTROL;
+            if (GetThreadContext(hs[t], &c)) {
+                uintptr_t off = c.Rip - base;
+                s[2 * n] = (uint32_t)t;
+                s[2 * n + 1] = off < 0x40000000u ? (uint32_t)off : 0xFFFFFFFFu;
+                n++;
+                got[t]++;
+            } else fail_ctx[t]++;
+            ResumeThread(hs[t]);
+        }
+        Sleep(1);
+    }
+    timeEndPeriod(1);
+    FILE *f = fopen("pc-profile.bin", "wb");
+    if (f) { fwrite(s, 8, n, f); fclose(f); }
+    f = fopen("pc-profile-threads.txt", "w");
+    if (f) {
+        nt = rt_thread_list(tids, names, MAXT);
+        for (int t = 0; t < nt; t++) fprintf(f, "%d %u %s\n", t, tids[t], names[t] ? names[t] : (t == 0 ? "main" : "-"));
+        fclose(f);
+    }
+    rt_log("profile: %u samples of %d threads written to pc-profile.bin", n, nt);
+    for (int t = 0; t < nt; t++)
+        rt_log("profile:   thread %d (%u %s): %u samples, open failed %u (error %lu), suspend failed %u, context failed %u", t, tids[t],
+               names[t] ? names[t] : "-", got[t], fail_open[t], open_err[t], fail_suspend[t], fail_ctx[t]);
+    free(s);
+    return 0;
+}
+
+void host_profile_start(void)
+{
+    const char *e = getenv("ME_PC_PROFILE");
+    if (!e) return;
+    prof_seconds = (uint32_t)atoi(e);
+    const char *comma = strchr(e, ',');
+    prof_delay = comma ? (uint32_t)atoi(comma + 1) : 0;
+    if (!prof_seconds) prof_seconds = 30;
+    CreateThread(NULL, 0, prof_run, NULL, 0, NULL);
+    rt_log("profile: %u s of samples after %u s", prof_seconds, prof_delay);
 }
 #endif
