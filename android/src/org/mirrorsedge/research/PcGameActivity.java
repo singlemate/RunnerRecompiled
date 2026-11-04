@@ -58,10 +58,26 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
     private TouchPad touchPad;
     private static int touchMode = -1;  // ME_PC_TOUCH: -1 auto, 1 always, 0 never
     private int[] touchState = new int[7];  // buttons, lt, rt, lx, ly, rx, ry
+    private int holdBits, holdLt, holdRt;
+    private long holdUntil;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable touchPoll = new Runnable() {
         public void run() {
             int[] s = touchInput.takeTouch();
+            // A quick tap is held for at least 100 ms: the game reads XInput once a frame (30 ms at
+            // 33 fps on the tablet), and a press seen by one 16 ms poll only was missed.
+            long now = android.os.SystemClock.uptimeMillis();
+            if (now >= holdUntil) holdBits = holdLt = holdRt = 0;
+            int fresh = s[0] & ~touchState[0];
+            if (fresh != 0 || (s[1] > 0 && touchState[1] == 0) || (s[2] > 0 && touchState[2] == 0)) {
+                holdBits |= fresh;
+                if (s[1] > 0) holdLt = 255;
+                if (s[2] > 0) holdRt = 255;
+                holdUntil = now + 100;
+            }
+            s[0] |= holdBits;
+            s[1] = Math.max(s[1], holdLt);
+            s[2] = Math.max(s[2], holdRt);
             if (started && !java.util.Arrays.equals(s, touchState)) { touchState = s; sendPad(0); }
             if (touchPad.getVisibility() == View.VISIBLE) handler.postDelayed(this, 16);
         }
@@ -148,8 +164,8 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
         for (int i = 0; i < FPS.length; i++) fpsNames[i] = "Лимит кадров: " + FPS[i] + (FPS[i] == 62 ? " (как в игре)" : "");
         android.widget.Spinner fpsBox = spinner(box, fpsNames, indexOf(FPS, prefs.getInt("fps", 62)));
         String[] cpuNames = new String[CPUS.length];
-        for (int i = 0; i < CPUS.length; i++) cpuNames[i] = "Ядер для игры: " + CPUS[i] + (CPUS[i] == 1 ? " (надёжнее)" : " (отдельный поток отрисовки)");
-        android.widget.Spinner cpuBox = spinner(box, cpuNames, indexOf(CPUS, prefs.getInt("cpus", 1)));
+        for (int i = 0; i < CPUS.length; i++) cpuNames[i] = "Ядер для игры: " + CPUS[i] + (CPUS[i] == 1 ? "" : " (отдельный поток отрисовки)");
+        android.widget.Spinner cpuBox = spinner(box, cpuNames, indexOf(CPUS, prefs.getInt("cpus", 4)));
         android.widget.Spinner touchBox = spinner(box, TOUCH, prefs.getInt("touch", 0));
 
         TextView fovText = new TextView(this);
@@ -260,7 +276,7 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
                 setIni(ini, "Engine.GameEngine", "MaxSmoothedFrameRate", String.valueOf(prefs.getInt("fps", 62)));
             }
             if (prefs.getInt("fov", 0) > 0) env.add("ME_PC_FOV=" + prefs.getInt("fov", 0));
-            env.add("ME_PC_CPUS=" + prefs.getInt("cpus", 1));
+            env.add("ME_PC_CPUS=" + prefs.getInt("cpus", 4));
             int touch = prefs.getInt("touch", 0);
             if (touch > 0) env.add("ME_PC_TOUCH=" + (touch == 1 ? 1 : 0));
         }

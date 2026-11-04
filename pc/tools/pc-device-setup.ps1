@@ -26,7 +26,9 @@ $adbArgs = @()
 if ($Serial) { $adbArgs = @('-s', $Serial) }
 
 function Invoke-Adb([string[]]$a) {
-  $out = & $Adb @adbArgs @a 2>&1
+  # adb reports progress on stderr; in Windows PowerShell 5.1 that is an error record under 'Stop'
+  $ErrorActionPreference = 'Continue'
+  $out = & $Adb @adbArgs @a 2>&1 | ForEach-Object { "$_" }
   if ($LASTEXITCODE -ne 0) { throw "adb $($a -join ' '): $out" }
   return $out
 }
@@ -89,4 +91,6 @@ Push-Tree (Join-Path $Deps 'rebased') "$remote/deps/rebased" $sizes
 if (-not $SkipGame) {
   foreach ($d in 'Binaries', 'Engine', 'TdGame') { Push-Tree (Join-Path $Game $d) "$remote/MirrorsEdge/$d" $sizes }
 }
+# Pushed files belong to adb's user (shell, mode 770): the app's own uid could not even list them.
+Invoke-Adb @('shell', "find '$remote' -type d -exec chmod 777 {} + ; find '$remote' -type f -exec chmod 666 {} +") | Out-Null
 Write-Host "done: $remote"

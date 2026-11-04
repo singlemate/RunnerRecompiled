@@ -44,8 +44,16 @@ uint32_t d3d_wrap(void *host, int iface)
     uint32_t s = map_slot(host);
     if (map[s].host) {
         uint32_t p = map[s].proxy;
-        host_unlock(d3d_lock);
-        return p;
+        if (ld32(p + 4) == (uint32_t)iface) {
+            host_unlock(d3d_lock);
+            return p;
+        }
+        /* Same address, another interface: the old object died without its proxy being forgotten
+           (surfaces of a texture live and die with the texture; their Release never reaches 0)
+           and the host reused the memory (DXVK on Android does, e.g. for a vertex buffer). The
+           old proxy stays allocated: the guest may still hold it. */
+        static int logged;
+        if (logged++ < 20) rt_log("D3D9: host object %p reused (proxy %#x interface %u -> %d)", host, p, ld32(p + 4), iface);
     }
     uint32_t p = rt_heap_alloc(16, 1);
     st32(p, vtables[iface]);

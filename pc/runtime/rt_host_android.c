@@ -182,6 +182,16 @@ static void (*dxvk_set_window)(ANativeWindow *);
 
 void *host_d3d9_create(uint32_t sdk_version)
 {
+    /* DXVK Native picks its window system by name (pc/dxvk patch: "Android"); its logs go next
+       to the runtime's own log (otherwise to stderr, which Android drops). */
+    setenv("DXVK_WSI_DRIVER", "Android", 0);
+    const char *log = getenv("ME_PC_LOG_PATH");
+    if (log && !getenv("DXVK_LOG_PATH")) {
+        char dir[512];
+        snprintf(dir, sizeof dir, "%s", log);
+        char *slash = strrchr(dir, '/');
+        if (slash) { *slash = 0; setenv("DXVK_LOG_PATH", dir, 0); }
+    }
     void *lib = dlopen("libdxvk_d3d9.so", RTLD_NOW);
     if (!lib) { rt_log("Direct3D 9: libdxvk_d3d9.so not available (%s)", dlerror()); return NULL; }
     dxvk_set_window = (void (*)(ANativeWindow *))dlsym(lib, "dxvk_android_set_window");
