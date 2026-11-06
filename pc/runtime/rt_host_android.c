@@ -177,8 +177,16 @@ void host_install_fault_handler(void)
 
 /* ---- Direct3D 9: DXVK Native (with the project's Android WSI: the view is handed over with
    dxvk_android_set_window, at load and whenever the app's surface changes) ---- */
-static ANativeWindow *surface;            /* the app's view (rt_android_set_window) */
+static ANativeWindow *volatile surface;            /* the app's view (rt_android_set_window) */
 static void (*dxvk_set_window)(ANativeWindow *);
+
+/* Vulkan needs the app's surface, and there is none while the screen is off or the app is in
+   the background: creating or resetting the device waits for it instead of failing. */
+void host_wait_window(void)
+{
+    if (!surface) rt_log("Direct3D 9: waiting for the app's surface");
+    while (!surface) host_sleep_ms(50);
+}
 
 void *host_d3d9_create(uint32_t sdk_version)
 {

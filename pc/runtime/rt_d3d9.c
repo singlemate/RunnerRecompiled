@@ -259,6 +259,7 @@ static void pp_out(uint32_t g, const HostPresent *p)
     /* Windowed stays as the guest asked. */
 }
 
+void host_wait_window(void);
 typedef uint32_t (D3D_CALL *FnCreateDevice)(void *, uint32_t, uint32_t, void *, uint32_t, HostPresent *, void **);
 
 void d3d_special_CreateDevice(X86Ctx *ctx)
@@ -267,6 +268,7 @@ void d3d_special_CreateDevice(X86Ctx *ctx)
     uint32_t flags = ARG(4);
     HostPresent p;
     pp_in(ARG(5), &p, 1);
+    host_wait_window(); /* Android: no surface while the screen is off */
     uint32_t hr = ((FnCreateDevice)D3D_VT(self)[D3D_IDX_IDirect3D9_CreateDevice])(
         self, ARG(1), ARG(2), d3d_host_hwnd(ARG(3)), flags | 0x4 /* MULTITHREADED */, &p, &dev);
     rt_log("D3D9 CreateDevice(adapter %u, type %u, focus %#x -> %p, device window %p, flags %#x) = %#x, device %p",
@@ -286,6 +288,7 @@ void d3d_special_Reset(X86Ctx *ctx)
     void *self = d3d_host(ARG(0));
     HostPresent p;
     pp_in(ARG(1), &p, 1);
+    host_wait_window();
     uint32_t hr = ((FnReset)D3D_VT(self)[D3D_IDX_IDirect3DDevice9_Reset])(self, &p);
     if (!(hr & 0x80000000u)) pp_out(ARG(1), &p);
     RET(hr);

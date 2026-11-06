@@ -96,6 +96,8 @@ static DWORD WINAPI thread_entry(void *p)
 }
 
 /* ---- Direct3D 9: the system d3d9.dll of the Windows host (bring-up of the bridge) ---- */
+void host_wait_window(void) {} /* Windows has its window from the start */
+
 void *host_d3d9_create(uint32_t sdk_version)
 {
     HMODULE m = LoadLibraryA("d3d9.dll");
