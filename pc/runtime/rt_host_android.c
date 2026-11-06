@@ -296,6 +296,7 @@ int host_post_message(void *hwnd, uint32_t msg, uint32_t wp, uint32_t lp)
     return post_to(w ? w->owner : gettid(), hwnd, msg, wp, lp);
 }
 
+int host_post_thread_message(uint32_t host_tid, uint32_t msg, uint32_t wp, uint32_t lp) { return post_to((pid_t)host_tid, NULL, msg, wp, lp); }
 void host_post_quit(int code) { post_to(gettid(), NULL, 0x0012, (uint32_t)code, 0); }
 void *host_focus_window(void) { return app_in_front && windows[0].used && windows[0].owner == gettid() ? &windows[0] : NULL; }
 void *host_foreground_window(void) { return app_in_front && windows[0].used ? &windows[0] : NULL; }

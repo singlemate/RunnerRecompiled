@@ -122,6 +122,10 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
         {"hun", "Magyar"}, {"por", "Português"}, {"jpn", "日本語"}, {"kor", "한국어"}, {"chs", "简体中文"}, {"cht", "繁體中文"}};
     private static final int[] FPS = {30, 62, 90, 120, 144};
     private static final int[] CPUS = {1, 2, 4};
+    // Share of the screen's pixels on each side: the same steps as the modes of the Android WSI
+    // (pc/dxvk), rounded down to 8 (the game's buffers are aligned to 8; other sizes draw no world).
+    private static final int[][] SCALES = {{2, 3}, {3, 4}, {1, 1}, {1, 2}};
+    private static final String[] SCALE_NAMES = {"Разрешение: 2/3 экрана (рекомендуется)", "Разрешение: 3/4 экрана", "Разрешение: полное", "Разрешение: 1/2 экрана"};
     private static final String[] TOUCH = {"Экранный геймпад: авто", "Экранный геймпад: всегда", "Экранный геймпад: нет"};
 
     private android.widget.Spinner spinner(android.widget.LinearLayout box, String[] items, int selected) {
@@ -168,6 +172,7 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
         for (int i = 0; i < CPUS.length; i++) cpuNames[i] = "Ядер для игры: " + CPUS[i] + (CPUS[i] == 1 ? "" : " (отдельный поток отрисовки)");
         android.widget.Spinner cpuBox = spinner(box, cpuNames, indexOf(CPUS, prefs.getInt("cpus", 4)));
         android.widget.Spinner touchBox = spinner(box, TOUCH, prefs.getInt("touch", 0));
+        android.widget.Spinner scaleBox = spinner(box, SCALE_NAMES, prefs.getInt("scale", 0));
 
         TextView fovText = new TextView(this);
         fovText.setTextColor(0xFFFFFFFF);
@@ -188,7 +193,7 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
 
         TextView note = new TextView(this);
         note.setTextColor(0xFF90A4AE);
-        note.setText("Язык и лимит кадров записываются в TdEngine.ini игры; при самом первом запуске его ещё нет, "
+        note.setText("Язык, лимит кадров и разрешение записываются в TdEngine.ini игры; при самом первом запуске его ещё нет, "
             + "они применятся со второго запуска.");
         box.addView(note);
         android.widget.Button play = new android.widget.Button(this);
@@ -198,7 +203,7 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
             int f = fov.getProgress();
             prefs.edit().putString("lang", LANGUAGES[langBox.getSelectedItemPosition()][0])
                 .putInt("fps", FPS[fpsBox.getSelectedItemPosition()]).putInt("cpus", CPUS[cpuBox.getSelectedItemPosition()])
-                .putInt("touch", touchBox.getSelectedItemPosition()).putInt("fov", f == 0 ? 0 : 60 + f).commit();
+                .putInt("touch", touchBox.getSelectedItemPosition()).putInt("scale", scaleBox.getSelectedItemPosition()).putInt("fov", f == 0 ? 0 : 60 + f).commit();
             root.removeView(scroll);
             start();
             updateDevices();
@@ -220,6 +225,21 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
             + "\n" + mark(new File(pc, "MirrorsEdge/TdGame/CookedPC").isDirectory()) + "MirrorsEdge/TdGame/CookedPC"
             + "\n" + mark(new File(pc, "deps/msvcr80.dll").isFile() && new File(pc, "deps/msvcp80.dll").isFile()) + "deps/msvcr80.dll, msvcp80.dll"
             + "\n" + mark(new File(pc, "deps/rebased").isDirectory()) + "deps/rebased";
+    }
+
+    private static void logSystemSettings(File ini) {
+        if (!ini.isFile()) return;
+        try {
+            byte[] raw = Files.readAllBytes(ini.toPath());
+            boolean utf16 = raw.length >= 2 && (raw[0] & 0xFF) == 0xFF && (raw[1] & 0xFF) == 0xFE;
+            String text = new String(raw, utf16 ? 2 : 0, raw.length - (utf16 ? 2 : 0), utf16 ? StandardCharsets.UTF_16LE : StandardCharsets.UTF_8);
+            int a = text.indexOf("[SystemSettings]");
+            if (a < 0) return;
+            int b = text.indexOf("\n[", a + 1);
+            for (String line : text.substring(a, b < 0 ? text.length() : b).split("\\r?\\n")) Log.i(TAG, "ini " + line);
+        } catch (java.io.IOException e) {
+            Log.w(TAG, "ini " + ini + ": " + e);
+        }
     }
 
     /** Sets key=value in one section of a UE3 ini (ASCII/UTF-8, or UTF-16LE with a BOM). */
@@ -275,12 +295,28 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
             if (ini.isFile()) {
                 setIni(ini, "Engine.Engine", "Language", prefs.getString("lang", "int"));
                 setIni(ini, "Engine.GameEngine", "MaxSmoothedFrameRate", String.valueOf(prefs.getInt("fps", 62)));
+                android.graphics.Point real = new android.graphics.Point();
+                getWindowManager().getDefaultDisplay().getRealSize(real);
+                int[] sc = SCALES[prefs.getInt("scale", 0)];
+                int w = Math.max(real.x, real.y), h = Math.min(real.x, real.y);
+                setIni(ini, "SystemSettings", "ResX", String.valueOf((w * sc[0] / sc[1]) & ~7));
+                setIni(ini, "SystemSettings", "ResY", String.valueOf((h * sc[0] / sc[1]) & ~7));
             }
             if (prefs.getInt("fov", 0) > 0) env.add("ME_PC_FOV=" + prefs.getInt("fov", 0));
             env.add("ME_PC_CPUS=" + prefs.getInt("cpus", 4));
             int touch = prefs.getInt("touch", 0);
             if (touch > 0) env.add("ME_PC_TOUCH=" + (touch == 1 ? 1 : 0));
         }
+        // adb tests: intent extra "ini" sets [SystemSettings] keys, e.g. "Bloom=False,MotionBlur=False";
+        // the section is logged either way (the file belongs to the app, adb cannot read it).
+        File systemIni = new File(user, "other/C/Documents and Settings/Runner/My Documents/EA Games/Mirror's Edge/TdGame/Config/TdEngine.ini");
+        String iniExtra = getIntent().getStringExtra("ini");
+        if (iniExtra != null && systemIni.isFile())
+            for (String item : iniExtra.split(",")) {
+                String[] kv = item.split("=", 2);
+                if (kv.length == 2) setIni(systemIni, "SystemSettings", kv[0], kv[1]);
+            }
+        logSystemSettings(systemIni);
         String extra = getIntent().getStringExtra("env");
         if (extra != null) for (String item : extra.trim().split("\\s+")) if (item.contains("=")) env.add(item);
         for (String item : env) if (item.startsWith("ME_PC_TOUCH=")) touchMode = item.endsWith("=1") ? 1 : 0;

@@ -26,7 +26,7 @@ diff -ruN a/src/d3d9/d3d9.sym b/src/d3d9/d3d9.sym
 diff -ruN a/src/wsi/android/wsi_platform_android.cpp b/src/wsi/android/wsi_platform_android.cpp
 --- a/src/wsi/android/wsi_platform_android.cpp	1970-01-01 03:00:00.000000000 +0300
 +++ b/src/wsi/android/wsi_platform_android.cpp	2026-11-03 19:42:49.470810900 +0300
-@@ -0,0 +1,130 @@
+@@ -0,0 +1,137 @@
 +#if defined(DXVK_WSI_ANDROID)
 +
 +// Android WSI for DXVK Native (RunnerRecompiled). One display: the app's view. Windows are opaque
@@ -88,10 +88,17 @@ diff -ruN a/src/wsi/android/wsi_platform_android.cpp b/src/wsi/android/wsi_platf
 +      return hMonitor == AndroidMonitor;
 +    }
 +
++    // The surface size and smaller sizes of the same shape: the game renders in the mode it
++    // chooses (ResX/ResY in its ini) and the swap chain scales the picture to the surface.
 +    bool getDisplayMode(HMONITOR hMonitor, uint32_t modeNumber, WsiMode* pMode) {
-+      if (modeNumber != 0)
++      static const uint32_t scale[][2] = { { 3, 8 }, { 1, 2 }, { 2, 3 }, { 3, 4 }, { 1, 1 } };
++      if (modeNumber >= sizeof(scale) / sizeof(scale[0]))
 +        return false;
-+      return getCurrentDisplayMode(hMonitor, pMode);
++      if (!getCurrentDisplayMode(hMonitor, pMode))
++        return false;
++      pMode->width = pMode->width * scale[modeNumber][0] / scale[modeNumber][1] & ~7u; // the engine aligns its buffers to 8
++      pMode->height = pMode->height * scale[modeNumber][0] / scale[modeNumber][1] & ~7u; // the engine aligns its buffers to 8
++      return true;
 +    }
 +
 +    bool getCurrentDisplayMode(HMONITOR hMonitor, WsiMode* pMode) {
@@ -203,3 +210,21 @@ diff -ruN a/src/wsi/wsi_platform.h b/src/wsi/wsi_platform.h
  
    void init();
    void quit();
+--- a/src/dxvk/dxvk_memory.cpp
++++ b/src/dxvk/dxvk_memory.cpp
+@@ -1306,6 +1306,7 @@
+     const VkBufferCreateInfo&         createInfo,
+     const DxvkAllocationInfo&         allocationInfo,
+     const DxvkBufferImportInfo&       importInfo) {
++    std::lock_guard lock(m_mutex);
+     Rc<DxvkResourceAllocation> allocation = m_allocationPool.create(this, nullptr);
+     allocation->m_flags.set(DxvkAllocationFlag::Imported);
+     allocation->m_resourceCookie = allocationInfo.resourceCookie;
+@@ -1325,6 +1326,7 @@
+     const VkImageCreateInfo&          createInfo,
+     const DxvkAllocationInfo&         allocationInfo,
+           VkImage                     imageHandle) {
++    std::lock_guard lock(m_mutex);
+     Rc<DxvkResourceAllocation> allocation = m_allocationPool.create(this, nullptr);
+     allocation->m_flags.set(DxvkAllocationFlag::Imported);
+     allocation->m_resourceCookie = allocationInfo.resourceCookie;

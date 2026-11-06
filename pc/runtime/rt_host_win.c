@@ -164,6 +164,11 @@ int host_post_message(void *hwnd, uint32_t msg, uint32_t wp, uint32_t lp)
     return PostMessageW((HWND)hwnd, msg, (WPARAM)wp, (LPARAM)lp) != 0;
 }
 
+int host_post_thread_message(uint32_t host_tid, uint32_t msg, uint32_t wp, uint32_t lp)
+{
+    return PostThreadMessageW(host_tid, msg, (WPARAM)wp, (LPARAM)lp) != 0;
+}
+
 void host_post_quit(int code) { PostQuitMessage(code); }
 
 /* A message of a host window the guest does not know (IME, Direct3D helpers): handled by the host. */

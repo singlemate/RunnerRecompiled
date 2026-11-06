@@ -23,6 +23,7 @@ uint32_t host_def_window_proc(void *hwnd, uint32_t msg, uint32_t wp, uint32_t lp
 void host_window_show(void *hwnd, int show);
 void host_dispatch_last(void);
 int host_post_message(void *hwnd, uint32_t msg, uint32_t wp, uint32_t lp);
+int host_post_thread_message(uint32_t host_tid, uint32_t msg, uint32_t wp, uint32_t lp);
 void host_post_quit(int code);
 void host_validate(void *hwnd);
 
@@ -351,12 +352,12 @@ static void u_PostMessageW(X86Ctx *ctx)
     RET(host_post_message(hh, ARG(1), ARG(2), ARG(3)));
 }
 
-/* Thread messages: only to the calling thread (guest thread ids are not host ids). */
+/* Guest thread ids are not host ids; a thread that has ended gets nothing (FALSE, as in Windows). */
 static void u_PostThreadMessageW(X86Ctx *ctx)
 {
-    if (ARG(0) == rt_thread_self()->id) { RET(host_post_message(NULL, ARG(1), ARG(2), ARG(3))); return; }
-    rt_log("PostThreadMessageW(thread %#x, msg %#x) to another thread: dropped", ARG(0), ARG(1));
-    RET(1);
+    uint32_t host = rt_thread_host_id(ARG(0));
+    if (!host) { rt_log("PostThreadMessageW(thread %#x, msg %#x): no such thread", ARG(0), ARG(1)); RET(0); return; }
+    RET(host_post_thread_message(host, ARG(1), ARG(2), ARG(3)));
 }
 
 static void u_PostQuitMessage(X86Ctx *ctx) { host_post_quit((int)ARG(0)); }

@@ -889,6 +889,17 @@ void rt_thread_set_name(uint32_t id, const char *name)
     host_unlock(thread_list_lock());
 }
 
+/* Host thread id of a registered guest thread, 0 if there is none. */
+uint32_t rt_thread_host_id(uint32_t guest_id)
+{
+    uint32_t r = 0;
+    host_lock(thread_list_lock());
+    for (int i = 0; i < nall_threads; i++)
+        if (all_threads[i]->id == guest_id) { r = all_threads[i]->host_tid; break; }
+    host_unlock(thread_list_lock());
+    return r;
+}
+
 int rt_thread_list(uint32_t *host_tids, const char **names, int max)
 {
     host_lock(thread_list_lock());
