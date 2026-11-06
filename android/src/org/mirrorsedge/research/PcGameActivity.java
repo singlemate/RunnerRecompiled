@@ -32,8 +32,8 @@ import java.nio.file.Files;
  *   files/pc/user          the guest's writable files (configs, saves)
  * Input: keyboard keys as Windows virtual keys, the pointer as a mouse, pads as XInput. Without a
  * pad or keyboard the on-screen controller (TouchPad) is shown and is XInput pad 0.
- * Settings: the screen shown before the start (language, frame limit, FOV, guest CPUs, on-screen
- * controller), or for adb the intent extra "env", e.g. "ME_PC_FOV=100", which starts at once.
+ * Settings come from PcLauncherActivity; with the intent extra "env" (adb tests, e.g.
+ * "ME_PC_FOV=100") they are left out.
  */
 public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
     private static final String TAG = "me_pc";
@@ -112,120 +112,14 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
             message("Нет libmepcjni.so: " + e);
             return;
         }
-        if (started || getIntent().hasExtra("env")) start();
-        else showSettings(root);
+        start();
     }
 
-    // ---- settings screen (before the start) ----
-    private static final String[][] LANGUAGES = {{"int", "English"}, {"rus", "Русский"}, {"deu", "Deutsch"},
-        {"fra", "Français"}, {"ita", "Italiano"}, {"esn", "Español"}, {"pol", "Polski"}, {"cze", "Čeština"},
-        {"hun", "Magyar"}, {"por", "Português"}, {"jpn", "日本語"}, {"kor", "한국어"}, {"chs", "简体中文"}, {"cht", "繁體中文"}};
-    private static final int[] FPS = {30, 62, 90, 120, 144};
-    private static final int[] CPUS = {1, 2, 4};
     // Share of the screen's pixels on each side: the same steps as the modes of the Android WSI
     // (pc/dxvk), rounded down to 8 (the game's buffers are aligned to 8; other sizes draw no world).
     private static final int[][] SCALES = {{2, 3}, {3, 4}, {1, 1}, {1, 2}};
-    private static final String[] SCALE_NAMES = {"Разрешение: 2/3 экрана (рекомендуется)", "Разрешение: 3/4 экрана", "Разрешение: полное", "Разрешение: 1/2 экрана"};
-    private static final String[] TOUCH = {"Экранный геймпад: авто", "Экранный геймпад: всегда", "Экранный геймпад: нет"};
-
-    private android.widget.Spinner spinner(android.widget.LinearLayout box, String[] items, int selected) {
-        android.widget.Spinner sp = new android.widget.Spinner(this);
-        android.widget.ArrayAdapter<String> ad = new android.widget.ArrayAdapter<>(this, android.R.layout.simple_spinner_item, items);
-        ad.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        sp.setAdapter(ad);
-        sp.setSelection(Math.max(0, selected));
-        box.addView(sp);
-        return sp;
-    }
-
-    private static int indexOf(int[] a, int v) { for (int i = 0; i < a.length; i++) if (a[i] == v) return i; return -1; }
-
-    private void showSettings(FrameLayout root) {
-        android.content.SharedPreferences prefs = getSharedPreferences("pc", MODE_PRIVATE);
-        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
-        scroll.setBackgroundColor(0xFF101418);
-        android.widget.LinearLayout box = new android.widget.LinearLayout(this);
-        box.setOrientation(android.widget.LinearLayout.VERTICAL);
-        box.setPadding(48, 32, 48, 32);
-        scroll.addView(box);
-        TextView title = new TextView(this);
-        title.setText("Mirror's Edge — ПК-версия");
-        title.setTextSize(22);
-        title.setTextColor(0xFFFFFFFF);
-        box.addView(title);
-        TextView checks = new TextView(this);
-        checks.setTextColor(0xFFB0BEC5);
-        checks.setText(filesReport());
-        box.addView(checks);
-
-        String[] langNames = new String[LANGUAGES.length];
-        int lang = 0;
-        for (int i = 0; i < LANGUAGES.length; i++) {
-            langNames[i] = "Язык: " + LANGUAGES[i][1];
-            if (LANGUAGES[i][0].equals(prefs.getString("lang", "int"))) lang = i;
-        }
-        android.widget.Spinner langBox = spinner(box, langNames, lang);
-        String[] fpsNames = new String[FPS.length];
-        for (int i = 0; i < FPS.length; i++) fpsNames[i] = "Лимит кадров: " + FPS[i] + (FPS[i] == 62 ? " (как в игре)" : "");
-        android.widget.Spinner fpsBox = spinner(box, fpsNames, indexOf(FPS, prefs.getInt("fps", 62)));
-        String[] cpuNames = new String[CPUS.length];
-        for (int i = 0; i < CPUS.length; i++) cpuNames[i] = "Ядер для игры: " + CPUS[i] + (CPUS[i] == 1 ? "" : " (отдельный поток отрисовки)");
-        android.widget.Spinner cpuBox = spinner(box, cpuNames, indexOf(CPUS, prefs.getInt("cpus", 4)));
-        android.widget.Spinner touchBox = spinner(box, TOUCH, prefs.getInt("touch", 0));
-        android.widget.Spinner scaleBox = spinner(box, SCALE_NAMES, prefs.getInt("scale", 0));
-
-        TextView fovText = new TextView(this);
-        fovText.setTextColor(0xFFFFFFFF);
-        box.addView(fovText);
-        android.widget.SeekBar fov = new android.widget.SeekBar(this);
-        fov.setMax(140 - 60);  // 0 = the game's own, 1..80 -> 61..140 degrees
-        fov.setProgress(Math.max(0, prefs.getInt("fov", 0) - 60));
-        android.widget.SeekBar.OnSeekBarChangeListener fovLabel = new android.widget.SeekBar.OnSeekBarChangeListener() {
-            public void onProgressChanged(android.widget.SeekBar b, int v, boolean user) {
-                fovText.setText(v == 0 ? "Поле зрения: как в игре" : "Поле зрения: " + (60 + v) + "°");
-            }
-            public void onStartTrackingTouch(android.widget.SeekBar b) {}
-            public void onStopTrackingTouch(android.widget.SeekBar b) {}
-        };
-        fov.setOnSeekBarChangeListener(fovLabel);
-        fovLabel.onProgressChanged(fov, fov.getProgress(), false);
-        box.addView(fov);
-
-        TextView note = new TextView(this);
-        note.setTextColor(0xFF90A4AE);
-        note.setText("Язык, лимит кадров и разрешение записываются в TdEngine.ini игры; при самом первом запуске его ещё нет, "
-            + "они применятся со второго запуска.");
-        box.addView(note);
-        android.widget.Button play = new android.widget.Button(this);
-        play.setText("Играть");
-        box.addView(play);
-        play.setOnClickListener(v -> {
-            int f = fov.getProgress();
-            prefs.edit().putString("lang", LANGUAGES[langBox.getSelectedItemPosition()][0])
-                .putInt("fps", FPS[fpsBox.getSelectedItemPosition()]).putInt("cpus", CPUS[cpuBox.getSelectedItemPosition()])
-                .putInt("touch", touchBox.getSelectedItemPosition()).putInt("scale", scaleBox.getSelectedItemPosition()).putInt("fov", f == 0 ? 0 : 60 + f).commit();
-            root.removeView(scroll);
-            start();
-            updateDevices();
-            if (started) nativeSetForeground(true);
-        });
-        root.addView(scroll, new FrameLayout.LayoutParams(-1, -1));
-    }
 
     private File pcDir() { return new File(getExternalFilesDir(null), "pc"); }
-
-    private static String mark(boolean ok) { return ok ? "✓ " : "✗ "; }
-
-    private String filesReport() {
-        File pc = pcDir(), lib = new File(getApplicationInfo().nativeLibraryDir);
-        return "Папка: " + pc
-            + "\n" + mark(new File(lib, "libmepc.so").isFile()) + "libmepc.so (только личная сборка APK)"
-            + "\n" + mark(new File(lib, "libdxvk_d3d9.so").isFile()) + "libdxvk_d3d9.so"
-            + "\n" + mark(new File(pc, "MirrorsEdge/Binaries/MirrorsEdge.exe").isFile()) + "MirrorsEdge/Binaries/MirrorsEdge.exe"
-            + "\n" + mark(new File(pc, "MirrorsEdge/TdGame/CookedPC").isDirectory()) + "MirrorsEdge/TdGame/CookedPC"
-            + "\n" + mark(new File(pc, "deps/msvcr80.dll").isFile() && new File(pc, "deps/msvcp80.dll").isFile()) + "deps/msvcr80.dll, msvcp80.dll"
-            + "\n" + mark(new File(pc, "deps/rebased").isDirectory()) + "deps/rebased";
-    }
 
     private static void logSystemSettings(File ini) {
         if (!ini.isFile()) return;
@@ -289,18 +183,24 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
         user.mkdirs();
         List<String> env = new ArrayList<>();
         env.add("ME_PC_LOG_PATH=" + new File(pc, "pc-runtime.log"));
+        env.add("ME_PC_ACH_PATH=" + new File(pc, "achievements.txt"));
         if (!getIntent().hasExtra("env")) {
             android.content.SharedPreferences prefs = getSharedPreferences("pc", MODE_PRIVATE);
             File ini = new File(user, "other/C/Documents and Settings/Runner/My Documents/EA Games/Mirror's Edge/TdGame/Config/TdEngine.ini");
             if (ini.isFile()) {
-                setIni(ini, "Engine.Engine", "Language", prefs.getString("lang", "int"));
+                setIni(ini, "Engine.Engine", "Language", prefs.getString("lang", PcLauncherActivity.defaultLanguage()));
                 setIni(ini, "Engine.GameEngine", "MaxSmoothedFrameRate", String.valueOf(prefs.getInt("fps", 62)));
-                android.graphics.Point real = new android.graphics.Point();
-                getWindowManager().getDefaultDisplay().getRealSize(real);
-                int[] sc = SCALES[prefs.getInt("scale", 0)];
-                int w = Math.max(real.x, real.y), h = Math.min(real.x, real.y);
-                setIni(ini, "SystemSettings", "ResX", String.valueOf((w * sc[0] / sc[1]) & ~7));
-                setIni(ini, "SystemSettings", "ResY", String.valueOf((h * sc[0] / sc[1]) & ~7));
+                // Only when the choice here changed: the game's own Options > Video keeps its resolution.
+                int scale = prefs.getInt("scale", 0);
+                if (prefs.getInt("scaleApplied", -1) != scale) {
+                    android.graphics.Point real = new android.graphics.Point();
+                    getWindowManager().getDefaultDisplay().getRealSize(real);
+                    int[] sc = SCALES[scale];
+                    int w = Math.max(real.x, real.y), h = Math.min(real.x, real.y);
+                    setIni(ini, "SystemSettings", "ResX", String.valueOf((w * sc[0] / sc[1]) & ~7));
+                    setIni(ini, "SystemSettings", "ResY", String.valueOf((h * sc[0] / sc[1]) & ~7));
+                    prefs.edit().putInt("scaleApplied", scale).commit();
+                }
             }
             if (prefs.getInt("fov", 0) > 0) env.add("ME_PC_FOV=" + prefs.getInt("fov", 0));
             env.add("ME_PC_CPUS=" + prefs.getInt("cpus", 4));

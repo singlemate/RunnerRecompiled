@@ -12,7 +12,8 @@
     <!-- PC version (lifted GOG PC release, libmepc.so + DXVK): a process of its own, own icon. -->
     <activity android:name=".PcGameActivity" android:process=":pc" android:label="Mirror's Edge (PC)" android:screenOrientation="sensorLandscape" android:exported="true"
       android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen"
-      android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density">
+      android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density" />
+    <activity android:name=".PcLauncherActivity" android:label="Mirror's Edge (PC)" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:screenOrientation="sensorLandscape" android:exported="true">
       <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
     </activity>
     <!-- Research stand (input/save tests, live preview); exported for play.ps1 (am start). -->

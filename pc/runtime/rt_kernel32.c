@@ -522,7 +522,8 @@ static void k_GetSystemTimeAsFileTime(X86Ctx *ctx)
 
 void rt_ue_fov_tick(void); /* rt_ue3.c: settings applied on the game thread between frames */
 void rt_ue_bones_tick(void); /* rt_ue3.c: ME_PC_UE_BONES diagnostics */
-static void k_Sleep(X86Ctx *ctx) { rt_ue_fov_tick(); rt_ue_bones_tick(); host_sleep_ms(ARG(0)); }
+void rt_ue_achievements_tick(void); /* rt_ue3.c: hooks the game's achievement functions */
+static void k_Sleep(X86Ctx *ctx) { rt_ue_fov_tick(); rt_ue_bones_tick(); rt_ue_achievements_tick(); host_sleep_ms(ARG(0)); }
 
 static void k_GetTimeZoneInformation(X86Ctx *ctx) { memset(rt_ptr(ARG(0)), 0, 172); RET(0); }
 

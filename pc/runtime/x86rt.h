@@ -90,6 +90,8 @@ typedef void (*X86Fn)(X86Ctx *);
 #define X86_LD(T, a) do { T v_; memcpy(&v_, (const void *)X86_PTR(a), sizeof(T)); return v_; } while (0)
 #define X86_ST(T, a, v) do { T v_ = (v); memcpy((void *)X86_PTR(a), &v_, sizeof(T)); } while (0)
 #endif
+void rt_ue_script_call(X86Ctx *ctx); /* lift.py SCRIPT_CALL, rt_ue3.c */
+
 static inline uint8_t ld8(uint32_t a) { X86_LD(uint8_t, a); }
 static inline uint16_t ld16(uint32_t a) { X86_LD(uint16_t, a); }
 static inline uint32_t ld32(uint32_t a) { X86_LD(uint32_t, a); }

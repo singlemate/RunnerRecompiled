@@ -110,6 +110,11 @@ class Op:
         return f"(uint32_t)({out})"
 
 
+# UObject::ProcessInternal of the GOG MirrorsEdge.exe: every UnrealScript call passes here, and the
+# runtime watches some of them (achievements, rt_ue3.c). No other module has code at this address.
+SCRIPT_CALL = 0x01148D50
+
+
 def ebp_frame(insns, entry):
     """True when the function sets up an ebp frame (push ebp; mov ebp, esp) and never writes ebp
     otherwise: then ebp-based operands address this thread's stack."""
@@ -300,6 +305,8 @@ class FnLifter:
         self.e("X86_LOCALS;")
         self.e("X86Flags F = {0};")
         self.e("(void)F;")
+        if self.entry == SCRIPT_CALL:
+            self.e("rt_ue_script_call(ctx);")
         if resume:
             # The EH runtime jumps here with ebp/esp of this frame (x86_resume_jump in rt_core.c).
             ts = ", ".join(f"0x{t:X}u" for t in resume)

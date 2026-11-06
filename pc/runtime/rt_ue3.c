@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* ---- UE3 diagnostics for an appErrorf throw (ME_PC_UE_DEBUG=1): finds the FName table by its
    first entry "None" and names the script function and object of the native that failed. ---- */
@@ -547,9 +548,122 @@ void rt_ue_bones_tick(void)
                 }
             }
         }
+        for (uint32_t i = 0; i < n; i++) {
+            uint32_t f = ld32(d + 4 * i);
+            if (!f || !ue_ok(f) || !ue_ok(f + 0x40)) continue;
+            const char *fn = ue_obj_name(f);
+            if (!fn || (!strstr(fn, "chievement") && !strstr(fn, "GrantAward"))) continue;
+            char name[96];
+            snprintf(name, sizeof name, "%s", fn);
+            const char *fc = ue_obj_name(ld32(f + 0x34));
+            char cls[64];
+            snprintf(cls, sizeof cls, "%s", fc ? fc : "?");
+            const char *fo = ue_obj_name(ld32(f + 0x28));
+            rt_log("bones: object %s %s.%s", cls, fo ? fo : "?", name);
+        }
         natives_done = 1;
     }
     if (nwatch != old_n || memcmp(old_comp, watch_comp, sizeof old_comp))
         for (uint32_t w = 0; w < nwatch; w++)
             rt_log("bones: watching component %#x (%u bones) flags %08x", watch_comp[w], ld32(watch_comp[w] + bones.space + 4), watch_val[w]);
+}
+
+/* ---- Achievements. The game keeps all the logic (TdPlayerController.UnlockAchievement with the
+   ETdAchievements ids), but the PC online layer has nowhere to put them. Script calls go directly to
+   UObject::ProcessInternal (0x01148D50 in the GOG exe); the lifter puts rt_ue_script_call at its
+   entry (lift.py SCRIPT_CALL). It records the id, the first parameter, in ME_PC_ACH_PATH ("<id>
+   <unix seconds>" lines). FFrame: Node +0x04, Locals +0x10 (read from live calls).
+   ME_PC_ACH_TEST=<owner>.<function> logs calls of another function instead (layout check). ---- */
+#define UFUNCTION_FUNC 0xAC
+#define FFRAME_NODE 0x04
+#define FFRAME_LOCALS 0x10
+static struct {
+    const char *path, *test;
+    int on, installed, logged;
+    uint32_t fn[2];
+    uint8_t seen[64];
+    uint64_t next_ns;
+    void *game_thread;
+} ach;
+
+static void ach_record(uint32_t id)
+{
+    if (id == 0 || id >= sizeof ach.seen || ach.seen[id]) return;
+    ach.seen[id] = 1;
+    rt_log("achievement %u unlocked", id);
+    FILE *f = fopen(ach.path, "a");
+    if (!f) { rt_log("achievements: cannot write %s", ach.path); return; }
+    fprintf(f, "%u %lld\n", id, (long long)time(NULL));
+    fclose(f);
+}
+
+void rt_ue_script_call(X86Ctx *ctx)
+{
+    if (!ach.installed) return;
+    uint32_t frame = ld32(ctx->esp + 4);
+    uint32_t node = ld32(frame + FFRAME_NODE);
+    if (!node || (node != ach.fn[0] && node != ach.fn[1])) return;
+    uint32_t locals = ld32(frame + FFRAME_LOCALS);
+    if (ach.logged < 3) {
+        ach.logged++;
+        rt_log("achievements: call of %#x, locals %#x, first float %f, first byte %u", node, locals, ue_f32(locals), ld8(locals));
+    }
+    if (!ach.test) ach_record(ld8(locals));
+}
+
+static uint32_t ue_function(const char *owner, const char *name)
+{
+    uint32_t n = ld32(ue_objs_array + 4), d = ld32(ue_objs_array);
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t o = ld32(d + 4 * i);
+        if (!o || !ue_ok(o) || !ue_ok(o + UFUNCTION_FUNC + 4)) continue;
+        const char *nm = ue_obj_name(o);
+        if (!nm || strcmp(nm, name)) continue;
+        const char *cn = ue_obj_name(ld32(o + 0x34));
+        if (!cn || strcmp(cn, "Function")) continue;
+        const char *on = ue_obj_name(ld32(o + 0x28));
+        if (on && !strcmp(on, owner)) return o;
+    }
+    return 0;
+}
+
+void rt_ue_start_achievements(void)
+{
+    ach.path = getenv("ME_PC_ACH_PATH");
+    ach.test = getenv("ME_PC_ACH_TEST");
+    if (!ach.path) return;
+    ach.on = 1;
+    ach.game_thread = rt_thread_self();
+    FILE *f = fopen(ach.path, "r");
+    if (f) {
+        unsigned id; long long t;
+        while (fscanf(f, "%u %lld", &id, &t) == 2) if (id < sizeof ach.seen) ach.seen[id] = 1;
+        fclose(f);
+    }
+}
+
+void rt_ue_achievements_tick(void)
+{
+    if (!ach.on || ach.installed || rt_thread_self() != ach.game_thread) return;
+    uint64_t now = host_ticks_ns();
+    if (now < ach.next_ns) return;
+    ach.next_ns = now + 5000000000ull;
+    ue_names = 0;
+    ue_nnames = 0;
+    ue_find_names();
+    ue_objs_array = 0;
+    ue_nobjs = 0;
+    if (ue_nnames) ue_find_objects();
+    if (!ue_objs_array) return;
+    if (ach.test) {
+        char owner[64], name[64];
+        if (sscanf(ach.test, "%63[^.].%63s", owner, name) != 2) return;
+        ach.fn[0] = ue_function(owner, name);
+    } else {
+        ach.fn[0] = ue_function("TdPlayerController", "UnlockAchievement");
+        ach.fn[1] = ue_function("TdPlayerController", "ClientUnlockAchievement");
+    }
+    if (!ach.fn[0]) return;
+    rt_log("achievements: watching script functions %#x %#x", ach.fn[0], ach.fn[1]);
+    ach.installed = 1;
 }
