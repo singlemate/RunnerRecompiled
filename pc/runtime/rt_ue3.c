@@ -37,7 +37,7 @@ static const char *ue_name(uint32_t idx)
 {
     static char buf[4][128]; static int k;
     char *b = buf[k++ & 3];
-    if (!ue_names || idx >= ue_nnames || !ue_ok(ld32(ue_names + 4 * idx))) return NULL;
+    if (!ue_names || idx >= ue_nnames || !ue_ok(ue_names + 4 * idx) || !ue_ok(ld32(ue_names + 4 * idx))) return NULL;
     uint32_t e = ld32(ue_names + 4 * idx) + ue_name_off;
     int wide = ld8(e + 1) == 0 && ld8(e) != 0;
     uint32_t i = 0;
@@ -164,14 +164,14 @@ static void ue_find_objects(void)
             if (!o) continue;
             if (nm && *nm) good++; else bad++;
         }
-        if (good >= 40 && bad <= 2) {
+        /* Other arrays of objects exist (a package's export map): GObjObjects is the largest. */
+        if (good >= 40 && bad <= 2 && n > ue_nobjs) {
             ue_objs = d;
             ue_nobjs = n;
             ue_objs_array = p;
-            rt_log("UE: objects %#x (%u)", d, n);
-            return;
         }
     }
+    if (ue_objs_array) rt_log("UE: objects %#x (%u)", ue_objs, ue_nobjs);
 }
 
 static void ue_dump_words(const char *what, uint32_t o, uint32_t bytes)
@@ -385,4 +385,171 @@ void rt_ue_start_fov(void)
     if (fov < 40.0f || fov > 140.0f) { rt_log("ME_PC_FOV=%s: outside 40..140, ignored", v); return; }
     fovs.fov = fov;
     fovs.game_thread = rt_thread_self();
+}
+
+/* ---- ME_PC_UE_BONES=1: diagnostics of skeletal poses (game thread, every 2 s). For every
+   SkeletalMeshComponent: bones whose SpaceBases matrix is not finite or far out, LocalAtoms with
+   zero scale; for the components of the player's pawn the first bones in full. ---- */
+static uint32_t ue_prop_offset_typed(const char *owner, const char *prop, const char *type)
+{
+    uint32_t n = ld32(ue_objs_array + 4);
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t d = ld32(ue_objs_array);
+        if (!ue_ok(d + 4 * i)) continue;
+        uint32_t o = ld32(d + 4 * i);
+        const char *nm = ue_obj_name(o);
+        if (!nm || strcmp(nm, prop)) continue;
+        const char *on = ue_obj_name(ld32(o + 0x28));
+        const char *cn = ue_obj_name(ld32(o + 0x34));
+        if (on && !strcmp(on, owner) && cn && !strcmp(cn, type) && ue_ok(o + 0x68)) return ld32(o + 0x64);
+    }
+    return 0;
+}
+
+static struct { int on, ready; uint32_t space, atoms; uint64_t next_ns; void *game_thread; } bones;
+
+void rt_ue_start_bones(void)
+{
+    bones.on = getenv("ME_PC_UE_BONES") != NULL;
+    bones.game_thread = rt_thread_self();
+}
+
+static int f_bad(float f) { return !(f == f) || f > 1e6f || f < -1e6f; }
+
+static uint32_t watch_comp[8], watch_val[8], nwatch, watch_logs;
+/* Pitch of the player's controller, pawn and camera (Actor.Rotation), logged every frame it jumps. */
+static uint32_t rot_off, pc_obj, cam_obj, pawn_obj, pitch_logs;
+static int32_t last_cam_pitch;
+static int32_t pitch16(uint32_t o) { return ue_ok(o + rot_off + 8) ? (int16_t)(ld32(o + rot_off) & 0xFFFF) : 0; }
+
+void rt_ue_bones_tick(void)
+{
+    if (!bones.on || rt_thread_self() != bones.game_thread) return;
+    if (rot_off && cam_obj && pitch_logs < 600) {
+        static uint32_t cache_off;
+        if (!cache_off) { cache_off = ue_prop_offset_typed("Camera", "CameraCache", "StructProperty"); rt_log("pitch: CameraCache +%#x", cache_off); }
+        int32_t c = cache_off ? (int16_t)(ld32(cam_obj + cache_off + 16) & 0xFFFF) : 0;
+        int32_t d = c - last_cam_pitch;
+        if (d > 300 || d < -300) {
+            pitch_logs++;
+            rt_log("pitch: camera %d (was %d) controller %d pawn %d", c, last_cam_pitch, pitch16(pc_obj), pawn_obj ? pitch16(pawn_obj) : 0);
+        }
+        last_cam_pitch = c;
+    }
+    /* Flags word +0xFC of the player's mesh components, checked every frame: changes are logged. */
+    for (uint32_t w = 0; w < nwatch; w++) {
+        if (!ue_ok(watch_comp[w] + 0x100)) continue;
+        uint32_t v = ld32(watch_comp[w] + 0xFC);
+        if (v != watch_val[w] && watch_logs < 400) {
+            watch_logs++;
+            rt_log("bones: component %#x flags %08x -> %08x (OwnerNoSee %d, OnlyOwnerSee %d, HiddenGame %d)", watch_comp[w],
+                   watch_val[w], v, !!(v & 0x400), !!(v & 0x800), !!(v & 0x4));
+        }
+        watch_val[w] = v;
+    }
+    uint64_t now = host_ticks_ns();
+    if (now < bones.next_ns) return;
+    bones.next_ns = now + 2000000000ull;
+    /* The name table grows (and moves) while packages load: look it up again every time. */
+    ue_names = 0;
+    ue_nnames = 0;
+    ue_find_names();
+    ue_objs_array = 0;
+    ue_nobjs = 0;
+    if (ue_nnames) ue_find_objects();
+    if (!ue_objs_array) return;
+    if (!bones.ready) {
+        bones.space = ue_prop_offset_typed("SkeletalMeshComponent", "SpaceBases", "ArrayProperty");
+        bones.atoms = ue_prop_offset_typed("SkeletalMeshComponent", "LocalAtoms", "ArrayProperty");
+        if (!bones.space || !bones.atoms) return;
+        bones.ready = 1;
+        rt_log("bones: SpaceBases +%#x LocalAtoms +%#x", bones.space, bones.atoms);
+    }
+    uint32_t n = ld32(ue_objs_array + 4), d = ld32(ue_objs_array), comps = 0, badc = 0;
+    if (!rot_off) rot_off = ue_prop_offset_typed("Actor", "Rotation", "StructProperty");
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t o = ld32(d + 4 * i);
+        if (!o || !ue_ok(o) || !ue_ok(o + 0x40)) continue;
+        const char *cn = ue_obj_name(ld32(o + 0x34));
+        if (!cn) continue;
+        if (!strcmp(cn, "TdPlayerController")) pc_obj = o;
+        else if (!strcmp(cn, "TdPlayerCamera")) cam_obj = o;
+        else if (!strcmp(cn, "TdTutorialPawn") || !strcmp(cn, "TdPlayerPawn")) pawn_obj = o;
+    }
+    uint32_t old_n = nwatch, old_comp[8];
+    memcpy(old_comp, watch_comp, sizeof old_comp);
+    nwatch = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t o = ld32(d + 4 * i);
+        if (!o || !ue_ok(o) || !ue_ok(o + 0x40)) continue;
+        const char *cn = ue_obj_name(ld32(o + 0x34));
+        if (!cn || !strstr(cn, "SkeletalMeshComponent") || !ue_ok(o + bones.atoms + 8)) continue;
+        const char *on = ue_obj_name(ld32(o + 0x28)), *nm = ue_obj_name(o);
+        if (on && !strncmp(on, "Default__", 9)) continue;
+        uint32_t sb = ld32(o + bones.space), sn = ld32(o + bones.space + 4);
+        uint32_t la = ld32(o + bones.atoms), ln = ld32(o + bones.atoms + 4);
+        if (!sn || sn > 1000 || !ue_ok(sb) || !ue_ok(sb + 64 * sn - 4)) continue;
+        comps++;
+        uint32_t bad = 0, first_bad = ~0u, zero_scale = 0;
+        for (uint32_t b = 0; b < sn; b++) {
+            int any = 0;
+            for (int k = 0; k < 16; k++) any |= f_bad(ue_f32(sb + 64 * b + 4 * k));
+            if (any) { bad++; if (first_bad == ~0u) first_bad = b; }
+        }
+        if (ln && ln <= 1000 && ue_ok(la) && ue_ok(la + 32 * ln - 4))
+            for (uint32_t b = 0; b < ln; b++) zero_scale += ue_f32(la + 32 * b + 28) == 0.0f;
+        int player = on && (strstr(on, "Player") || strstr(on, "Pawn"));
+        if (player) {
+            uint32_t w = 0;
+            while (w < nwatch && watch_comp[w] != o) w++;
+            if (w == nwatch && nwatch < 8) { watch_comp[nwatch] = o; watch_val[nwatch++] = ld32(o + 0xFC); }
+        }
+        if (bad) badc++;
+        if (bad || player)
+            rt_log("bones: %s %s.%s: %u bones, %u bad (first %d), %u atoms, %u with scale 0", cn, on ? on : "?",
+                   nm ? nm : "?", sn, bad, (int)first_bad, ln, zero_scale);
+        if (player && ue_ok(la) && getenv("ME_PC_UE_BONES_FULL")) {
+            for (uint32_t b = 0; b < ln && b < 64; b++) {
+                uint32_t a = la + 32 * b, m = sb + 64 * b;
+                rt_log("  bone %2u: q %.3f %.3f %.3f %.3f t %.1f %.1f %.1f s %.3f | pos %.1f %.1f %.1f", b,
+                       ue_f32(a), ue_f32(a + 4), ue_f32(a + 8), ue_f32(a + 12), ue_f32(a + 16), ue_f32(a + 20),
+                       ue_f32(a + 24), ue_f32(a + 28), ue_f32(m + 48), ue_f32(m + 52), ue_f32(m + 56));
+            }
+        }
+    }
+    /* The natives that hide a component from its owner: their C++ function is the word of the
+       UFunction that points into the game's code (logged once, then watched in x86_dispatch). */
+    static int natives_done;
+    if (!natives_done) {
+        static const char *names[] = {"SetOwnerNoSee", "SetHidden", "SetOnlyOwnerSee"};
+        extern void rt_watch_call(uint32_t addr, const char *label);
+        for (uint32_t i = 0; i < n; i++) {
+            uint32_t f = ld32(d + 4 * i);
+            if (!f || !ue_ok(f) || !ue_ok(f + 0xC0)) continue;
+            const char *fn = ue_obj_name(f);
+            if (!fn) continue;
+            for (int k = 0; k < 3; k++) {
+                if (strcmp(fn, names[k])) continue;
+                const char *fc = ue_obj_name(ld32(f + 0x34)), *fo = ue_obj_name(ld32(f + 0x28));
+                if (!fc || strcmp(fc, "Function")) continue;
+                for (uint32_t w = 0x40; w < 0xC0; w += 4) {
+                    uint32_t v = ld32(f + w);
+                    if (v >= 0x401000 && v < 0x1A00000) {
+                        static char lbl[3][8][64]; static int nl[3];
+                        if (nl[k] < 8) {
+                            snprintf(lbl[k][nl[k]], 64, "%s.%s", fo ? fo : "?", names[k]);
+                            rt_log("bones: native %s at UFunction %#x +%#x -> %#x", lbl[k][nl[k]], f, w, v);
+                            rt_watch_call(v, lbl[k][nl[k]]);
+                            nl[k]++;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        natives_done = 1;
+    }
+    if (nwatch != old_n || memcmp(old_comp, watch_comp, sizeof old_comp))
+        for (uint32_t w = 0; w < nwatch; w++)
+            rt_log("bones: watching component %#x (%u bones) flags %08x", watch_comp[w], ld32(watch_comp[w] + bones.space + 4), watch_val[w]);
 }

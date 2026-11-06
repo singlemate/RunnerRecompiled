@@ -21,6 +21,8 @@ sys.path.insert(0, os.path.join(HERE, "..", "tools"))
 import lift  # noqa: E402
 
 LEAF_BAD = re.compile(r"x86_dispatch|x86_trap|x86_cpuid|fs_base|\bf_[0-9A-F]{8}\(ctx\)")
+CLOSED_BAD = re.compile(r"x86_dispatch|x86_trap|x86_cpuid|fs_base")
+CALLEE = re.compile(r"\bf_([0-9A-F]{8})\(ctx\)")
 FP_USE = re.compile(r"ST\(|x87_|ctx->xmm|ctx->mm|ctx->fcw|ctx->mxcsr")
 
 
@@ -36,6 +38,10 @@ def main():
     ap.add_argument("--only", help="comma-separated entry addresses (hex) instead of a sample")
     ap.add_argument("--opt", default="-O2")
     ap.add_argument("--fp", action="store_true", help="only functions that use x87/SSE/MMX")
+    ap.add_argument("--closed", action="store_true", help="functions with direct calls too, when every "
+                    "function they reach is lifted completely and makes no indirect, import or fs: access "
+                    "(the callees are compiled into the harness; at most --max-closure functions)")
+    ap.add_argument("--max-closure", type=int, default=60)
     args = ap.parse_args()
 
     L = lift.Lifter(args.exe, os.path.join(args.toolchain, "bin"), args.catalog)
@@ -45,6 +51,34 @@ def main():
         entries = sorted(L.entries)
         random.Random(args.seed).shuffle(entries)
     chosen = []
+    lifted = {}
+
+    def lift_ok(e):
+        if e not in lifted:
+            try:
+                src, fl = L.lift(e)
+                lifted[e] = None if fl.unsupported else src
+            except lift.Unsupported:
+                lifted[e] = None
+        return lifted[e]
+
+    def closure(e):
+        """The functions e reaches by direct calls, or None if one of them is not testable."""
+        seen, todo = set(), [e]
+        while todo:
+            f = todo.pop()
+            if f in seen:
+                continue
+            seen.add(f)
+            if len(seen) > args.max_closure:
+                return None
+            src = lift_ok(f)
+            if src is None or CLOSED_BAD.search(src.split("\n", 1)[1]):
+                return None
+            todo.extend(int(m, 16) for m in CALLEE.findall(src.split("\n", 1)[1]))
+        return seen
+
+    extra = set()
     for e in entries:
         if len(chosen) >= args.count:
             break
@@ -55,6 +89,17 @@ def main():
         if fl.unsupported:
             continue
         body = src.split("\n", 1)[1]
+        if args.closed:
+            if not CALLEE.search(body):
+                continue  # leaves are covered by the plain mode
+            reach = closure(e)
+            if reach is None:
+                continue
+            if args.fp and not any(FP_USE.search(lifted[f]) for f in reach):
+                continue
+            extra |= reach - {e}
+            chosen.append((e, src))
+            continue
         if not args.only and LEAF_BAD.search(body):
             continue
         if args.fp and not FP_USE.search(body):
@@ -65,8 +110,13 @@ def main():
     c_path = os.path.join(args.out, "lifted_tests.c")
     with open(c_path, "w") as fp:
         fp.write('#include "x86rt.h"\n\n')
+        tested = {e for e, _ in chosen}
+        for e in sorted(tested | extra):
+            fp.write("void f_%08X(X86Ctx *ctx);\n" % e)
         for e, src in chosen:
             fp.write(src + "\n")
+        for e in sorted(extra - tested):
+            fp.write(lifted[e] + "\n")
         fp.write("typedef struct { uint32_t entry; X86Fn fn; uint32_t flags; } TestFn;\n")
         fp.write("const TestFn lifted_tests[] = {\n")
         for e, src in chosen:

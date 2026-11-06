@@ -4,8 +4,10 @@
    Usage: me_pc <game Binaries folder> <deps folder: CRT DLLs, rebased/ copies> [user folder]
    The user folder (default "pc-user") receives everything the game writes. */
 #include "rt.h"
+#include <math.h>
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 void rt_kernel32_register(void);
@@ -17,6 +19,84 @@ void rt_physx_support_register(void);
 void rt_dinput_register(void);
 void rt_openal_register(void);
 void rt_fs_init(const char *game, const char *user);
+
+/* ME_PC_CRT_TEST=1: the lifted CRT's math against the host's libm on control values. */
+static void crt_check(X86Ctx *ctx, RtModule *crt, const char *name, double (*ref)(double), double x)
+{
+    uint32_t fn = rt_export(crt, name);
+    if (!fn) { rt_log("crt: %s not exported", name); return; }
+    uint64_t u;
+    memcpy(&u, &x, 8);
+    uint32_t args[2] = {(uint32_t)u, (uint32_t)(u >> 32)};
+    rt_call(ctx, fn, 2, args);
+    double got = ctx->st[ctx->ftop & 7], want = ref(x);
+    x87_pop(ctx);
+    double e = got - want;
+    if (e < 0) e = -e;
+    rt_log("crt: %s(%.6f) = %.12f, libm %.12f%s", name, x, got, want, e > 1e-9 ? "  <-- DIFFERENT" : "");
+}
+
+static void crt_check_st(X86Ctx *ctx, RtModule *crt, const char *name, double (*ref)(double), double x)
+{
+    uint32_t fn = rt_export(crt, name);
+    if (!fn) { rt_log("crt: %s not exported", name); return; }
+    x87_push(ctx, x);
+    rt_call(ctx, fn, 0, NULL);
+    double got = ctx->st[ctx->ftop & 7], want = ref(x);
+    x87_pop(ctx);
+    double e = got - want;
+    if (e < 0) e = -e;
+    rt_log("crt: %s(%.6f) = %.12f, libm %.12f%s", name, x, got, want, e > 1e-9 ? "  <-- DIFFERENT" : "");
+}
+
+static void crt_check2(X86Ctx *ctx, RtModule *crt, const char *name, double (*ref)(double, double), double x, double y, int st)
+{
+    uint32_t fn = rt_export(crt, name);
+    if (!fn) { rt_log("crt: %s not exported", name); return; }
+    if (st) {
+        x87_push(ctx, x);
+        x87_push(ctx, y);
+        rt_call(ctx, fn, 0, NULL);
+    } else {
+        uint64_t u, v;
+        memcpy(&u, &x, 8);
+        memcpy(&v, &y, 8);
+        uint32_t args[4] = {(uint32_t)u, (uint32_t)(u >> 32), (uint32_t)v, (uint32_t)(v >> 32)};
+        rt_call(ctx, fn, 4, args);
+    }
+    double got = ctx->st[ctx->ftop & 7], want = ref(x, y);
+    x87_pop(ctx);
+    double e = got - want;
+    if (e < 0) e = -e;
+    rt_log("crt: %s(%.6f, %.6f) = %.12f, libm %.12f%s", name, x, y, got, want, e > 1e-9 ? "  <-- DIFFERENT" : "");
+}
+
+static void rt_crt_math_test(X86Ctx *ctx)
+{
+    RtModule *crt = NULL;
+    for (uint32_t base = 0x78130000u; !crt && base < 0x78131000u; base += 0x1000) crt = rt_module_at(base);
+    if (!crt) { rt_log("crt: no msvcr80"); return; }
+    static const double xs[] = {0.0, 0.1, -0.1, 0.5, -0.5, 0.8414709848, -0.8414709848, 0.99, -0.99, 1.0, -1.0};
+    for (unsigned i = 0; i < sizeof xs / sizeof xs[0]; i++) {
+        double x = xs[i];
+        crt_check(ctx, crt, "asin", asin, x);
+        crt_check(ctx, crt, "acos", acos, x);
+        crt_check(ctx, crt, "atan", atan, x);
+        crt_check(ctx, crt, "sin", sin, x);
+        crt_check(ctx, crt, "cos", cos, x);
+        crt_check(ctx, crt, "tan", tan, x);
+        crt_check_st(ctx, crt, "_CIasin", asin, x);
+        crt_check_st(ctx, crt, "_CIacos", acos, x);
+        crt_check_st(ctx, crt, "_CIsin", sin, x);
+        crt_check_st(ctx, crt, "_CIcos", cos, x);
+        crt_check_st(ctx, crt, "_CItan", tan, x);
+        crt_check2(ctx, crt, "atan2", atan2, x, 0.5, 0);
+        crt_check2(ctx, crt, "atan2", atan2, 0.5, x, 0);
+        crt_check2(ctx, crt, "atan2", atan2, x, -0.5, 0);
+        crt_check2(ctx, crt, "_CIatan2", atan2, x, 0.5, 1);
+        crt_check2(ctx, crt, "_CIatan2", atan2, 0.5, x, 1);
+    }
+}
 
 int main(int argc, char **argv)
 {
@@ -59,9 +139,12 @@ int main(int argc, char **argv)
         if (rt_module_specs[i].init_at_start) rt_module_init_tree(mods[i], ctx);
     rt_module_init_tree(game, ctx);
 
+    if (getenv("ME_PC_CRT_TEST")) rt_crt_math_test(ctx);
     rt_start_stall_watch();
     extern void rt_ue_start_fov(void);
     rt_ue_start_fov(); /* ME_PC_FOV */
+    extern void rt_ue_start_bones(void);
+    rt_ue_start_bones(); /* ME_PC_UE_BONES */
     extern void host_profile_start(void);
     host_profile_start(); /* ME_PC_PROFILE: samples of this (the game) thread */
     rt_log("entering the game at %#x", game->entry);

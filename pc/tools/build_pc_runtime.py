@@ -94,8 +94,10 @@ def main():
     host_file = "rt_host_win.c"
     if args.android:
         cc = os.path.join(args.android, "toolchains", "llvm", "prebuilt", "windows-x86_64", "bin", "clang.exe")
-        extra = ("--target=aarch64-linux-android26", "-fPIC")
-        obj_root = os.path.join(args.work, "obj-android")
+        # API 29: native ELF TLS instead of emulated TLS (__emutls_get_address on every
+        # rt_thread_self() was ~8% of the game threads on the device; Android 10+ only).
+        extra = ("--target=aarch64-linux-android29", "-fPIC", "-fno-emulated-tls")
+        obj_root = os.path.join(args.work, "obj-android29")
         host_file = "rt_host_android.c"
     t0 = time.time()
 
@@ -140,7 +142,7 @@ def main():
         with open(rsp, "w") as fp:
             for _, obj in jobs:
                 fp.write(obj.replace("\\", "/") + "\n")
-        subprocess.run([cc, "--target=aarch64-linux-android26", "-shared", f"@{rsp}", "-o", lib,
+        subprocess.run([cc, "--target=aarch64-linux-android29", "-shared", f"@{rsp}", "-o", lib,
                         "-Wl,-z,max-page-size=16384", "-llog", "-landroid", "-ldl", "-lm"], check=True)
         print(f"built {lib} in {time.time() - t0:.0f} s")
         return

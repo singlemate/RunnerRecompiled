@@ -24,6 +24,17 @@ typedef union X86Xmm {
     uint64_t q[2];
 } X86Xmm;
 
+typedef struct X86Flags {
+    int op;        /* FL_* */
+    int bits;      /* 8, 16 or 32 */
+    uint32_t a, b; /* operands (for ADC/SBB, b already excludes the carry-in) */
+    uint32_t r;    /* result, masked to bits */
+    uint32_t cin;  /* carry-in for ADC/SBB */
+    int cf, of;    /* explicit CF/OF for FL_EXPL, and saved CF for INC/DEC */
+    int zf, sf, pf; /* explicit for FL_EXPL only */
+    int df;         /* direction flag (std/cld); 0 at every call boundary, as the ABI requires */
+} X86Flags;
+
 typedef struct X86Ctx {
     uint32_t eax, ecx, edx, ebx, esp, ebp, esi, edi;
     uint32_t fs_base; /* guest address of the TEB */
@@ -35,6 +46,7 @@ typedef struct X86Ctx {
     X86Xmm xmm[8];
     uint32_t mxcsr;
     uint64_t mm[8]; /* MMX, kept apart from the x87 registers (the game does not mix them) */
+    X86Flags flags; /* EFLAGS across calls, only for the functions that pass them (xflags.py) */
 } X86Ctx;
 
 typedef void (*X86Fn)(X86Ctx *);
@@ -86,6 +98,21 @@ static inline void st8(uint32_t a, uint8_t v) { X86_ST(uint8_t, a, v); }
 static inline void st16(uint32_t a, uint16_t v) { X86_ST(uint16_t, a, v); }
 static inline void st32(uint32_t a, uint32_t v) { X86_ST(uint32_t, a, v); }
 static inline void st64(uint32_t a, uint64_t v) { X86_ST(uint64_t, a, v); }
+/* Stack accesses (esp-based, or ebp-based in a function with an ebp frame; lift.py): the stack
+   belongs to one thread, so they skip the TSO ordering above. */
+#define X86_LD_PLAIN(T, a) do { T v_; memcpy(&v_, (const void *)X86_PTR(a), sizeof(T)); return v_; } while (0)
+#define X86_ST_PLAIN(T, a, v) do { T v_ = (v); memcpy((void *)X86_PTR(a), &v_, sizeof(T)); } while (0)
+static inline uint8_t lds8(uint32_t a) { X86_LD_PLAIN(uint8_t, a); }
+static inline uint16_t lds16(uint32_t a) { X86_LD_PLAIN(uint16_t, a); }
+static inline uint32_t lds32(uint32_t a) { X86_LD_PLAIN(uint32_t, a); }
+static inline uint64_t lds64(uint32_t a) { X86_LD_PLAIN(uint64_t, a); }
+static inline void sts8(uint32_t a, uint8_t v) { X86_ST_PLAIN(uint8_t, a, v); }
+static inline void sts16(uint32_t a, uint16_t v) { X86_ST_PLAIN(uint16_t, a, v); }
+static inline void sts32(uint32_t a, uint32_t v) { X86_ST_PLAIN(uint32_t, a, v); }
+static inline void sts64(uint32_t a, uint64_t v) { X86_ST_PLAIN(uint64_t, a, v); }
+static inline float ldsf(uint32_t a) { uint32_t u = lds32(a); float v; memcpy(&v, &u, 4); return v; }
+static inline double ldsd(uint32_t a) { uint64_t u = lds64(a); double v; memcpy(&v, &u, 8); return v; }
+static inline void stsf(uint32_t a, float v) { uint32_t u; memcpy(&u, &v, 4); sts32(a, u); }
 static inline float ldf(uint32_t a) { uint32_t u = ld32(a); float v; memcpy(&v, &u, 4); return v; }
 static inline double ldd(uint32_t a) { uint64_t u = ld64(a); double v; memcpy(&v, &u, 8); return v; }
 static inline void stf(uint32_t a, float v) { uint32_t u; memcpy(&u, &v, 4); st32(a, u); }
@@ -402,16 +429,6 @@ void x86_resume_pop(X86Ctx *ctx, X86Resume *r);
 enum { FL_ADD, FL_SUB, FL_LOGIC, FL_INC, FL_DEC, FL_NEG, FL_EXPL, FL_ADC, FL_SBB };
 enum { CC_O, CC_NO, CC_B, CC_AE, CC_E, CC_NE, CC_BE, CC_A, CC_S, CC_NS, CC_P, CC_NP, CC_L, CC_GE, CC_LE, CC_G };
 
-typedef struct X86Flags {
-    int op;        /* FL_* */
-    int bits;      /* 8, 16 or 32 */
-    uint32_t a, b; /* operands (for ADC/SBB, b already excludes the carry-in) */
-    uint32_t r;    /* result, masked to bits */
-    uint32_t cin;  /* carry-in for ADC/SBB */
-    int cf, of;    /* explicit CF/OF for FL_EXPL, and saved CF for INC/DEC */
-    int zf, sf, pf; /* explicit for FL_EXPL only */
-    int df;         /* direction flag (std/cld); 0 at every call boundary, as the ABI requires */
-} X86Flags;
 
 static inline uint32_t x86_mask(int bits) { return bits == 32 ? 0xFFFFFFFFu : ((1u << bits) - 1); }
 static inline uint32_t x86_sign(int bits) { return 1u << (bits - 1); }

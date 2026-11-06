@@ -384,9 +384,27 @@ static uint32_t no_thread_pos;
 
 static void resume_jump(RtThread *t, X86Ctx *ctx, uint32_t target);
 
+/* Diagnostics: indirect calls to these addresses are logged (rt_watch_call, rt_ue3.c). */
+static uint32_t watch_calls[8], watch_ncalls;
+static const char *watch_labels[8];
+static int watch_logged;
+void rt_watch_call(uint32_t addr, const char *label)
+{
+    for (uint32_t i = 0; i < watch_ncalls; i++) if (watch_calls[i] == addr) return;
+    if (watch_ncalls < 8) { watch_labels[watch_ncalls] = label; watch_calls[watch_ncalls++] = addr; }
+    rt_log("watching calls of %#x (%s)", addr, label);
+}
+
 void x86_dispatch(X86Ctx *ctx, uint32_t target)
 {
     RtThread *self = rt_thread_self();
+    if (watch_ncalls)
+        for (uint32_t i = 0; i < watch_ncalls; i++)
+            if (watch_calls[i] == target && watch_logged < 300) {
+                watch_logged++;
+                rt_log("call %s (%#x): this %#x ret %#x args %#x %#x %#x", watch_labels[i], target, ctx->ecx, ld32(ctx->esp),
+                       ld32(ctx->esp + 4), ld32(ctx->esp + 8), ld32(ctx->esp + 12));
+            }
     if (self) { self->last_target = target; self->last_ret = ld32(ctx->esp); }
     if (target >= RT_THUNK_BASE && target < RT_THUNK_BASE + 0x01000000u) {
         uint32_t i = (target - RT_THUNK_BASE) / RT_THUNK_STEP;
