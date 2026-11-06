@@ -105,6 +105,7 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
         root.addView(status, new FrameLayout.LayoutParams(-2, -2));
         setContentView(root);
         hideSystemBars();
+        getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         try {
             System.loadLibrary("mepcjni");
         } catch (Throwable e) {

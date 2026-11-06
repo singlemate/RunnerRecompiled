@@ -96,8 +96,10 @@ def main():
         cc = os.path.join(args.android, "toolchains", "llvm", "prebuilt", "windows-x86_64", "bin", "clang.exe")
         # API 29: native ELF TLS instead of emulated TLS (__emutls_get_address on every
         # rt_thread_self() was ~8% of the game threads on the device; Android 10+ only).
-        extra = ("--target=aarch64-linux-android29", "-fPIC", "-fno-emulated-tls")
-        obj_root = os.path.join(args.work, "obj-android29")
+        # ARMv8.4: acquire loads are LDAPR (FEAT_LRCPC), which x86 TSO allows and which is
+        # cheaper than LDAR on every guest load; needs such a CPU (lrcpc in /proc/cpuinfo).
+        extra = ("--target=aarch64-linux-android29", "-march=armv8.4-a", "-fPIC", "-fno-emulated-tls")
+        obj_root = os.path.join(args.work, "obj-android-v84")
         host_file = "rt_host_android.c"
     t0 = time.time()
 
@@ -143,7 +145,7 @@ def main():
             for _, obj in jobs:
                 fp.write(obj.replace("\\", "/") + "\n")
         subprocess.run([cc, "--target=aarch64-linux-android29", "-shared", f"@{rsp}", "-o", lib,
-                        "-Wl,-z,max-page-size=16384", "-llog", "-landroid", "-ldl", "-lm"], check=True)
+                        "-Wl,-z,max-page-size=16384", "-Wl,-Bsymbolic", "-llog", "-landroid", "-ldl", "-lm"], check=True)
         print(f"built {lib} in {time.time() - t0:.0f} s")
         return
     exe = os.path.join(args.work, "bin", "me_pc.exe")

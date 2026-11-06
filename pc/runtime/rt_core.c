@@ -397,7 +397,8 @@ void rt_watch_call(uint32_t addr, const char *label)
 
 void x86_dispatch(X86Ctx *ctx, uint32_t target)
 {
-    RtThread *self = rt_thread_self();
+    /* Every guest context is the first field of its RtThread: no TLS read on this hot path. */
+    RtThread *self = (RtThread *)ctx;
     if (watch_ncalls)
         for (uint32_t i = 0; i < watch_ncalls; i++)
             if (watch_calls[i] == target && watch_logged < 300) {
@@ -405,7 +406,8 @@ void x86_dispatch(X86Ctx *ctx, uint32_t target)
                 rt_log("call %s (%#x): this %#x ret %#x args %#x %#x %#x", watch_labels[i], target, ctx->ecx, ld32(ctx->esp),
                        ld32(ctx->esp + 4), ld32(ctx->esp + 8), ld32(ctx->esp + 12));
             }
-    if (self) { self->last_target = target; self->last_ret = ld32(ctx->esp); }
+    self->last_target = target;
+    self->last_ret = lds32(ctx->esp);
     if (target >= RT_THUNK_BASE && target < RT_THUNK_BASE + 0x01000000u) {
         uint32_t i = (target - RT_THUNK_BASE) / RT_THUNK_STEP;
         if (i >= nthunks) rt_fatal("call to unknown thunk %#x", target);
