@@ -33,7 +33,7 @@ Tools and temporary files go to `%LOCALAPPDATA%\RunnerBuilder`, or `C:\RunnerBui
 | `pc/tools/builder-gui/RunnerBuilder.cs` | The Windows window: paths, progress, log, check for a new version. |
 | `pc/tools/builder-gui/make_exe.py` | Compiles the window with the `csc.exe` of Windows and embeds the scripts, the runtime sources and the shell APK. |
 
-To make a release: build the full APK (`android/build.ps1 ... -PcOnly`), cut the shell, build the exe:
+To make a release: build the full APK (`android/build.ps1 ... -PcRuntime ...`), cut the shell, build the exe:
 
 ```
 python -I pc/tools/apk_pack.py --make-shell RunnerRecompiled-pc.apk --out RunnerRecompiled-shell.apk
