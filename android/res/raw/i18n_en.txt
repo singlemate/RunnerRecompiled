@@ -1,0 +1,253 @@
+Играть	Play
+Настройки	Settings
+Достижения	Achievements
+Файлы	Files
+Полное	Full
+Авто	Auto
+Всегда	Always
+Нет	Off
+Вся история	The whole story
+Пройти игру	Finish the game
+Сложный путь	The hard way
+Пройти игру на сложном уровне	Finish the game on hard
+Обучение	Training
+Пройти обучение	Complete the training
+На время	Against the clock
+Пройти испытание на время	Complete a time trial
+Все участки	All stretches
+Открыть все участки испытаний на время	Unlock all time trial stretches
+Достичь первого рейтинга мастерства	Reach the first skill rating
+Достичь второго рейтинга мастерства	Reach the second skill rating
+Достичь третьего рейтинга мастерства	Reach the third skill rating
+Мимо пуль	Dodging bullets
+Пройти уровень, не попав под выстрел	Finish a level without being shot
+Мягкая посадка	Soft landing
+Пройти уровень без тяжёлых приземлений	Finish a level without a hard landing
+Без оружия	Unarmed
+Пройти уровень, не сделав ни выстрела	Finish a level without firing a shot
+Ни царапины	Not a scratch
+Пройти игру без ранений от пуль	Finish the game without being shot
+На полной скорости	Full speed
+Долго держать полную скорость	Hold top speed for a long time
+Удар с воздуха	Air strike
+Победить врага ударом в прыжке	Take down an enemy with a jump attack
+Обезоруживание	Disarm
+Несколько раз обезоружить врагов	Disarm enemies several times
+Ближний бой	Melee
+Победить врагов в ближнем бою	Take down enemies in melee
+Разворот	Turnaround
+Выполнить разворот-насмешку	Pull off a taunting turnaround
+Сверху	From above
+Приземлиться на голову врага	Land on an enemy's head
+Прыжок, подъём и подкат одной цепочкой	Jump, climb and slide in one chain
+Бег по стене и прыжок с разворотом	Wall run and turn jump
+Бег по стене, поворот, прыжок и разворот	Wall run, turn, jump and turnaround
+Бег по стене, прыжок, подъём и перекат	Wall run, jump, climb and roll
+Все сумки	All bags
+Найти все спрятанные сумки	Find all hidden bags
+Доступна версия 	Version available: 
+Установлена версия 	Installed version: 
+\n\nСоберите новый APK через RunnerBuilder. Он ставится поверх, файлы игры и сохранения остаются.	\n\nGet the new APK by rebuilding it with RunnerBuilder. It installs over this one; game files and saves stay.
+Понятно	OK
+Системный драйвер устройства	The device's system driver
+Свой: 	Custom: 
+Драйвер установлен: 	Driver installed: 
+Драйвер не установлен: 	Driver not installed: 
+▶  Играть	▶  Play
+ПК-ВЕРСИЯ	PC VERSION
+ИГРА	GAME
+Язык игры	Game language
+Лимит кадров	Frame limit
+62 — как в игре, 30 — ровнее и холоднее	62 is the game's own, 30 is steadier and cooler
+Шире — больше видно по краям	Wider shows more at the edges
+Поле зрения: как в игре	Field of view: as in the game
+Поле зрения: 	Field of view: 
+Заставка при запуске	Startup logos
+Логотипы перед главным меню	Logos before the main menu
+Показывать	Show
+Пропускать	Skip
+УПРАВЛЕНИЕ	CONTROLS
+Кнопки Nintendo	Nintendo buttons
+Если A и B на геймпаде перепутаны, выберите «По надписям»	If A and B are swapped on your controller, choose By label
+По положению	By position
+По надписям	By label
+Экранный геймпад	On-screen controller
+Авто — только без геймпада и клавиатуры	Auto: only without a controller or keyboard
+ПРОИЗВОДИТЕЛЬНОСТЬ	PERFORMANCE
+Начальное разрешение	Starting resolution
+Доля экрана. Потом его можно менять в игре	Share of the screen. You can change it in the game later
+Апскейлер	Upscaler
+Как растянуть картинку на экран. Только если разрешение ниже полного	How the picture is scaled to the screen, below full resolution only
+Выкл	Off
+Ядра для игры	CPU cores for the game
+4 — отдельный поток отрисовки, быстрее	4 gives a separate render thread, which is faster
+ДРАЙВЕР ГРАФИКИ	GRAPHICS DRIVER
+Драйвер Vulkan	Vulkan driver
+Свой драйвер (.zip)…	Custom driver (.zip)…
+Вернуть системный драйвер	Back to the system driver
+Turnip без тайлового рендера	Turnip without tiled rendering
+TU_DEBUG=sysmem: если со своим драйвером зависает или искажается картинка	TU_DEBUG=sysmem: if a custom driver hangs or distorts the picture
+Нужен пакет AdrenoTools: ZIP с meta.json и библиотекой драйвера. Если игра перестала запускаться, верните системный драйвер.	Needs an AdrenoTools package: a ZIP with meta.json and the driver library. If the game stops starting, go back to the system driver.
+ПОДДЕРЖКА	SUPPORT
+ГРАФИКА	GRAPHICS
+Появятся после первого запуска игры.	These appear after the first start of the game.
+Режим экономии	Economy mode
+Выключает самые тяжёлые эффекты, чтобы планшет меньше грелся	Turns off the heaviest effects so the device runs cooler
+Применить	Apply
+Вкл	On
+Динамические тени	Dynamic shadows
+Свечение	Bloom
+Глубина резкости	Depth of field
+Размытие в движении	Motion blur
+Блики	Lens flares
+Искажения	Distortion
+Дымка от солнца	Sun haze
+Статические декали	Static decals
+Динамические декали	Dynamic decals
+Анизотропная фильтрация	Anisotropic filtering
+Чёткость текстур под углом	Sharpness of textures seen at an angle
+Сообщить о баге	Report a bug
+Откроет форму на GitHub, данные устройства уже подставлены	Opens a form on GitHub with your device details filled in
+Открыть форму…	Open the form…
+Логи для разработчика	Logs for the developer
+Модель устройства, настройки и журналы игры	Device model, settings and game logs
+Отправить логи…	Send logs…
+Качество графики, сглаживание и PhysX настраиваются в самой игре: Options → Video.\n	Graphics quality, anti-aliasing and PhysX are set in the game: Options → Video.\n
+При первом запуске выставляются средние настройки с высокими текстурами; дальше они ваши и приложение их не меняет.	The first start uses medium settings with high textures; after that they are yours and the app leaves them alone.
+Версия 	Version 
+Собираю логи…	Collecting logs…
+Не получилось собрать логи: 	Could not collect logs: 
+ДОСТИЖЕНИЯ	ACHIEVEMENTS
+Логика достижений — из самой игры, а названия и описания написаны для этого приложения: 	The achievement logic comes from the game; names and descriptions were written for this app: 
+в ПК-версии их текстов нет.	the PC version has no texts for them.
+ из 	 of 
+ · получено 	 · earned 
+ФАЙЛЫ ИГРЫ	GAME FILES
+Установить или обновить файлы…	Install or update files…
+Файлы игры берутся из вашей копии GOG. В приложение они не входят.	Game files come from your GOG copy. They are not part of the app.
+Папка: 	Folder: 
+libmepc.so (только личная сборка)	libmepc.so (personal build only)
+библиотеки и все файлы игры	libraries and all game files
+ · до 	 · up to 
+ кадров/с · 	 fps · 
+поле зрения 	field of view 
+поле зрения как в игре	field of view as in the game
+Не хватает файлов игры — смотрите раздел «Файлы»	Game files are missing: see Files
+MIRROR'S EDGE · ПК-ВЕРСИЯ	MIRROR'S EDGE · PC VERSION
+Настроим за пару минут	Setup takes a couple of minutes
+Приложение запускает ПК-версию игры на Android. Файлы игры берутся из вашей копии GOG, в приложении их нет.	This app runs the PC version of the game on Android. Game files come from your GOG copy and are not in the app.
+Далее	Next
+Подключите свою копию	Add your copy
+Нужен один файл: ZIP-архив папки с вашей игрой из GOG (внутри Binaries, Engine и TdGame). 	You need one file: a ZIP of your GOG game folder (with Binaries, Engine and TdGame inside). 
+Приложение само его распакует. Нужно около 12 ГБ свободного места.	The app unpacks it by itself. About 12 GB of free space is needed.
+Выбрать архив игры (.zip)…	Choose the game archive (.zip)…
+Или выбрать распакованную папку…	Or choose an unpacked folder…
+НАСТРОЙКИ	SETTINGS
+Почти готово	Almost done
+Это можно изменить позже в разделе «Настройки».	You can change this later in Settings.
+Готово	Done
+Файлы игры на месте.	The game files are in place.
+Проверяю копию игры…	Checking your copy of the game…
+архив обрывается	the archive is truncated
+архив повреждён	the archive is damaged
+архив повреждён: 	the archive is damaged: 
+в архиве нет Binaries/MirrorsEdge.exe	the archive has no Binaries/MirrorsEdge.exe
+мало места: нужно не меньше %.1f ГБ	not enough space: at least %.1f GB is needed
+не удалось открыть архив	could not open the archive
+эта версия игры не подходит: нужна копия GOG той же сборки	this version of the game does not fit: it must be the same GOG build
+не удалось создать 	could not create 
+Копирую файлы игры… Не закрывайте приложение.	Copying game files… Keep the app open.
+%.2f / %.2f ГБ	%.2f / %.2f GB
+в этой сборке приложения нет библиотек ПК-версии	this build of the app has no PC version libraries
+Не получилось: 	Failed: 
+Можно выбрать файл ещё раз, готовые файлы пропускаются.	You can choose the file again; finished files are skipped.
+в выбранной папке нет 	the chosen folder has no 
+ (нужна папка, где лежат Binaries, Engine и TdGame)	 (choose the folder that holds Binaries, Engine and TdGame)
+в Binaries нет MirrorsEdge.exe	Binaries has no MirrorsEdge.exe
+мало места: нужно ещё %.1f ГБ	not enough space: %.1f GB more is needed
+Подготавливаю библиотеки…	Preparing libraries…
+ не совпадает с поддерживаемой сборкой	 does not match the supported build
+в DefaultCompat.ini нет пресетов	DefaultCompat.ini has no presets
+не удалось открыть 	could not open 
+Нет libmepcjni.so: 	libmepcjni.so is missing: 
+Это APK без ПК-версии (нет libmepc.so).	This APK has no PC version (libmepc.so is missing).
+Нет копии игры: 	No copy of the game: 
+Нет библиотек: 	Libraries are missing: 
+Не удалось запустить libmepc.so (см. logcat, тег me_pc_jni)	Could not start libmepc.so (see logcat, tag me_pc_jni)
+Крестовина влево/вправо — поворот на 90°.	D-pad left/right: 90° turn.
+✕ Крест	✕ Cross
+○ Круг	○ Circle
+□ Квадрат	□ Square
+△ Треугольник	△ Triangle
+Нажатие стиков	Stick press
+A (нижняя)	A (bottom)
+B (нижняя)	B (bottom)
+B (правая)	B (right)
+A (правая)	A (right)
+X (левая)	X (left)
+Y (левая)	Y (left)
+Y (верхняя)	Y (top)
+X (верхняя)	X (top)
+вверх · прыжок	up · jump
+вниз · подкат	down · slide
+разворот	turn
+атака	attack
+Бег	Run
+Обзор	Look
+нет доступа к памяти приложения	no access to the app's storage
+файл не открывается	the file cannot be opened
+архив слишком большой для драйвера	the archive is too big for a driver
+в архиве нет meta.json — это не пакет драйвера AdrenoTools	no meta.json in the archive: this is not an AdrenoTools driver package
+meta.json не читается	meta.json cannot be read
+в архиве нет библиотеки драйвера (	the archive has no driver library (
+библиотека драйвера не для 64-битного ARM	the driver library is not for 64-bit ARM
+драйверу нужен Android API 	the driver needs Android API 
+Драйвер	Driver
+не удалось сохранить драйвер	could not save the driver
+Отправить логи	Send logs
+Загрузки/RunnerRecompiled/	Downloads/RunnerRecompiled/
+Глава 1	Chapter 1
+Глава 2	Chapter 2
+Глава 3	Chapter 3
+Глава 4	Chapter 4
+Глава 5	Chapter 5
+Глава 6	Chapter 6
+Глава 7	Chapter 7
+Глава 8	Chapter 8
+Глава 9	Chapter 9
+Пройти главу 1	Complete chapter 1
+Пройти главу 2	Complete chapter 2
+Пройти главу 3	Complete chapter 3
+Пройти главу 4	Complete chapter 4
+Пройти главу 5	Complete chapter 5
+Пройти главу 6	Complete chapter 6
+Пройти главу 7	Complete chapter 7
+Пройти главу 8	Complete chapter 8
+Пройти главу 9	Complete chapter 9
+Рейтинг 1	Rating 1
+Рейтинг 2	Rating 2
+Рейтинг 3	Rating 3
+Скоростной забег 1	Speedrun 1
+Скоростной забег 2	Speedrun 2
+Скоростной забег 3	Speedrun 3
+Скоростной забег 4	Speedrun 4
+Скоростной забег 5	Speedrun 5
+Скоростной забег 6	Speedrun 6
+Скоростной забег 7	Speedrun 7
+Скоростной забег 8	Speedrun 8
+Скоростной забег 9	Speedrun 9
+Скоростной забег 10	Speedrun 10
+Пройти скоростной забег 1	Complete speedrun 1
+Пройти скоростной забег 2	Complete speedrun 2
+Пройти скоростной забег 3	Complete speedrun 3
+Пройти скоростной забег 4	Complete speedrun 4
+Пройти скоростной забег 5	Complete speedrun 5
+Пройти скоростной забег 6	Complete speedrun 6
+Пройти скоростной забег 7	Complete speedrun 7
+Пройти скоростной забег 8	Complete speedrun 8
+Пройти скоростной забег 9	Complete speedrun 9
+Пройти скоростной забег 10	Complete speedrun 10
+Связка 1	Combo 1
+Связка 2	Combo 2
+Связка 3	Combo 3
+Связка 4	Combo 4

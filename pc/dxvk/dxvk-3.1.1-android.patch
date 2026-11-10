@@ -1,0 +1,230 @@
+diff -ruN a/meson.build b/meson.build
+--- a/meson.build	2026-11-03 08:06:03.692455800 +0300
++++ b/meson.build	2026-11-03 19:43:10.062889000 +0300
+@@ -161,7 +161,9 @@
+   if lib_glfw.found()
+     compiler_args += ['-DDXVK_WSI_GLFW']
+   endif
+-  if (not lib_sdl3.found() and not lib_sdl2.found() and not lib_glfw.found())
++  if platform == 'android'
++    compiler_args += ['-DDXVK_WSI_ANDROID']
++  elif (not lib_sdl3.found() and not lib_sdl2.found() and not lib_glfw.found())
+     error('SDL3, SDL2, or GLFW are required to build dxvk-native')
+   endif
+   
+diff -ruN a/src/d3d9/d3d9.sym b/src/d3d9/d3d9.sym
+--- a/src/d3d9/d3d9.sym	2026-11-03 08:06:03.744357000 +0300
++++ b/src/d3d9/d3d9.sym	2026-11-03 19:44:24.398065000 +0300
+@@ -20,6 +20,7 @@
+     Direct3D9ForceHybridEnumeration;
+     Direct3DCreate9On12;
+     Direct3DCreate9On12Ex;
++    dxvk_android_set_window;
+ 
+   local:
+     *;
+diff -ruN a/src/wsi/android/wsi_platform_android.cpp b/src/wsi/android/wsi_platform_android.cpp
+--- a/src/wsi/android/wsi_platform_android.cpp	1970-01-01 03:00:00.000000000 +0300
++++ b/src/wsi/android/wsi_platform_android.cpp	2026-11-03 19:42:49.470810900 +0300
+@@ -0,0 +1,137 @@
++#if defined(DXVK_WSI_ANDROID)
++
++// Android WSI for DXVK Native (RunnerRecompiled). One display: the app's view. Windows are opaque
++// handles of the host program; every one of them presents to the ANativeWindow it hands over with
++// dxvk_android_set_window(). Modes: the view's size at 60 Hz.
++
++#include "../wsi_platform.h"
++#include "../wsi_window.h"
++#include "../../util/util_error.h"
++#include "../../util/util_string.h"
++#include "../../util/log/log.h"
++
++#include <android/native_window.h>
++#include <vulkan/vulkan_android.h>
++
++#include <atomic>
++
++static std::atomic<ANativeWindow*> g_androidWindow { nullptr };
++
++extern "C" __attribute__((visibility("default"))) void dxvk_android_set_window(ANativeWindow* window) {
++  g_androidWindow.store(window);
++}
++
++namespace dxvk::wsi {
++
++  static const HMONITOR AndroidMonitor = reinterpret_cast<HMONITOR>(uintptr_t(1));
++
++  static void viewSize(uint32_t* w, uint32_t* h) {
++    ANativeWindow* window = g_androidWindow.load();
++    int32_t ww = window ? ANativeWindow_getWidth(window) : 0;
++    int32_t hh = window ? ANativeWindow_getHeight(window) : 0;
++    *w = uint32_t(ww > 0 ? ww : 1280);
++    *h = uint32_t(hh > 0 ? hh : 720);
++  }
++
++  class AndroidWsiDriver : public WsiDriver {
++  public:
++    std::vector<const char *> getInstanceExtensions() {
++      return { VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_ANDROID_SURFACE_EXTENSION_NAME };
++    }
++
++    HMONITOR getDefaultMonitor() { return AndroidMonitor; }
++
++    HMONITOR enumMonitors(uint32_t index) { return index == 0 ? AndroidMonitor : nullptr; }
++
++    HMONITOR enumMonitors(const LUID *adapterLUID[], uint32_t numLUIDs, uint32_t index) { return enumMonitors(index); }
++
++    bool getDisplayName(HMONITOR hMonitor, WCHAR (&Name)[32]) {
++      const WCHAR name[] = { '\\', '\\', '.', '\\', 'D', 'I', 'S', 'P', 'L', 'A', 'Y', '1', 0 };
++      for (uint32_t i = 0; i < sizeof(name) / sizeof(name[0]); i++)
++        Name[i] = name[i];
++      return hMonitor == AndroidMonitor;
++    }
++
++    bool getDesktopCoordinates(HMONITOR hMonitor, RECT* pRect) {
++      uint32_t w, h;
++      viewSize(&w, &h);
++      pRect->left = 0; pRect->top = 0; pRect->right = LONG(w); pRect->bottom = LONG(h);
++      return hMonitor == AndroidMonitor;
++    }
++
++    // The surface size and smaller sizes of the same shape: the game renders in the mode it
++    // chooses (ResX/ResY in its ini) and the swap chain scales the picture to the surface.
++    bool getDisplayMode(HMONITOR hMonitor, uint32_t modeNumber, WsiMode* pMode) {
++      static const uint32_t scale[][2] = { { 3, 8 }, { 1, 2 }, { 2, 3 }, { 3, 4 }, { 1, 1 } };
++      if (modeNumber >= sizeof(scale) / sizeof(scale[0]))
++        return false;
++      if (!getCurrentDisplayMode(hMonitor, pMode))
++        return false;
++      pMode->width = pMode->width * scale[modeNumber][0] / scale[modeNumber][1] & ~7u; // the engine aligns its buffers to 8
++      pMode->height = pMode->height * scale[modeNumber][0] / scale[modeNumber][1] & ~7u; // the engine aligns its buffers to 8
++      return true;
++    }
++
++    bool getCurrentDisplayMode(HMONITOR hMonitor, WsiMode* pMode) {
++      viewSize(&pMode->width, &pMode->height);
++      pMode->refreshRate = WsiRational { 60, 1 };
++      pMode->bitsPerPixel = 32;
++      pMode->interlaced = false;
++      return hMonitor == AndroidMonitor;
++    }
++
++    bool getDesktopDisplayMode(HMONITOR hMonitor, WsiMode* pMode) { return getCurrentDisplayMode(hMonitor, pMode); }
++
++    WsiEdidData getMonitorEdid(HMONITOR hMonitor) { return {}; }
++
++    void getWindowSize(HWND hWindow, uint32_t* pWidth, uint32_t* pHeight) {
++      uint32_t w, h;
++      viewSize(&w, &h);
++      if (pWidth) *pWidth = w;
++      if (pHeight) *pHeight = h;
++    }
++
++    // The view has the size the app gives it: the swap chain scales.
++    void resizeWindow(HWND hWindow, DxvkWindowState* pState, uint32_t width, uint32_t height) { }
++    void saveWindowState(HWND hWindow, DxvkWindowState* pState, bool saveStyle) { }
++    void restoreWindowState(HWND hWindow, DxvkWindowState* pState, bool restoreCoordinates) { }
++    bool setWindowMode(HMONITOR hMonitor, HWND hWindow, DxvkWindowState* pState, const WsiMode& mode) { return true; }
++    bool enterFullscreenMode(HMONITOR hMonitor, HWND hWindow, DxvkWindowState* pState, bool modeSwitch) { return true; }
++    bool leaveFullscreenMode(HWND hWindow, DxvkWindowState* pState) { return true; }
++    bool restoreDisplayMode() { return true; }
++    HMONITOR getWindowMonitor(HWND hWindow) { return AndroidMonitor; }
++    bool isWindow(HWND hWindow) { return hWindow != nullptr; }
++    bool isMinimized(HWND hWindow) { return g_androidWindow.load() == nullptr; }
++    bool isOccluded(HWND hWindow) { return g_androidWindow.load() == nullptr; }
++    void updateFullscreenWindow(HMONITOR hMonitor, HWND hWindow, bool forceTopmost) { }
++
++    VkResult createSurface(HWND hWindow, PFN_vkGetInstanceProcAddr pfnVkGetInstanceProcAddr,
++                           VkInstance instance, VkSurfaceKHR* pSurface) {
++      ANativeWindow* window = g_androidWindow.load();
++      if (!window) {
++        Logger::err("Android WSI: no window (dxvk_android_set_window was not called)");
++        return VK_ERROR_SURFACE_LOST_KHR;
++      }
++      auto create = reinterpret_cast<PFN_vkCreateAndroidSurfaceKHR>(
++        pfnVkGetInstanceProcAddr(instance, "vkCreateAndroidSurfaceKHR"));
++      if (!create)
++        return VK_ERROR_EXTENSION_NOT_PRESENT;
++      VkAndroidSurfaceCreateInfoKHR info = { VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR };
++      info.window = window;
++      return create(instance, &info, nullptr, pSurface);
++    }
++  };
++
++  static bool createAndroidWsiDriver(WsiDriver **driver) {
++    *driver = new AndroidWsiDriver();
++    return true;
++  }
++
++  WsiBootstrap AndroidWSI = {
++    "Android",
++    createAndroidWsiDriver
++  };
++
++}
++
++#endif
+diff -ruN a/src/wsi/meson.build b/src/wsi/meson.build
+--- a/src/wsi/meson.build	2026-11-03 08:06:03.878095300 +0300
++++ b/src/wsi/meson.build	2026-11-03 19:43:10.062889000 +0300
+@@ -13,6 +13,7 @@
+   'glfw/wsi_monitor_glfw.cpp',
+   'glfw/wsi_platform_glfw.cpp',
+   'glfw/wsi_window_glfw.cpp',
++  'android/wsi_platform_android.cpp',
+ ]
+ 
+ wsi_deps = [ dep_displayinfo ]
+@@ -20,6 +21,8 @@
+ if platform == 'windows'
+   lib_setupapi = cpp.find_library('setupapi')
+   wsi_deps += [ lib_setupapi ]
++elif platform == 'android'
++  wsi_deps += [ cpp.find_library('android') ]
+ else
+   wsi_deps += [
+     lib_sdl3.partial_dependency(compile_args: true, includes: true),
+diff -ruN a/src/wsi/wsi_platform.cpp b/src/wsi/wsi_platform.cpp
+--- a/src/wsi/wsi_platform.cpp	2026-11-03 08:06:03.884114400 +0300
++++ b/src/wsi/wsi_platform.cpp	2026-11-03 19:43:10.053844100 +0300
+@@ -21,6 +21,9 @@
+ #if defined(DXVK_WSI_GLFW)
+     &GlfwWSI,
+ #endif
++#if defined(DXVK_WSI_ANDROID)
++    &AndroidWSI,
++#endif
+   };
+ 
+   void init() {
+diff -ruN a/src/wsi/wsi_platform.h b/src/wsi/wsi_platform.h
+--- a/src/wsi/wsi_platform.h	2026-11-03 08:06:03.884114400 +0300
++++ b/src/wsi/wsi_platform.h	2026-11-03 19:43:10.053844100 +0300
+@@ -123,6 +123,9 @@
+ #if defined(DXVK_WSI_GLFW)
+   extern WsiBootstrap GlfwWSI;
+ #endif
++#if defined(DXVK_WSI_ANDROID)
++  extern WsiBootstrap AndroidWSI;
++#endif
+ 
+   void init();
+   void quit();
+--- a/src/dxvk/dxvk_memory.cpp
++++ b/src/dxvk/dxvk_memory.cpp
+@@ -1306,6 +1306,7 @@
+     const VkBufferCreateInfo&         createInfo,
+     const DxvkAllocationInfo&         allocationInfo,
+     const DxvkBufferImportInfo&       importInfo) {
++    std::lock_guard lock(m_mutex);
+     Rc<DxvkResourceAllocation> allocation = m_allocationPool.create(this, nullptr);
+     allocation->m_flags.set(DxvkAllocationFlag::Imported);
+     allocation->m_resourceCookie = allocationInfo.resourceCookie;
+@@ -1325,6 +1326,7 @@
+     const VkImageCreateInfo&          createInfo,
+     const DxvkAllocationInfo&         allocationInfo,
+           VkImage                     imageHandle) {
++    std::lock_guard lock(m_mutex);
+     Rc<DxvkResourceAllocation> allocation = m_allocationPool.create(this, nullptr);
+     allocation->m_flags.set(DxvkAllocationFlag::Imported);
+     allocation->m_resourceCookie = allocationInfo.resourceCookie;

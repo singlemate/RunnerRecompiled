@@ -1,0 +1,17 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="org.mirrorsedge.research">
+  <uses-permission android:name="android.permission.INTERNET" />
+  <uses-permission android:name="android.permission.VIBRATE" />
+  <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="35" />
+  <uses-feature android:name="android.hardware.gamepad" android:required="false" />
+  <application android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:label="Runner Recompiled" android:theme="@android:style/Theme.Material.NoActionBar" android:allowBackup="false" android:debuggable="true" android:extractNativeLibs="true" android:supportsRtl="true">
+    <!-- The game (lifted GOG PC release, libmepc.so + DXVK) runs in a process of its own. -->
+    <activity android:name=".PcGameActivity" android:process=":pc" android:label="Mirror's Edge (PC)" android:screenOrientation="sensorLandscape" android:exported="true"
+      android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen"
+      android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density" />
+    <activity android:name=".PcLauncherActivity" android:label="Mirror's Edge (PC)" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:screenOrientation="sensorLandscape" android:exported="true">
+      <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
+    </activity>
+    <!-- Log zips for the share sheet (read-only, granted per share intent). -->
+    <provider android:name=".LogsProvider" android:authorities="org.mirrorsedge.research.logs" android:exported="false" android:grantUriPermissions="true" />
+  </application>
+</manifest>

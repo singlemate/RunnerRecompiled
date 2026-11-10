@@ -1,0 +1,54 @@
+Программа соберёт приложение для Android из вашей лицензионной копии Mirror's Edge из GOG 	This program builds the Android app from your own licensed GOG copy of Mirror's Edge 
+и подготовит папку, которую останется скопировать на планшет.	and prepares a folder that you then copy to your tablet.
+Папка игры:	Game folder:
+Выберите папку, куда установлена игра из GOG	Choose the folder where the GOG game is installed
+Сохранить в:	Save to:
+Выберите, куда положить готовые файлы	Choose where to put the finished files
+Принимаю условия Android SDK	I accept the Android SDK terms
+Прочитать	Read
+Понадобится около 16 ГБ на диске и около 150 МБ интернета. Результат содержит данные вашей копии игры: не публикуйте и не передавайте его.	You need about 16 GB of disk space and about 150 MB of downloads. The result contains data from your copy of the game: do not publish or share it.
+Собрать	Build
+Открыть папку с результатом	Open the result folder
+Обзор…	Browse…
+Вышла версия 	Version available: 
+ (у вас 	 (you have 
+).	).
+\n\nОткрыть страницу проекта?	\n\nOpen the project page?
+Доступно обновление	Update available
+В этой папке нет Binaries\\MirrorsEdge.exe. Укажите папку, куда установлена игра из GOG.	This folder has no Binaries\\MirrorsEdge.exe. Choose the folder where the GOG game is installed.
+Укажите, куда сохранить результат.	Choose where to save the result.
+Для скачивания инструментов Google нужно принять условия Android SDK.	To download Google's tools, accept the Android SDK terms.
+ПАПКИ	FOLDERS
+СБОРКА	BUILD
+Перевод кода игры: {0}%	Translating the game's code: {0}%
+Компиляция кода: {0} из {1}	Compiling code: {0} of {1}
+Подготовка	Preparing
+Код завершения 	Exit code 
+Скачивание Python	Downloading Python
+Python скачался с другой контрольной суммой.	Python was downloaded with a different checksum.
+Готово	Done
+Сборка не удалась. Причина в журнале.	The build failed. See the log for the reason.
+Сборка ещё идёт. Прервать?	The build is still running. Stop it?
+ОШИБКА: {text}	ERROR: {text}
+В этой папке нет Binaries\MirrorsEdge.exe. Укажите папку, куда установлена игра из GOG.	This folder has no Binaries\MirrorsEdge.exe. Choose the folder where the GOG game is installed.
+В папке игры не хватает каталога {name}. Переустановите игру через GOG.	The game folder is missing {name}. Reinstall the game through GOG.
+Этот MirrorsEdge.exe не из поддерживаемой версии GOG. Копии из Steam, EA и с дисков не подходят.	This MirrorsEdge.exe is not from the supported GOG version. Steam, EA and disc copies do not work.
+Скачивание PhysX	Downloading PhysX
+В установщике PhysX нет нужных файлов: 	The PhysX installer lacks the needed files: 
+Скачивание библиотек Visual C++ 2005	Downloading the Visual C++ 2005 libraries
+В установщике Visual C++ нет нужных файлов: 	The Visual C++ installer lacks the needed files: 
+Файл {name} скачался с другой контрольной суммой. Запустите сборку снова.	{name} was downloaded with a different checksum. Run the build again.
+Для скачивания Android SDK и NDK нужно принять условия Google (--accept-android-terms).	To download the Android SDK and NDK, accept Google's terms (--accept-android-terms).
+Скачивание инструментов {number} из {total}	Downloading tools: {number} of {total}
+  распаковка	  unpacking
+  архив игры: {shown}%	  game archive: {shown}%
+Эта версия программы работает только в Windows. Версии для Linux и macOS запланированы.	This version works on Windows only. Linux and macOS versions are planned.
+Рабочая папка должна быть без русских букв в пути: {home}	The working folder must have only Latin letters in its path: {home}
+Проверка файлов игры	Checking the game files
+На диске свободно {free} ГБ, а нужно {need} ГБ.	{free} GB is free on the disk, but {need} GB is needed.
+Сборка приложения из вашей копии игры (от 5 минут до получаса)	Building the app from your copy of the game (5 to 30 minutes)
+Подготовка папки для планшета	Preparing the folder for the tablet
+КАК УСТАНОВИТЬ.txt	HOW TO INSTALL.txt
+Шаг сборки завершился с кодом {code}. Подробности в журнале выше.	A build step ended with code {code}. See the log above.
+Не найдены библиотеки	Libraries not found
+README	Mirror's Edge for Android, prepared from your copy of the game\n\nIn this folder:\n  RunnerRecompiled-pc-personal.apk  the app\n  MirrorsEdge-GOG.zip               your game files\n\nWhat to do:\n1. Copy the APK and MirrorsEdge-GOG.zip to your tablet, for example to Download.\n2. Install the APK. Android will ask you to allow installing from this source.\n3. Open the app and choose MirrorsEdge-GOG.zip when it asks for the game archive.\n4. If the game does not start or the picture has artifacts, open Graphics driver in the app's settings and choose a ZIP driver package for AdrenoTools (for example, Turnip).\n\nYou need an Android device with Vulkan and an ARMv8.4 or newer CPU.\n\nThe APK and the archive contain data from your licensed copy of the game. Keep them to yourself: do not publish or share them.\n

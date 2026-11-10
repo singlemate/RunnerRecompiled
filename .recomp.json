@@ -1,0 +1,35 @@
+{
+  "$schema": "https://recomp.fyi/schema/v1.json",
+  "game": "Mirror's Edge",
+  "system": [
+    "PC (Windows)"
+  ],
+  "type": "recomp",
+  "project": "RunnerRecompiled",
+  "status": "exploring",
+  "targets": [
+    "Android"
+  ],
+  "toolchain": [
+    "Own x86 lifter",
+    "DXVK"
+  ],
+  "approach": "Static recompilation of the DRM-free GOG PC (Windows, x86) executable to native ARM64, with Win32 services, a D3D9-to-Vulkan layer (DXVK Native) and PhysX 2.8 recompiled as well",
+  "maintainers": [
+    {
+      "name": "singlemate",
+      "link": "https://github.com/singlemate"
+    }
+  ],
+  "help": [
+    "x86 PE static recompilation (x87, SEH, indirect calls)",
+    "D3D9 to Vulkan on Android",
+    "PhysX 2.x on ARM64"
+  ],
+  "tags": [
+    "arm64",
+    "vulkan",
+    "android"
+  ],
+  "notes": "Playable on Android ARM64 (tested on Lenovo Legion Y700 Gen 4, Adreno 830) at up to 60 FPS, with resolution and FOV options. RunnerBuilder builds the APK from the user's own GOG copy; no game code or files are included."
+}

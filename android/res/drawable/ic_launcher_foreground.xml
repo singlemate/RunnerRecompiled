@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- App icon foreground: white blocks with a red route over the rooftops ("path over the
+     roofs", variant 3 of the icon concepts). Kept inside the 66dp safe zone horizontally. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#FFFFFF" android:pathData="M18,60h18v48h-18z"/>
+    <path android:fillColor="#B9CAD6" android:pathData="M36,60h6v48h-6z"/>
+    <path android:fillColor="#FFFFFF" android:pathData="M46,42h18v66h-18z"/>
+    <path android:fillColor="#B9CAD6" android:pathData="M64,42h6v66h-6z"/>
+    <path android:fillColor="#FFFFFF" android:pathData="M74,64h18v44h-18z"/>
+    <path android:strokeColor="#E24B4A" android:strokeWidth="5" android:strokeLineJoin="miter"
+        android:pathData="M18,60H42L46,42H70L74,64H92"/>
+</vector>

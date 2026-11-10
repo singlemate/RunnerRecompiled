@@ -1,0 +1,93 @@
+name: Bug report
+description: Something went wrong in the Android app or in RunnerBuilder.
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing! Any language is fine.
+
+        **Never attach or link the APK, game files or anything built from your copy of the game.** Logs from the app are fine.
+  - type: dropdown
+    id: part
+    attributes:
+      label: Where is the problem?
+      options:
+        - The game on Android
+        - The Android app (menus, setup, settings)
+        - RunnerBuilder on the PC
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you see, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: where
+    attributes:
+      label: Where in the game, and how to repeat it
+      description: The chapter and place, and the steps that lead to the problem. A screenshot or video helps a lot.
+      placeholder: |
+        Chapter 3, on the rooftop after the second elevator.
+        1. ...
+        2. ...
+  - type: dropdown
+    id: how_often
+    attributes:
+      label: How often does it happen?
+      options:
+        - Every time
+        - Often
+        - Once or rarely
+    validations:
+      required: true
+  - type: dropdown
+    id: controls
+    attributes:
+      label: Controls
+      options:
+        - Touch screen
+        - DualSense or DualShock
+        - Xbox controller
+        - Switch Pro controller
+        - Other controller
+        - Keyboard or mouse
+  - type: input
+    id: version
+    attributes:
+      label: App version
+      description: Filled in when you open this form from the app.
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      placeholder: Lenovo TB322FC
+    validations:
+      required: true
+  - type: input
+    id: chip
+    attributes:
+      label: Chip
+      placeholder: Snapdragon 8 Elite
+  - type: input
+    id: android
+    attributes:
+      label: Android version
+  - type: input
+    id: driver
+    attributes:
+      label: GPU driver
+      placeholder: System driver, or the name of the custom driver
+  - type: input
+    id: settings
+    attributes:
+      label: App settings
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: In the app, open Settings → Support → Send logs right after the problem, before starting the game again. Then drag the ZIP here. For RunnerBuilder, paste the text from its window.

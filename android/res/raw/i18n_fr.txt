@@ -1,0 +1,253 @@
+Играть	Jouer
+Настройки	Paramètres
+Достижения	Succès
+Файлы	Fichiers
+Полное	Pleine
+Авто	Auto
+Всегда	Toujours
+Нет	Non
+Вся история	Toute l'histoire
+Пройти игру	Terminer le jeu
+Сложный путь	La voie difficile
+Пройти игру на сложном уровне	Terminer le jeu en difficile
+Обучение	Entraînement
+Пройти обучение	Terminer l'entraînement
+На время	Contre la montre
+Пройти испытание на время	Terminer un contre-la-montre
+Все участки	Tous les parcours
+Открыть все участки испытаний на время	Débloquer tous les contre-la-montre
+Достичь первого рейтинга мастерства	Atteindre le premier classement
+Достичь второго рейтинга мастерства	Atteindre le deuxième classement
+Достичь третьего рейтинга мастерства	Atteindre le troisième classement
+Мимо пуль	Entre les balles
+Пройти уровень, не попав под выстрел	Terminer un niveau sans être touché
+Мягкая посадка	Atterrissage en douceur
+Пройти уровень без тяжёлых приземлений	Terminer un niveau sans atterrissage brutal
+Без оружия	Sans arme
+Пройти уровень, не сделав ни выстрела	Terminer un niveau sans tirer
+Ни царапины	Pas une égratignure
+Пройти игру без ранений от пуль	Terminer le jeu sans être touché
+На полной скорости	À pleine vitesse
+Долго держать полную скорость	Garder la vitesse maximale longtemps
+Удар с воздуха	Coup aérien
+Победить врага ударом в прыжке	Vaincre un ennemi d'un coup sauté
+Обезоруживание	Désarmement
+Несколько раз обезоружить врагов	Désarmer plusieurs ennemis
+Ближний бой	Corps à corps
+Победить врагов в ближнем бою	Vaincre des ennemis au corps à corps
+Разворот	Demi-tour
+Выполнить разворот-насмешку	Faire un demi-tour moqueur
+Сверху	Par le haut
+Приземлиться на голову врага	Atterrir sur la tête d'un ennemi
+Прыжок, подъём и подкат одной цепочкой	Saut, escalade et glissade d'affilée
+Бег по стене и прыжок с разворотом	Course murale et saut retourné
+Бег по стене, поворот, прыжок и разворот	Course murale, virage, saut et demi-tour
+Бег по стене, прыжок, подъём и перекат	Course murale, saut, escalade et roulade
+Все сумки	Tous les sacs
+Найти все спрятанные сумки	Trouver tous les sacs cachés
+Доступна версия 	Version disponible : 
+Установлена версия 	Version installée : 
+\n\nСоберите новый APK через RunnerBuilder. Он ставится поверх, файлы игры и сохранения остаются.	\n\nRecréez le nouvel APK avec RunnerBuilder. Il s'installe par-dessus ; les fichiers du jeu et les sauvegardes sont conservés.
+Понятно	OK
+Системный драйвер устройства	Pilote système de l'appareil
+Свой: 	Personnalisé : 
+Драйвер установлен: 	Pilote installé : 
+Драйвер не установлен: 	Pilote non installé : 
+▶  Играть	▶  Jouer
+ПК-ВЕРСИЯ	VERSION PC
+ИГРА	JEU
+Язык игры	Langue du jeu
+Лимит кадров	Limite d'images
+62 — как в игре, 30 — ровнее и холоднее	62 comme dans le jeu, 30 plus stable et plus frais
+Шире — больше видно по краям	Plus large : plus de champ sur les bords
+Поле зрения: как в игре	Champ de vision : comme dans le jeu
+Поле зрения: 	Champ de vision : 
+Заставка при запуске	Logos au démarrage
+Логотипы перед главным меню	Logos avant le menu principal
+Показывать	Afficher
+Пропускать	Passer
+УПРАВЛЕНИЕ	COMMANDES
+Кнопки Nintendo	Boutons Nintendo
+Если A и B на геймпаде перепутаны, выберите «По надписям»	Si A et B sont inversés, choisissez Par étiquette
+По положению	Par position
+По надписям	Par étiquette
+Экранный геймпад	Manette à l'écran
+Авто — только без геймпада и клавиатуры	Auto : seulement sans manette ni clavier
+ПРОИЗВОДИТЕЛЬНОСТЬ	PERFORMANCES
+Начальное разрешение	Résolution de départ
+Доля экрана. Потом его можно менять в игре	Part de l'écran. Modifiable ensuite dans le jeu
+Апскейлер	Mise à l'échelle
+Как растянуть картинку на экран. Только если разрешение ниже полного	Comment agrandir l'image, seulement sous la pleine résolution
+Выкл	Non
+Ядра для игры	Cœurs pour le jeu
+4 — отдельный поток отрисовки, быстрее	4 : thread de rendu séparé, plus rapide
+ДРАЙВЕР ГРАФИКИ	PILOTE GRAPHIQUE
+Драйвер Vulkan	Pilote Vulkan
+Свой драйвер (.zip)…	Pilote personnalisé (.zip)…
+Вернуть системный драйвер	Revenir au pilote système
+Turnip без тайлового рендера	Turnip sans rendu par tuiles
+TU_DEBUG=sysmem: если со своим драйвером зависает или искажается картинка	TU_DEBUG=sysmem : si un pilote personnalisé se fige ou déforme l'image
+Нужен пакет AdrenoTools: ZIP с meta.json и библиотекой драйвера. Если игра перестала запускаться, верните системный драйвер.	Nécessite un paquet AdrenoTools : un ZIP avec meta.json et la bibliothèque du pilote. Si le jeu ne démarre plus, revenez au pilote système.
+ПОДДЕРЖКА	ASSISTANCE
+ГРАФИКА	GRAPHISMES
+Появятся после первого запуска игры.	Apparaît après le premier lancement du jeu.
+Режим экономии	Mode économie
+Выключает самые тяжёлые эффекты, чтобы планшет меньше грелся	Désactive les effets les plus lourds pour limiter la chauffe
+Применить	Appliquer
+Вкл	Oui
+Динамические тени	Ombres dynamiques
+Свечение	Flou lumineux
+Глубина резкости	Profondeur de champ
+Размытие в движении	Flou de mouvement
+Блики	Reflets d'objectif
+Искажения	Distorsion
+Дымка от солнца	Brume solaire
+Статические декали	Décalcomanies statiques
+Динамические декали	Décalcomanies dynamiques
+Анизотропная фильтрация	Filtrage anisotrope
+Чёткость текстур под углом	Netteté des textures vues en biais
+Сообщить о баге	Signaler un bug
+Откроет форму на GitHub, данные устройства уже подставлены	Ouvre un formulaire sur GitHub avec les infos de l'appareil déjà remplies
+Открыть форму…	Ouvrir le formulaire…
+Логи для разработчика	Journaux pour le développeur
+Модель устройства, настройки и журналы игры	Modèle de l'appareil, paramètres et journaux du jeu
+Отправить логи…	Envoyer les journaux…
+Качество графики, сглаживание и PhysX настраиваются в самой игре: Options → Video.\n	La qualité graphique, l'anticrénelage et PhysX se règlent dans le jeu : Options → Video.\n
+При первом запуске выставляются средние настройки с высокими текстурами; дальше они ваши и приложение их не меняет.	Le premier lancement utilise des réglages moyens avec textures élevées ; l'application ne les modifie plus ensuite.
+Версия 	Version 
+Собираю логи…	Collecte des journaux…
+Не получилось собрать логи: 	Impossible de collecter les journaux : 
+ДОСТИЖЕНИЯ	SUCCÈS
+Логика достижений — из самой игры, а названия и описания написаны для этого приложения: 	La logique des succès vient du jeu ; les noms et descriptions ont été écrits pour cette application : 
+в ПК-версии их текстов нет.	la version PC ne contient pas leurs textes.
+ из 	 sur 
+ · получено 	 · obtenu 
+ФАЙЛЫ ИГРЫ	FICHIERS DU JEU
+Установить или обновить файлы…	Installer ou mettre à jour les fichiers…
+Файлы игры берутся из вашей копии GOG. В приложение они не входят.	Les fichiers du jeu proviennent de votre copie GOG. Ils ne font pas partie de l'application.
+Папка: 	Dossier : 
+libmepc.so (только личная сборка)	libmepc.so (version personnelle uniquement)
+библиотеки и все файлы игры	bibliothèques et tous les fichiers du jeu
+ · до 	 · jusqu'à 
+ кадров/с · 	 i/s · 
+поле зрения 	champ de vision 
+поле зрения как в игре	champ de vision du jeu
+Не хватает файлов игры — смотрите раздел «Файлы»	Fichiers du jeu manquants : voir Fichiers
+MIRROR'S EDGE · ПК-ВЕРСИЯ	MIRROR'S EDGE · VERSION PC
+Настроим за пару минут	La configuration prend quelques minutes
+Приложение запускает ПК-версию игры на Android. Файлы игры берутся из вашей копии GOG, в приложении их нет.	Cette application exécute la version PC du jeu sur Android. Les fichiers viennent de votre copie GOG et ne sont pas inclus.
+Далее	Suivant
+Подключите свою копию	Ajoutez votre copie
+Нужен один файл: ZIP-архив папки с вашей игрой из GOG (внутри Binaries, Engine и TdGame). 	Il vous faut un fichier : un ZIP de votre dossier de jeu GOG (avec Binaries, Engine et TdGame). 
+Приложение само его распакует. Нужно около 12 ГБ свободного места.	L'application le décompresse elle-même. Environ 12 Go d'espace libre sont nécessaires.
+Выбрать архив игры (.zip)…	Choisir l'archive du jeu (.zip)…
+Или выбрать распакованную папку…	Ou choisir un dossier décompressé…
+НАСТРОЙКИ	PARAMÈTRES
+Почти готово	Presque terminé
+Это можно изменить позже в разделе «Настройки».	Vous pourrez changer cela dans les Paramètres.
+Готово	Terminé
+Файлы игры на месте.	Les fichiers du jeu sont en place.
+Проверяю копию игры…	Vérification de votre copie du jeu…
+архив обрывается	l'archive est tronquée
+архив повреждён	l'archive est endommagée
+архив повреждён: 	l'archive est endommagée : 
+в архиве нет Binaries/MirrorsEdge.exe	l'archive ne contient pas Binaries/MirrorsEdge.exe
+мало места: нужно не меньше %.1f ГБ	espace insuffisant : au moins %.1f Go nécessaires
+не удалось открыть архив	impossible d'ouvrir l'archive
+эта версия игры не подходит: нужна копия GOG той же сборки	cette version du jeu ne convient pas : il faut la même version GOG
+не удалось создать 	impossible de créer 
+Копирую файлы игры… Не закрывайте приложение.	Copie des fichiers du jeu… Ne fermez pas l'application.
+%.2f / %.2f ГБ	%.2f / %.2f Go
+в этой сборке приложения нет библиотек ПК-версии	cette version de l'application ne contient pas les bibliothèques PC
+Не получилось: 	Échec : 
+Можно выбрать файл ещё раз, готовые файлы пропускаются.	Vous pouvez choisir à nouveau le fichier ; les fichiers terminés sont ignorés.
+в выбранной папке нет 	le dossier choisi ne contient pas 
+ (нужна папка, где лежат Binaries, Engine и TdGame)	 (choisissez le dossier contenant Binaries, Engine et TdGame)
+в Binaries нет MirrorsEdge.exe	Binaries ne contient pas MirrorsEdge.exe
+мало места: нужно ещё %.1f ГБ	espace insuffisant : encore %.1f Go nécessaires
+Подготавливаю библиотеки…	Préparation des bibliothèques…
+ не совпадает с поддерживаемой сборкой	 ne correspond pas à la version prise en charge
+в DefaultCompat.ini нет пресетов	DefaultCompat.ini ne contient aucun préréglage
+не удалось открыть 	impossible d'ouvrir 
+Нет libmepcjni.so: 	libmepcjni.so manquant : 
+Это APK без ПК-версии (нет libmepc.so).	Cet APK ne contient pas la version PC (libmepc.so manquant).
+Нет копии игры: 	Aucune copie du jeu : 
+Нет библиотек: 	Bibliothèques manquantes : 
+Не удалось запустить libmepc.so (см. logcat, тег me_pc_jni)	Impossible de lancer libmepc.so (voir logcat, balise me_pc_jni)
+Крестовина влево/вправо — поворот на 90°.	Croix gauche/droite : rotation de 90°.
+✕ Крест	✕ Croix
+○ Круг	○ Rond
+□ Квадрат	□ Carré
+△ Треугольник	△ Triangle
+Нажатие стиков	Clic des sticks
+A (нижняя)	A (bas)
+B (нижняя)	B (bas)
+B (правая)	B (droite)
+A (правая)	A (droite)
+X (левая)	X (gauche)
+Y (левая)	Y (gauche)
+Y (верхняя)	Y (haut)
+X (верхняя)	X (haut)
+вверх · прыжок	haut · saut
+вниз · подкат	bas · glissade
+разворот	demi-tour
+атака	attaque
+Бег	Course
+Обзор	Vue
+нет доступа к памяти приложения	pas d'accès au stockage de l'application
+файл не открывается	le fichier ne s'ouvre pas
+архив слишком большой для драйвера	l'archive est trop grande pour un pilote
+в архиве нет meta.json — это не пакет драйвера AdrenoTools	pas de meta.json dans l'archive : ce n'est pas un paquet AdrenoTools
+meta.json не читается	meta.json illisible
+в архиве нет библиотеки драйвера (	l'archive ne contient pas la bibliothèque du pilote (
+библиотека драйвера не для 64-битного ARM	la bibliothèque du pilote n'est pas pour ARM 64 bits
+драйверу нужен Android API 	le pilote nécessite l'API Android 
+Драйвер	Pilote
+не удалось сохранить драйвер	impossible d'enregistrer le pilote
+Отправить логи	Envoyer les journaux
+Загрузки/RunnerRecompiled/	Téléchargements/RunnerRecompiled/
+Глава 1	Chapitre 1
+Глава 2	Chapitre 2
+Глава 3	Chapitre 3
+Глава 4	Chapitre 4
+Глава 5	Chapitre 5
+Глава 6	Chapitre 6
+Глава 7	Chapitre 7
+Глава 8	Chapitre 8
+Глава 9	Chapitre 9
+Пройти главу 1	Terminer le chapitre 1
+Пройти главу 2	Terminer le chapitre 2
+Пройти главу 3	Terminer le chapitre 3
+Пройти главу 4	Terminer le chapitre 4
+Пройти главу 5	Terminer le chapitre 5
+Пройти главу 6	Terminer le chapitre 6
+Пройти главу 7	Terminer le chapitre 7
+Пройти главу 8	Terminer le chapitre 8
+Пройти главу 9	Terminer le chapitre 9
+Рейтинг 1	Classement 1
+Рейтинг 2	Classement 2
+Рейтинг 3	Classement 3
+Скоростной забег 1	Course de vitesse 1
+Скоростной забег 2	Course de vitesse 2
+Скоростной забег 3	Course de vitesse 3
+Скоростной забег 4	Course de vitesse 4
+Скоростной забег 5	Course de vitesse 5
+Скоростной забег 6	Course de vitesse 6
+Скоростной забег 7	Course de vitesse 7
+Скоростной забег 8	Course de vitesse 8
+Скоростной забег 9	Course de vitesse 9
+Скоростной забег 10	Course de vitesse 10
+Пройти скоростной забег 1	Terminer la course de vitesse 1
+Пройти скоростной забег 2	Terminer la course de vitesse 2
+Пройти скоростной забег 3	Terminer la course de vitesse 3
+Пройти скоростной забег 4	Terminer la course de vitesse 4
+Пройти скоростной забег 5	Terminer la course de vitesse 5
+Пройти скоростной забег 6	Terminer la course de vitesse 6
+Пройти скоростной забег 7	Terminer la course de vitesse 7
+Пройти скоростной забег 8	Terminer la course de vitesse 8
+Пройти скоростной забег 9	Terminer la course de vitesse 9
+Пройти скоростной забег 10	Terminer la course de vitesse 10
+Связка 1	Enchaînement 1
+Связка 2	Enchaînement 2
+Связка 3	Enchaînement 3
+Связка 4	Enchaînement 4
