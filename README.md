@@ -1,3 +1,13 @@
+<p align="center">
+  <img src=".github/banner.svg" alt="RunnerRecompiled: Mirror's Edge (GOG PC) on native Android ARM64" width="100%">
+</p>
+
+<p align="center">
+  <a href="https://github.com/singlemate/RunnerRecompiled/releases/latest/download/RunnerBuilder.exe"><b>Download RunnerBuilder</b></a> ·
+  <a href="https://github.com/singlemate/RunnerRecompiled/releases/latest">Release notes</a> ·
+  <a href="https://github.com/singlemate/RunnerRecompiled/issues/new?template=bug_report.yml">Report a bug</a>
+</p>
+
 # RunnerRecompiled
 
 An unofficial, fan-made static recompilation of the **Windows PC (GOG)** version of

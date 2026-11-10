@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 420" width="1280" height="420" role="img" aria-label="RunnerRecompiled: Mirror's Edge (GOG PC) recompiled to native Android ARM64">
+  <!-- Original artwork in the style of the app's icon and launcher; no game assets. -->
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#E3EEF6"/>
+      <stop offset="1" stop-color="#C4D9E8"/>
+    </linearGradient>
+    <clipPath id="frame"><rect width="1280" height="420" rx="24"/></clipPath>
+    <linearGradient id="ground" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#BFD3E2" stop-opacity="0"/>
+      <stop offset="1" stop-color="#BFD3E2" stop-opacity="0.85"/>
+    </linearGradient>
+    <clipPath id="tile"><rect width="108" height="108" rx="24"/></clipPath>
+  </defs>
+  <g clip-path="url(#frame)">
+    <rect width="1280" height="420" fill="url(#sky)"/>
+    <!-- far skyline -->
+    <g fill="#D7E5EF">
+      <rect x="40" y="250" width="50" height="170"/><rect x="170" y="225" width="36" height="195"/>
+      <rect x="330" y="240" width="60" height="180"/><rect x="520" y="215" width="40" height="205"/>
+      <rect x="700" y="235" width="56" height="185"/><rect x="890" y="205" width="40" height="215"/>
+      <rect x="1040" y="230" width="60" height="190"/><rect x="1190" y="215" width="44" height="205"/>
+    </g>
+    <!-- rooftops -->
+    <g>
+      <rect x="-10" y="330" width="150" height="90" fill="#FFFFFF"/><rect x="140" y="330" width="30" height="90" fill="#B9CAD6"/>
+      <rect x="196" y="300" width="160" height="120" fill="#FFFFFF"/><rect x="356" y="300" width="32" height="120" fill="#B9CAD6"/>
+      <rect x="414" y="340" width="150" height="80" fill="#FFFFFF"/><rect x="564" y="340" width="30" height="80" fill="#B9CAD6"/>
+      <rect x="620" y="290" width="170" height="130" fill="#FFFFFF"/><rect x="790" y="290" width="34" height="130" fill="#B9CAD6"/>
+      <rect x="850" y="320" width="140" height="100" fill="#FFFFFF"/><rect x="990" y="320" width="30" height="100" fill="#B9CAD6"/>
+      <rect x="1046" y="280" width="160" height="140" fill="#FFFFFF"/><rect x="1206" y="280" width="34" height="140" fill="#B9CAD6"/>
+      <rect x="1266" y="310" width="40" height="110" fill="#FFFFFF"/>
+    </g>
+    <!-- the route over the roofs -->
+    <path d="M-10,330 H170 L196,300 H388 L414,340 H594 L620,290 H824 L850,320 H1020 L1046,280 H1240 L1266,310 H1290"
+          fill="none" stroke="#E24B4A" stroke-width="10" stroke-linejoin="miter"/>
+    <rect y="350" width="1280" height="70" fill="url(#ground)"/>
+    <!-- icon -->
+    <g transform="translate(72,62) scale(1.55)">
+      <rect width="108" height="108" rx="24" fill="#CFE2EF"/>
+      <g clip-path="url(#tile)">
+        <rect x="18" y="60" width="18" height="48" fill="#FFFFFF"/><rect x="36" y="60" width="6" height="48" fill="#B9CAD6"/>
+        <rect x="46" y="42" width="18" height="66" fill="#FFFFFF"/><rect x="64" y="42" width="6" height="66" fill="#B9CAD6"/>
+        <rect x="74" y="64" width="18" height="44" fill="#FFFFFF"/>
+        <path d="M18,60H42L46,42H70L74,64H92" fill="none" stroke="#E24B4A" stroke-width="5"/>
+      </g>
+      <rect x="1" y="1" width="106" height="106" rx="23" fill="none" stroke="#FFFFFF" stroke-width="2"/>
+    </g>
+    <!-- wordmark -->
+    <g font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif" fill="#16252F">
+      <text x="270" y="128" font-size="62" font-weight="300" letter-spacing="6">RUNNER<tspan fill="#E24B4A">/</tspan>RECOMP</text>
+      <text x="274" y="178" font-size="26" fill="#3E5566">Mirror's Edge (GOG PC) · native Android ARM64</text>
+      <text x="274" y="216" font-size="19" fill="#5C7385">Built from your own copy of the game · no game files included</text>
+    </g>
+  </g>
+</svg>
