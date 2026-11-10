@@ -52,3 +52,45 @@ Python скачался с другой контрольной суммой.	Pyt
 Шаг сборки завершился с кодом {code}. Подробности в журнале выше.	A build step ended with code {code}. See the log above.
 Не найдены библиотеки	Libraries not found
 README	Mirror's Edge for Android, prepared from your copy of the game\n\nIn this folder:\n  RunnerRecompiled-pc-personal.apk  the app\n  MirrorsEdge-GOG.zip               your game files\n\nWhat to do:\n1. Copy the APK and MirrorsEdge-GOG.zip to your tablet, for example to Download.\n2. Install the APK. Android will ask you to allow installing from this source.\n3. Open the app and choose MirrorsEdge-GOG.zip when it asks for the game archive.\n4. If the game does not start or the picture has artifacts, open Graphics driver in the app's settings and choose a ZIP driver package for AdrenoTools (for example, Turnip).\n\nYou need an Android device with Vulkan and an ARMv8.4 or newer CPU.\n\nThe APK and the archive contain data from your licensed copy of the game. Keep them to yourself: do not publish or share them.\n
+Установить на планшет…	Install on the tablet…
+Готово: откройте приложение на планшете	Done: open the app on the tablet
+Установка не удалась. Причина в журнале.	The installation failed. The reason is in the log.
+Копирование на планшет ещё идёт. Прервать?	Copying to the tablet is still running. Stop it?
+Установка на планшет	Install on the tablet
+Программа установит приложение и скопирует на планшет файлы игры (около 12 ГБ на планшете). 	The program installs the app and copies the game files to the tablet (about 12 GB on the tablet). 
+На планшете должен быть включён режим разработчика: Настройки → О планшете → семь раз нажать «Номер сборки».	Developer options must be on: Settings → About tablet → tap “Build number” seven times.
+По кабелю USB	With a USB cable
+Включите «Отладку по USB» в настройках для разработчиков, подключите кабель и разрешите отладку на экране планшета.	Turn on “USB debugging” in the developer options, connect the cable and allow debugging on the tablet's screen.
+По Wi-Fi	Over Wi-Fi
+Включите «Отладку по Wi-Fi» в настройках для разработчиков. Компьютер и планшет должны быть в одной сети.	Turn on “Wireless debugging” in the developer options. The computer and the tablet must be on the same network.
+Адрес сопряжения (IP:порт):	Pairing address (IP:port):
+Код сопряжения:	Pairing code:
+Адрес подключения (IP:порт):	Connection address (IP:port):
+Адрес и код сопряжения: «Подключить устройство с помощью кода». Если этот компьютер уже сопряжён, оставьте их пустыми. 	Pairing address and code: “Pair device with pairing code”. If this computer is already paired, leave them empty. 
+Адрес подключения показан на экране «Отладка по Wi-Fi»; порт меняется при каждом включении.	The connection address is shown on the “Wireless debugging” screen; the port changes every time it is turned on.
+Установить	Install
+Отмена	Cancel
+Укажите адрес подключения с экрана «Отладка по Wi-Fi».	Enter the connection address from the “Wireless debugging” screen.
+Для сопряжения нужны и адрес, и код.	Pairing needs both the address and the code.
+В этой сборке программы не указан adb. Сообщите об ошибке.	This build of the program has no adb set. Please report a bug.
+Скачивание adb	Downloading adb
+Подключено несколько устройств: {list}. Оставьте одно.	Several devices are connected: {list}. Leave only one.
+Разрешите отладку на планшете: на его экране появился запрос «Разрешить отладку по USB?». Отметьте «Всегда разрешать с этого компьютера», нажмите «Разрешить» и запустите установку ещё раз.	Allow debugging on the tablet: its screen shows “Allow USB debugging?”. Tick “Always allow from this computer”, tap “Allow” and start the installation again.
+Планшет виден, но не отвечает. Отключите и снова включите отладку на планшете и запустите установку ещё раз.	The tablet is visible but does not answer. Turn debugging on the tablet off and on again and start the installation again.
+Планшет не найден. Включите на нём отладку по USB и подключите кабель, или включите отладку по Wi-Fi и укажите адрес.	The tablet was not found. Turn on USB debugging and connect the cable, or turn on wireless debugging and enter the address.
+Установка приложения на планшет	Installing the app on the tablet
+На планшете стоит приложение, подписанное другим ключом. Удалите его на планшете (файлы игры и сохранения внутри приложения тоже удалятся) и запустите установку ещё раз.	The tablet has the app signed with another key. Uninstall it on the tablet (the game files and saves inside the app are removed too) and start the installation again.
+На планшете не хватает места для приложения.	The tablet does not have enough space for the app.
+Планшет не разрешил установку. На некоторых планшетах нужно включить «Установка через USB» в настройках для разработчиков или подтвердить установку на экране.	The tablet did not allow the installation. Some tablets need “Install via USB” turned on in the developer options, or a confirmation on the screen.
+Не удалось установить приложение: {reason}	Could not install the app: {reason}
+связь с планшетом прервалась	the connection to the tablet was lost
+Планшет ответил: {reason}	The tablet answered: {reason}
+Приложение на планшете не ответило. Разблокируйте планшет, не закрывайте приложение и запустите установку ещё раз.	The app on the tablet did not answer. Unlock the tablet, keep the app open and start the installation again.
+Копирование игры на планшет	Copying the game to the tablet
+Файл игры изменился во время копирования: {name}	A game file changed while it was being copied: {name}
+  копирование, {speed} МБ/с: {p}%	  copying, {speed} MB/s: {p}%
+Проверка файлов на планшете	Checking the files on the tablet
+Поиск планшета	Looking for the tablet
+Для сопряжения нужен код с экрана планшета.	Pairing needs the code from the tablet's screen.
+Сопряжение не удалось: проверьте адрес, порт и код. Код действует, пока открыто окно сопряжения на планшете.	Pairing failed: check the address, port and code. The code works only while the pairing window is open on the tablet.
+Не удалось подключиться к {address}. Планшет и компьютер должны быть в одной сети Wi-Fi, а адрес и порт — с экрана «Отладка по Wi-Fi» (порт меняется при каждом включении).	Could not connect to {address}. The tablet and the computer must be on the same Wi-Fi network, and the address and port must come from the “Wireless debugging” screen (the port changes every time it is turned on).

@@ -206,6 +206,12 @@ meta.json не читается	nie można odczytać meta.json
 не удалось сохранить драйвер	nie udało się zapisać sterownika
 Отправить логи	Wyślij logi
 Загрузки/RunnerRecompiled/	Pobrane/RunnerRecompiled/
+Жду файлы игры с компьютера…	Czekam na pliki gry z komputera…
+компьютер не подключился	komputer się nie połączył
+связь с компьютером прервалась	połączenie z komputerem zostało przerwane
+Запустите установку на компьютере ещё раз, готовые файлы пропускаются.	Uruchom instalację na komputerze jeszcze raz; gotowe pliki są pomijane.
+не удалось записать 	nie udało się zapisać 
+неверный путь: 	nieprawidłowa ścieżka: 
 Глава 1	Rozdział 1
 Глава 2	Rozdział 2
 Глава 3	Rozdział 3

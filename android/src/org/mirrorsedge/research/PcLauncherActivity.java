@@ -112,7 +112,11 @@ public class PcLauncherActivity extends Activity {
         setup = new PcSetup(this);
         host.addView(setup.view(), new FrameLayout.LayoutParams(-1, -1));
         setContentView(host);
-        if (!prefs().getBoolean("setupDone", false) && !PcSetup.filesReady(pcDir())) setup.show(0);
+        if (state == null && getIntent().getBooleanExtra("receiveFromPc", false)) {
+            // Started by RunnerBuilder (adb shell am start): take the game files from the computer.
+            setup.showData();
+            setup.receive(getIntent().getBooleanExtra("receiveTest", false));
+        } else if (!prefs().getBoolean("setupDone", false) && !PcSetup.filesReady(pcDir())) setup.show(0);
         checkForUpdate();
         showPage(state == null ? 0 : state.getInt("page", 0));
     }

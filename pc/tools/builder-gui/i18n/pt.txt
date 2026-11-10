@@ -52,3 +52,45 @@ Python скачался с другой контрольной суммой.	O P
 Шаг сборки завершился с кодом {code}. Подробности в журнале выше.	Uma etapa terminou com o código {code}. Veja o registro acima.
 Не найдены библиотеки	Bibliotecas não encontradas
 README	Mirror's Edge para Android, preparado a partir da sua cópia do jogo\n\nNesta pasta:\n  RunnerRecompiled-pc-personal.apk  o app\n  MirrorsEdge-GOG.zip               os arquivos do seu jogo\n\nO que fazer:\n1. Copie o APK e MirrorsEdge-GOG.zip para o tablet, por exemplo em Download.\n2. Instale o APK. O Android pedirá para permitir a instalação desta fonte.\n3. Abra o app e escolha MirrorsEdge-GOG.zip quando ele pedir o arquivo do jogo.\n4. Se o jogo não iniciar ou a imagem tiver falhas, abra Driver gráfico nas configurações e escolha um pacote ZIP de driver para AdrenoTools (por exemplo, Turnip).\n\nÉ necessário um aparelho Android com Vulkan e CPU ARMv8.4 ou mais recente.\n\nO APK e o arquivo contêm dados da sua cópia licenciada. Guarde-os para você: não publique nem compartilhe.\n
+Установить на планшет…	Instalar no tablet…
+Готово: откройте приложение на планшете	Pronto: abra o aplicativo no tablet
+Установка не удалась. Причина в журнале.	A instalação falhou. O motivo está no registro.
+Копирование на планшет ещё идёт. Прервать?	A cópia para o tablet ainda está em andamento. Interromper?
+Установка на планшет	Instalar no tablet
+Программа установит приложение и скопирует на планшет файлы игры (около 12 ГБ на планшете). 	O programa instala o aplicativo e copia os arquivos do jogo para o tablet (cerca de 12 GB no tablet). 
+На планшете должен быть включён режим разработчика: Настройки → О планшете → семь раз нажать «Номер сборки».	As opções do desenvolvedor devem estar ativas: Configurações → Sobre o tablet → toque sete vezes em “Número da versão”.
+По кабелю USB	Por cabo USB
+Включите «Отладку по USB» в настройках для разработчиков, подключите кабель и разрешите отладку на экране планшета.	Ative “Depuração USB” nas opções do desenvolvedor, conecte o cabo e permita a depuração na tela do tablet.
+По Wi-Fi	Por Wi-Fi
+Включите «Отладку по Wi-Fi» в настройках для разработчиков. Компьютер и планшет должны быть в одной сети.	Ative “Depuração por Wi-Fi” nas opções do desenvolvedor. O computador e o tablet devem estar na mesma rede.
+Адрес сопряжения (IP:порт):	Endereço de pareamento (IP:porta):
+Код сопряжения:	Código de pareamento:
+Адрес подключения (IP:порт):	Endereço de conexão (IP:porta):
+Адрес и код сопряжения: «Подключить устройство с помощью кода». Если этот компьютер уже сопряжён, оставьте их пустыми. 	Endereço e código de pareamento: “Parear o dispositivo com código”. Se este computador já estiver pareado, deixe-os vazios. 
+Адрес подключения показан на экране «Отладка по Wi-Fi»; порт меняется при каждом включении.	O endereço de conexão aparece na tela “Depuração por Wi-Fi”; a porta muda sempre que é ativada.
+Установить	Instalar
+Отмена	Cancelar
+Укажите адрес подключения с экрана «Отладка по Wi-Fi».	Informe o endereço de conexão da tela “Depuração por Wi-Fi”.
+Для сопряжения нужны и адрес, и код.	O pareamento precisa do endereço e do código.
+В этой сборке программы не указан adb. Сообщите об ошибке.	Esta versão do programa não indica o adb. Relate o erro.
+Скачивание adb	Baixando o adb
+Подключено несколько устройств: {list}. Оставьте одно.	Vários dispositivos estão conectados: {list}. Deixe apenas um.
+Разрешите отладку на планшете: на его экране появился запрос «Разрешить отладку по USB?». Отметьте «Всегда разрешать с этого компьютера», нажмите «Разрешить» и запустите установку ещё раз.	Permita a depuração no tablet: a tela mostra “Permitir depuração USB?”. Marque “Sempre permitir neste computador”, toque em “Permitir” e inicie a instalação de novo.
+Планшет виден, но не отвечает. Отключите и снова включите отладку на планшете и запустите установку ещё раз.	O tablet aparece, mas não responde. Desative e ative de novo a depuração no tablet e inicie a instalação outra vez.
+Планшет не найден. Включите на нём отладку по USB и подключите кабель, или включите отладку по Wi-Fi и укажите адрес.	O tablet não foi encontrado. Ative a depuração USB e conecte o cabo, ou ative a depuração por Wi-Fi e informe o endereço.
+Установка приложения на планшет	Instalando o aplicativo no tablet
+На планшете стоит приложение, подписанное другим ключом. Удалите его на планшете (файлы игры и сохранения внутри приложения тоже удалятся) и запустите установку ещё раз.	O tablet tem o aplicativo assinado com outra chave. Desinstale-o (os arquivos do jogo e os saves dentro do aplicativo também serão apagados) e inicie a instalação de novo.
+На планшете не хватает места для приложения.	O tablet não tem espaço suficiente para o aplicativo.
+Планшет не разрешил установку. На некоторых планшетах нужно включить «Установка через USB» в настройках для разработчиков или подтвердить установку на экране.	O tablet não permitiu a instalação. Em alguns é preciso ativar “Instalar via USB” nas opções do desenvolvedor ou confirmar na tela.
+Не удалось установить приложение: {reason}	Não foi possível instalar o aplicativo: {reason}
+связь с планшетом прервалась	a conexão com o tablet caiu
+Планшет ответил: {reason}	O tablet respondeu: {reason}
+Приложение на планшете не ответило. Разблокируйте планшет, не закрывайте приложение и запустите установку ещё раз.	O aplicativo no tablet não respondeu. Desbloqueie o tablet, deixe o aplicativo aberto e inicie a instalação de novo.
+Копирование игры на планшет	Copiando o jogo para o tablet
+Файл игры изменился во время копирования: {name}	Um arquivo do jogo mudou durante a cópia: {name}
+  копирование, {speed} МБ/с: {p}%	  copiando, {speed} MB/s: {p}%
+Проверка файлов на планшете	Verificando os arquivos no tablet
+Поиск планшета	Procurando o tablet
+Для сопряжения нужен код с экрана планшета.	O pareamento precisa do código da tela do tablet.
+Сопряжение не удалось: проверьте адрес, порт и код. Код действует, пока открыто окно сопряжения на планшете.	O pareamento falhou: verifique o endereço, a porta e o código. O código só vale enquanto a janela de pareamento estiver aberta no tablet.
+Не удалось подключиться к {address}. Планшет и компьютер должны быть в одной сети Wi-Fi, а адрес и порт — с экрана «Отладка по Wi-Fi» (порт меняется при каждом включении).	Não foi possível conectar a {address}. O tablet e o computador devem estar na mesma rede Wi-Fi, e o endereço e a porta devem ser os da tela “Depuração por Wi-Fi” (a porta muda sempre que é ativada).

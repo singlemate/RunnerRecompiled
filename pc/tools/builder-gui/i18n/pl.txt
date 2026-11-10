@@ -52,3 +52,45 @@ Python скачался с другой контрольной суммой.	Pyt
 Шаг сборки завершился с кодом {code}. Подробности в журнале выше.	Krok budowania zakończył się kodem {code}. Szczegóły w logu powyżej.
 Не найдены библиотеки	Nie znaleziono bibliotek
 README	Mirror's Edge na Androida, przygotowane z Twojej kopii gry\n\nW tym folderze:\n  RunnerRecompiled-pc-personal.apk  aplikacja\n  MirrorsEdge-GOG.zip               pliki Twojej gry\n\nCo zrobić:\n1. Skopiuj APK i MirrorsEdge-GOG.zip na tablet, na przykład do Download.\n2. Zainstaluj APK. Android poprosi o zgodę na instalację z tego źródła.\n3. Otwórz aplikację i wybierz MirrorsEdge-GOG.zip, gdy poprosi o archiwum gry.\n4. Jeśli gra się nie uruchamia lub obraz ma błędy, otwórz Sterownik grafiki w ustawieniach i wybierz pakiet ZIP sterownika dla AdrenoTools (na przykład Turnip).\n\nPotrzebne jest urządzenie z Androidem, Vulkanem i procesorem ARMv8.4 lub nowszym.\n\nAPK i archiwum zawierają dane Twojej licencjonowanej kopii gry. Zachowaj je dla siebie: nie publikuj ich ani nie udostępniaj.\n
+Установить на планшет…	Zainstaluj na tablecie…
+Готово: откройте приложение на планшете	Gotowe: otwórz aplikację na tablecie
+Установка не удалась. Причина в журнале.	Instalacja nie powiodła się. Przyczyna jest w dzienniku.
+Копирование на планшет ещё идёт. Прервать?	Kopiowanie na tablet nadal trwa. Przerwać?
+Установка на планшет	Instalacja na tablecie
+Программа установит приложение и скопирует на планшет файлы игры (около 12 ГБ на планшете). 	Program zainstaluje aplikację i skopiuje pliki gry na tablet (około 12 GB na tablecie). 
+На планшете должен быть включён режим разработчика: Настройки → О планшете → семь раз нажать «Номер сборки».	Opcje programisty muszą być włączone: Ustawienia → Informacje o tablecie → siedem razy dotknij „Numer kompilacji”.
+По кабелю USB	Kablem USB
+Включите «Отладку по USB» в настройках для разработчиков, подключите кабель и разрешите отладку на экране планшета.	Włącz „Debugowanie USB” w opcjach programisty, podłącz kabel i zezwól na debugowanie na ekranie tabletu.
+По Wi-Fi	Przez Wi-Fi
+Включите «Отладку по Wi-Fi» в настройках для разработчиков. Компьютер и планшет должны быть в одной сети.	Włącz „Debugowanie bezprzewodowe” w opcjach programisty. Komputer i tablet muszą być w tej samej sieci.
+Адрес сопряжения (IP:порт):	Adres parowania (IP:port):
+Код сопряжения:	Kod parowania:
+Адрес подключения (IP:порт):	Adres połączenia (IP:port):
+Адрес и код сопряжения: «Подключить устройство с помощью кода». Если этот компьютер уже сопряжён, оставьте их пустыми. 	Adres i kod parowania: „Sparuj urządzenie za pomocą kodu”. Jeśli ten komputer jest już sparowany, zostaw je puste. 
+Адрес подключения показан на экране «Отладка по Wi-Fi»; порт меняется при каждом включении.	Adres połączenia jest na ekranie „Debugowanie bezprzewodowe”; port zmienia się przy każdym włączeniu.
+Установить	Zainstaluj
+Отмена	Anuluj
+Укажите адрес подключения с экрана «Отладка по Wi-Fi».	Podaj adres połączenia z ekranu „Debugowanie bezprzewodowe”.
+Для сопряжения нужны и адрес, и код.	Do parowania potrzebny jest adres i kod.
+В этой сборке программы не указан adb. Сообщите об ошибке.	Ta wersja programu nie ma podanego adb. Zgłoś błąd.
+Скачивание adb	Pobieranie adb
+Подключено несколько устройств: {list}. Оставьте одно.	Podłączono kilka urządzeń: {list}. Zostaw jedno.
+Разрешите отладку на планшете: на его экране появился запрос «Разрешить отладку по USB?». Отметьте «Всегда разрешать с этого компьютера», нажмите «Разрешить» и запустите установку ещё раз.	Zezwól na debugowanie na tablecie: na ekranie pojawiło się „Zezwolić na debugowanie USB?”. Zaznacz „Zawsze zezwalaj z tego komputera”, dotknij „Zezwól” i uruchom instalację ponownie.
+Планшет виден, но не отвечает. Отключите и снова включите отладку на планшете и запустите установку ещё раз.	Tablet jest widoczny, ale nie odpowiada. Wyłącz i włącz ponownie debugowanie na tablecie i uruchom instalację jeszcze raz.
+Планшет не найден. Включите на нём отладку по USB и подключите кабель, или включите отладку по Wi-Fi и укажите адрес.	Nie znaleziono tabletu. Włącz debugowanie USB i podłącz kabel albo włącz debugowanie bezprzewodowe i podaj adres.
+Установка приложения на планшет	Instalowanie aplikacji na tablecie
+На планшете стоит приложение, подписанное другим ключом. Удалите его на планшете (файлы игры и сохранения внутри приложения тоже удалятся) и запустите установку ещё раз.	Na tablecie jest aplikacja podpisana innym kluczem. Odinstaluj ją (pliki gry i zapisy w aplikacji też zostaną usunięte) i uruchom instalację ponownie.
+На планшете не хватает места для приложения.	Na tablecie brakuje miejsca na aplikację.
+Планшет не разрешил установку. На некоторых планшетах нужно включить «Установка через USB» в настройках для разработчиков или подтвердить установку на экране.	Tablet nie zezwolił na instalację. Na niektórych trzeba włączyć „Instalacja przez USB” w opcjach programisty albo potwierdzić na ekranie.
+Не удалось установить приложение: {reason}	Nie udało się zainstalować aplikacji: {reason}
+связь с планшетом прервалась	połączenie z tabletem zostało przerwane
+Планшет ответил: {reason}	Tablet odpowiedział: {reason}
+Приложение на планшете не ответило. Разблокируйте планшет, не закрывайте приложение и запустите установку ещё раз.	Aplikacja na tablecie nie odpowiedziała. Odblokuj tablet, nie zamykaj aplikacji i uruchom instalację ponownie.
+Копирование игры на планшет	Kopiowanie gry na tablet
+Файл игры изменился во время копирования: {name}	Plik gry zmienił się podczas kopiowania: {name}
+  копирование, {speed} МБ/с: {p}%	  kopiowanie, {speed} MB/s: {p}%
+Проверка файлов на планшете	Sprawdzanie plików na tablecie
+Поиск планшета	Szukanie tabletu
+Для сопряжения нужен код с экрана планшета.	Do parowania potrzebny jest kod z ekranu tabletu.
+Сопряжение не удалось: проверьте адрес, порт и код. Код действует, пока открыто окно сопряжения на планшете.	Parowanie nie powiodło się: sprawdź adres, port i kod. Kod działa tylko, gdy okno parowania na tablecie jest otwarte.
+Не удалось подключиться к {address}. Планшет и компьютер должны быть в одной сети Wi-Fi, а адрес и порт — с экрана «Отладка по Wi-Fi» (порт меняется при каждом включении).	Nie udało się połączyć z {address}. Tablet i komputer muszą być w tej samej sieci Wi-Fi, a adres i port — z ekranu „Debugowanie bezprzewodowe” (port zmienia się przy każdym włączeniu).

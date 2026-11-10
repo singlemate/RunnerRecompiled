@@ -14,7 +14,7 @@ using System.Threading;
 using System.Windows.Forms;
 
 [assembly: AssemblyTitle("RunnerBuilder")]
-[assembly: AssemblyVersion("0.3.0.0")]
+[assembly: AssemblyVersion("0.3.1.0")]
 
 /* Interface language: the Russian source text is the key into the embedded tables (i18n_<lang>). */
 static class Lang {
@@ -82,8 +82,8 @@ sealed class Meter : Control {
 }
 
 sealed class BuilderForm : Form {
-    const int VersionCode = 5;
-    const string VersionName = "0.3.0";
+    const int VersionCode = 6;
+    const string VersionName = "0.3.1";
     const string UpdateUrl = "https://raw.githubusercontent.com/singlemate/RunnerRecompiled/main/version-builder.json";
     const string ProjectUrl = "https://github.com/singlemate/RunnerRecompiled";
     const string TermsUrl = "https://developer.android.com/studio/terms";
@@ -92,7 +92,7 @@ sealed class BuilderForm : Form {
 
     readonly TextBox game = new TextBox(), output = new TextBox(), log = new TextBox();
     readonly CheckBox terms = new CheckBox();
-    readonly Button start = new Button(), openOut = new Button();
+    readonly Button start = new Button(), openOut = new Button(), install = new Button();
     readonly Label status = new Label();
     readonly Label elapsed = new Label();
     readonly Meter meter = new Meter();
@@ -100,6 +100,8 @@ sealed class BuilderForm : Form {
     readonly Stopwatch clock = new Stopwatch();
     Process running;
     string doneFolder;
+    // The current run: a build (builder.py) or an install on the tablet (device.py).
+    bool installing, installed;
     // For tests: RunnerBuilder.exe --auto <game> <out> <log> presses Build and leaves when it ends.
     string autoLog;
 
@@ -203,9 +205,18 @@ sealed class BuilderForm : Form {
 
         openOut.Text = Lang.T("Открыть папку с результатом"); Flat(openOut, false); openOut.Visible = false;
         openOut.Padding = new Padding(10, 3, 10, 3);
-        openOut.Margin = new Padding(0, 12, 0, 0);
+        openOut.Margin = new Padding(0, 12, 12, 0);
         openOut.Click += delegate { Process.Start("explorer.exe", "\"" + doneFolder + "\""); };
-        table.Controls.Add(openOut, 0, 10); table.SetColumnSpan(openOut, 3);
+        install.Text = Lang.T("Установить на планшет…"); Flat(install, true);
+        install.Padding = new Padding(10, 3, 10, 3);
+        install.Margin = new Padding(0, 12, 0, 0);
+        install.Click += delegate { StartInstall(); };
+        var after = new FlowLayoutPanel { AutoSize = true, Margin = new Padding(0), WrapContents = false };
+        after.Controls.Add(install);
+        after.Controls.Add(openOut);
+        table.Controls.Add(after, 0, 10); table.SetColumnSpan(after, 3);
+        output.TextChanged += delegate { UpdateInstall(); };
+        UpdateInstall();
 
         var header = new Panel { Dock = DockStyle.Top, Height = 84, BackColor = Paper };
         header.Paint += PaintHeader;
@@ -288,21 +299,59 @@ sealed class BuilderForm : Form {
         }
         if (o.Length == 0) { MessageBox.Show(this, Lang.T("Укажите, куда сохранить результат."), Text); return; }
         if (!terms.Checked) { MessageBox.Show(this, Lang.T("Для скачивания инструментов Google нужно принять условия Android SDK."), Text); return; }
-        start.Enabled = false; start.BackColor = Rule; start.FlatAppearance.BorderColor = Rule; openOut.Visible = false; log.Clear(); doneFolder = null;
+        installing = false;
+        start.Enabled = false; start.BackColor = Rule; start.FlatAppearance.BorderColor = Rule; install.Enabled = false;
+        openOut.Visible = false; log.Clear(); doneFolder = null;
         meter.Percent = -1;
         meter.Running = true;
         clock.Restart();
         new Thread(() => Build(g, o)) { IsBackground = true }.Start();
     }
 
+    string Apk { get { return Path.Combine(output.Text.Trim(), "RunnerRecompiled-pc-personal.apk"); } }
+
+    // Installing needs a built APK in the output folder; it can be repeated without building again.
+    void UpdateInstall() {
+        bool can = running == null && start.Enabled;
+        bool has = false;
+        try { has = File.Exists(Apk); } catch (Exception) { }
+        install.Visible = has;
+        install.Enabled = can;
+    }
+
+    void StartInstall() {
+        string g = game.Text.Trim();
+        if (!File.Exists(Path.Combine(g, "Binaries", "MirrorsEdge.exe"))) {
+            MessageBox.Show(this, Lang.T("В этой папке нет Binaries\\MirrorsEdge.exe. Укажите папку, куда установлена игра из GOG."), Text);
+            return;
+        }
+        string extra;
+        using (var d = new InstallDialog()) {
+            if (d.ShowDialog(this) != DialogResult.OK) return;
+            extra = d.Arguments(Quote);
+        }
+        installing = true; installed = false;
+        start.Enabled = false; start.BackColor = Rule; start.FlatAppearance.BorderColor = Rule; install.Enabled = false;
+        openOut.Visible = false; log.Clear(); doneFolder = null;
+        meter.Percent = -1;
+        meter.Running = true;
+        clock.Restart();
+        string args = " --apk " + Quote(Apk) + " --game " + Quote(g) + extra;
+        new Thread(() => Run("device.py", args)) { IsBackground = true }.Start();
+    }
+
     void Build(string g, string o) {
+        Run("builder.py", " --game " + Quote(g) + " --out " + Quote(o) + " --accept-android-terms");
+    }
+
+    void Run(string script, string args) {
         try {
             string python = EnsurePython();
             SetStatus(Lang.T("Подготовка"));
             string app = UnpackPayload();
             var info = new ProcessStartInfo(python) {
-                Arguments = "-I -X utf8 -u " + Quote(Path.Combine(app, "pc", "tools", "builder.py")) +
-                            " --game " + Quote(g) + " --out " + Quote(o) + " --home " + Quote(Home) + " --lang " + Lang.Code + " --accept-android-terms",
+                Arguments = "-I -X utf8 -u " + Quote(Path.Combine(app, "pc", "tools", script)) + args +
+                            " --home " + Quote(Home) + " --lang " + Lang.Code,
                 UseShellExecute = false, CreateNoWindow = true,
                 RedirectStandardOutput = true, RedirectStandardError = true,
                 StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8
@@ -365,6 +414,7 @@ sealed class BuilderForm : Form {
         if (IsDisposed) return;
         BeginInvoke((Action)delegate {
             if (text.StartsWith("DONE ")) { doneFolder = text.Substring(5); return; }
+            if (text == "INSTALLED") { installed = true; return; }
             Match m;
             if (text.StartsWith("== ")) { status.Text = text.Substring(3); meter.Percent = -1; }
             else if ((m = Regex.Match(text, @"^lifted (\d+)/(\d+) (\w+)")).Success) {
@@ -394,13 +444,18 @@ sealed class BuilderForm : Form {
             meter.Running = false;
             meter.Percent = ok ? 100 : 0;
             start.Enabled = true; start.BackColor = Ink; start.FlatAppearance.BorderColor = Ink;
-            if (ok && doneFolder != null) {
+            if (installing) {
+                status.Text = ok && installed ? Lang.T("Готово: откройте приложение на планшете")
+                                              : Lang.T("Установка не удалась. Причина в журнале.");
+                if (!(ok && installed)) log.AppendText(reason + Environment.NewLine);
+            } else if (ok && doneFolder != null) {
                 status.Text = Lang.T("Готово");
                 openOut.Visible = true;
             } else {
                 status.Text = Lang.T("Сборка не удалась. Причина в журнале.");
                 log.AppendText(reason + Environment.NewLine);
             }
+            UpdateInstall();
             if (autoLog != null) {
                 File.WriteAllText(autoLog, status.Text + Environment.NewLine + log.Text, Encoding.UTF8);
                 Close();
@@ -411,7 +466,83 @@ sealed class BuilderForm : Form {
     void OnClosing(object sender, FormClosingEventArgs e) {
         Process p = running;
         if (p == null) return;
-        if (MessageBox.Show(this, Lang.T("Сборка ещё идёт. Прервать?"), Text, MessageBoxButtons.YesNo) != DialogResult.Yes) { e.Cancel = true; return; }
+        if (MessageBox.Show(this, installing ? Lang.T("Копирование на планшет ещё идёт. Прервать?") : Lang.T("Сборка ещё идёт. Прервать?"), Text, MessageBoxButtons.YesNo) != DialogResult.Yes) { e.Cancel = true; return; }
         try { Process.Start(new ProcessStartInfo("taskkill", "/T /F /PID " + p.Id) { CreateNoWindow = true, UseShellExecute = false }); } catch (Exception) { }
+    }
+}
+
+/* How to reach the tablet: a USB cable, or Wi-Fi debugging (pairing code once, then address and port). */
+sealed class InstallDialog : Form {
+    readonly RadioButton usb = new RadioButton(), wifi = new RadioButton();
+    readonly TextBox pair = new TextBox(), code = new TextBox(), connect = new TextBox();
+    readonly Panel wifiBox = new Panel();
+
+    static Label Note(string text) {
+        return new Label { Text = text, AutoSize = true, MaximumSize = new Size(500, 0), ForeColor = Color.FromArgb(0x6A, 0x76, 0x80),
+                           Margin = new Padding(22, 0, 0, 8), Font = new Font("Segoe UI", 9f) };
+    }
+
+    public InstallDialog() {
+        Text = Lang.T("Установка на планшет");
+        Font = new Font("Segoe UI", 10f);
+        BackColor = Color.FromArgb(0xF7, 0xF8, 0xF9);
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = MinimizeBox = false;
+        StartPosition = FormStartPosition.CenterParent;
+        AutoSize = true; AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        AutoScaleMode = AutoScaleMode.Dpi;
+        Padding = new Padding(18);
+        var flow = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, WrapContents = false };
+        flow.Controls.Add(new Label { AutoSize = true, MaximumSize = new Size(520, 0), Margin = new Padding(0, 0, 0, 12),
+            Text = Lang.T("Программа установит приложение и скопирует на планшет файлы игры (около 12 ГБ на планшете). ") +
+                   Lang.T("На планшете должен быть включён режим разработчика: Настройки → О планшете → семь раз нажать «Номер сборки».") });
+        usb.Text = Lang.T("По кабелю USB"); usb.AutoSize = true; usb.Checked = true;
+        flow.Controls.Add(usb);
+        flow.Controls.Add(Note(Lang.T("Включите «Отладку по USB» в настройках для разработчиков, подключите кабель и разрешите отладку на экране планшета.")));
+        wifi.Text = Lang.T("По Wi-Fi"); wifi.AutoSize = true;
+        flow.Controls.Add(wifi);
+        flow.Controls.Add(Note(Lang.T("Включите «Отладку по Wi-Fi» в настройках для разработчиков. Компьютер и планшет должны быть в одной сети.")));
+        var grid = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, Margin = new Padding(22, 0, 0, 0) };
+        AddRow(grid, 0, Lang.T("Адрес сопряжения (IP:порт):"), pair);
+        AddRow(grid, 1, Lang.T("Код сопряжения:"), code);
+        AddRow(grid, 2, Lang.T("Адрес подключения (IP:порт):"), connect);
+        wifiBox.AutoSize = true; wifiBox.Controls.Add(grid);
+        flow.Controls.Add(wifiBox);
+        flow.Controls.Add(Note(Lang.T("Адрес и код сопряжения: «Подключить устройство с помощью кода». Если этот компьютер уже сопряжён, оставьте их пустыми. ") +
+                               Lang.T("Адрес подключения показан на экране «Отладка по Wi-Fi»; порт меняется при каждом включении.")));
+        var buttons = new FlowLayoutPanel { AutoSize = true, Margin = new Padding(0, 10, 0, 0) };
+        var ok = new Button { Text = Lang.T("Установить"), AutoSize = true, DialogResult = DialogResult.None };
+        var cancel = new Button { Text = Lang.T("Отмена"), AutoSize = true, DialogResult = DialogResult.Cancel };
+        ok.Click += delegate {
+            if (wifi.Checked && connect.Text.Trim().Length == 0) {
+                MessageBox.Show(this, Lang.T("Укажите адрес подключения с экрана «Отладка по Wi-Fi»."), Text);
+                return;
+            }
+            if (wifi.Checked && (pair.Text.Trim().Length == 0) != (code.Text.Trim().Length == 0)) {
+                MessageBox.Show(this, Lang.T("Для сопряжения нужны и адрес, и код."), Text);
+                return;
+            }
+            DialogResult = DialogResult.OK;
+        };
+        buttons.Controls.Add(ok);
+        buttons.Controls.Add(cancel);
+        flow.Controls.Add(buttons);
+        Controls.Add(flow);
+        AcceptButton = ok; CancelButton = cancel;
+        usb.CheckedChanged += delegate { wifiBox.Enabled = wifi.Checked; };
+        wifiBox.Enabled = false;
+    }
+
+    static void AddRow(TableLayoutPanel grid, int row, string caption, TextBox box) {
+        grid.Controls.Add(new Label { Text = caption, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, 10, 0) }, 0, row);
+        box.Width = 200; box.Margin = new Padding(0, 3, 0, 3);
+        grid.Controls.Add(box, 1, row);
+    }
+
+    public string Arguments(Func<string, string> quote) {
+        if (!wifi.Checked) return "";
+        string a = "";
+        if (pair.Text.Trim().Length > 0) a += " --pair " + quote(pair.Text.Trim()) + " --code " + quote(code.Text.Trim());
+        return a + " --connect " + quote(connect.Text.Trim());
     }
 }

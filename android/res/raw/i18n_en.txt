@@ -206,6 +206,12 @@ meta.json не читается	meta.json cannot be read
 не удалось сохранить драйвер	could not save the driver
 Отправить логи	Send logs
 Загрузки/RunnerRecompiled/	Downloads/RunnerRecompiled/
+Жду файлы игры с компьютера…	Waiting for the game files from the computer…
+компьютер не подключился	the computer did not connect
+связь с компьютером прервалась	the connection to the computer was lost
+Запустите установку на компьютере ещё раз, готовые файлы пропускаются.	Start the installation on the computer again; files already here are skipped.
+не удалось записать 	could not write 
+неверный путь: 	invalid path: 
 Глава 1	Chapter 1
 Глава 2	Chapter 2
 Глава 3	Chapter 3

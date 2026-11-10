@@ -52,3 +52,45 @@ Python скачался с другой контрольной суммой.	Pyt
 Шаг сборки завершился с кодом {code}. Подробности в журнале выше.	Ein Erstellungsschritt endete mit Code {code}. Siehe Protokoll oben.
 Не найдены библиотеки	Bibliotheken nicht gefunden
 README	Mirror's Edge für Android, erstellt aus Ihrer Spielkopie\n\nIn diesem Ordner:\n  RunnerRecompiled-pc-personal.apk  die App\n  MirrorsEdge-GOG.zip               Ihre Spieldateien\n\nSo geht es:\n1. Kopieren Sie APK und MirrorsEdge-GOG.zip auf Ihr Tablet, zum Beispiel nach Download.\n2. Installieren Sie das APK. Android fragt, ob die Installation aus dieser Quelle erlaubt ist.\n3. Öffnen Sie die App und wählen Sie MirrorsEdge-GOG.zip, wenn nach dem Spielarchiv gefragt wird.\n4. Startet das Spiel nicht oder hat das Bild Fehler, öffnen Sie in den Einstellungen Grafiktreiber und wählen Sie ein ZIP-Treiberpaket für AdrenoTools (zum Beispiel Turnip).\n\nBenötigt wird ein Android-Gerät mit Vulkan und einer ARMv8.4-CPU oder neuer.\n\nDas APK und das Archiv enthalten Daten Ihrer lizenzierten Spielkopie. Behalten Sie sie für sich: nicht veröffentlichen oder weitergeben.\n
+Установить на планшет…	Auf dem Tablet installieren…
+Готово: откройте приложение на планшете	Fertig: Öffnen Sie die App auf dem Tablet
+Установка не удалась. Причина в журнале.	Die Installation ist fehlgeschlagen. Der Grund steht im Protokoll.
+Копирование на планшет ещё идёт. Прервать?	Das Kopieren auf das Tablet läuft noch. Abbrechen?
+Установка на планшет	Auf dem Tablet installieren
+Программа установит приложение и скопирует на планшет файлы игры (около 12 ГБ на планшете). 	Das Programm installiert die App und kopiert die Spieldateien auf das Tablet (etwa 12 GB auf dem Tablet). 
+На планшете должен быть включён режим разработчика: Настройки → О планшете → семь раз нажать «Номер сборки».	Die Entwickleroptionen müssen aktiv sein: Einstellungen → Über das Tablet → siebenmal auf „Build-Nummer“ tippen.
+По кабелю USB	Mit USB-Kabel
+Включите «Отладку по USB» в настройках для разработчиков, подключите кабель и разрешите отладку на экране планшета.	Aktivieren Sie „USB-Debugging“ in den Entwickleroptionen, schließen Sie das Kabel an und erlauben Sie das Debugging auf dem Tablet.
+По Wi-Fi	Über WLAN
+Включите «Отладку по Wi-Fi» в настройках для разработчиков. Компьютер и планшет должны быть в одной сети.	Aktivieren Sie „Debugging über WLAN“ in den Entwickleroptionen. Computer und Tablet müssen im selben Netzwerk sein.
+Адрес сопряжения (IP:порт):	Kopplungsadresse (IP:Port):
+Код сопряжения:	Kopplungscode:
+Адрес подключения (IP:порт):	Verbindungsadresse (IP:Port):
+Адрес и код сопряжения: «Подключить устройство с помощью кода». Если этот компьютер уже сопряжён, оставьте их пустыми. 	Kopplungsadresse und -code: „Gerät über einen Kopplungscode koppeln“. Ist dieser Computer schon gekoppelt, lassen Sie sie leer. 
+Адрес подключения показан на экране «Отладка по Wi-Fi»; порт меняется при каждом включении.	Die Verbindungsadresse steht auf dem Bildschirm „Debugging über WLAN“; der Port ändert sich bei jedem Einschalten.
+Установить	Installieren
+Отмена	Abbrechen
+Укажите адрес подключения с экрана «Отладка по Wi-Fi».	Geben Sie die Verbindungsadresse vom Bildschirm „Debugging über WLAN“ ein.
+Для сопряжения нужны и адрес, и код.	Zum Koppeln werden Adresse und Code benötigt.
+В этой сборке программы не указан adb. Сообщите об ошибке.	In diesem Build des Programms ist kein adb angegeben. Bitte melden Sie den Fehler.
+Скачивание adb	adb wird heruntergeladen
+Подключено несколько устройств: {list}. Оставьте одно.	Mehrere Geräte sind verbunden: {list}. Lassen Sie nur eines.
+Разрешите отладку на планшете: на его экране появился запрос «Разрешить отладку по USB?». Отметьте «Всегда разрешать с этого компьютера», нажмите «Разрешить» и запустите установку ещё раз.	Erlauben Sie das Debugging auf dem Tablet: Dort erscheint „USB-Debugging zulassen?“. Wählen Sie „Von diesem Computer immer zulassen“, tippen Sie auf „Zulassen“ und starten Sie die Installation erneut.
+Планшет виден, но не отвечает. Отключите и снова включите отладку на планшете и запустите установку ещё раз.	Das Tablet ist sichtbar, antwortet aber nicht. Schalten Sie das Debugging auf dem Tablet aus und wieder ein und starten Sie die Installation erneut.
+Планшет не найден. Включите на нём отладку по USB и подключите кабель, или включите отладку по Wi-Fi и укажите адрес.	Das Tablet wurde nicht gefunden. Aktivieren Sie USB-Debugging und schließen Sie das Kabel an, oder aktivieren Sie Debugging über WLAN und geben Sie die Adresse ein.
+Установка приложения на планшет	App wird auf dem Tablet installiert
+На планшете стоит приложение, подписанное другим ключом. Удалите его на планшете (файлы игры и сохранения внутри приложения тоже удалятся) и запустите установку ещё раз.	Auf dem Tablet ist die App mit einem anderen Schlüssel signiert. Deinstallieren Sie sie (Spieldateien und Spielstände in der App werden ebenfalls gelöscht) und starten Sie die Installation erneut.
+На планшете не хватает места для приложения.	Auf dem Tablet ist nicht genug Platz für die App.
+Планшет не разрешил установку. На некоторых планшетах нужно включить «Установка через USB» в настройках для разработчиков или подтвердить установку на экране.	Das Tablet hat die Installation nicht erlaubt. Bei manchen Tablets muss „Über USB installieren“ in den Entwickleroptionen aktiviert oder die Installation am Bildschirm bestätigt werden.
+Не удалось установить приложение: {reason}	Die App konnte nicht installiert werden: {reason}
+связь с планшетом прервалась	die Verbindung zum Tablet wurde unterbrochen
+Планшет ответил: {reason}	Das Tablet meldet: {reason}
+Приложение на планшете не ответило. Разблокируйте планшет, не закрывайте приложение и запустите установку ещё раз.	Die App auf dem Tablet hat nicht geantwortet. Entsperren Sie das Tablet, lassen Sie die App geöffnet und starten Sie die Installation erneut.
+Копирование игры на планшет	Spiel wird auf das Tablet kopiert
+Файл игры изменился во время копирования: {name}	Eine Spieldatei hat sich beim Kopieren geändert: {name}
+  копирование, {speed} МБ/с: {p}%	  Kopieren, {speed} MB/s: {p}%
+Проверка файлов на планшете	Dateien auf dem Tablet werden geprüft
+Поиск планшета	Tablet wird gesucht
+Для сопряжения нужен код с экрана планшета.	Zum Koppeln wird der Code vom Tablet-Bildschirm benötigt.
+Сопряжение не удалось: проверьте адрес, порт и код. Код действует, пока открыто окно сопряжения на планшете.	Kopplung fehlgeschlagen: Prüfen Sie Adresse, Port und Code. Der Code gilt nur, solange das Kopplungsfenster auf dem Tablet offen ist.
+Не удалось подключиться к {address}. Планшет и компьютер должны быть в одной сети Wi-Fi, а адрес и порт — с экрана «Отладка по Wi-Fi» (порт меняется при каждом включении).	Verbindung zu {address} fehlgeschlagen. Tablet und Computer müssen im selben WLAN sein, Adresse und Port vom Bildschirm „Debugging über WLAN“ (der Port ändert sich bei jedem Einschalten).

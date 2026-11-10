@@ -1,5 +1,5 @@
 {
-  "versionCode": 11,
-  "versionName": "0.3.0",
-  "notes": "Built by the new, lighter RunnerBuilder 0.3.0. No changes in the game. Rebuild with RunnerBuilder."
+  "versionCode": 12,
+  "versionName": "0.3.1",
+  "notes": "Receives the game files from RunnerBuilder over USB or Wi-Fi. No changes in the game. Rebuild with RunnerBuilder."
 }

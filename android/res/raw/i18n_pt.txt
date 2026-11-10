@@ -206,6 +206,12 @@ meta.json не читается	meta.json não pode ser lido
 не удалось сохранить драйвер	não foi possível salvar o driver
 Отправить логи	Enviar registros
 Загрузки/RunnerRecompiled/	Downloads/RunnerRecompiled/
+Жду файлы игры с компьютера…	Aguardando os arquivos do jogo do computador…
+компьютер не подключился	o computador não se conectou
+связь с компьютером прервалась	a conexão com o computador caiu
+Запустите установку на компьютере ещё раз, готовые файлы пропускаются.	Inicie a instalação no computador de novo; os arquivos já copiados são pulados.
+не удалось записать 	não foi possível gravar 
+неверный путь: 	caminho inválido: 
 Глава 1	Capítulo 1
 Глава 2	Capítulo 2
 Глава 3	Capítulo 3

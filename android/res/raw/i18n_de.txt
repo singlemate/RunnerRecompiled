@@ -206,6 +206,12 @@ meta.json не читается	meta.json ist nicht lesbar
 не удалось сохранить драйвер	der Treiber konnte nicht gespeichert werden
 Отправить логи	Protokolle senden
 Загрузки/RunnerRecompiled/	Downloads/RunnerRecompiled/
+Жду файлы игры с компьютера…	Warte auf die Spieldateien vom Computer…
+компьютер не подключился	der Computer hat sich nicht verbunden
+связь с компьютером прервалась	die Verbindung zum Computer wurde unterbrochen
+Запустите установку на компьютере ещё раз, готовые файлы пропускаются.	Starten Sie die Installation am Computer erneut; vorhandene Dateien werden übersprungen.
+не удалось записать 	konnte nicht geschrieben werden: 
+неверный путь: 	ungültiger Pfad: 
 Глава 1	Kapitel 1
 Глава 2	Kapitel 2
 Глава 3	Kapitel 3

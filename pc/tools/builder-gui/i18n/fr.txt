@@ -52,3 +52,45 @@ Python скачался с другой контрольной суммой.	Pyt
 Шаг сборки завершился с кодом {code}. Подробности в журнале выше.	Une étape s'est terminée avec le code {code}. Voir le journal ci-dessus.
 Не найдены библиотеки	Bibliothèques introuvables
 README	Mirror's Edge pour Android, préparé à partir de votre copie du jeu\n\nDans ce dossier :\n  RunnerRecompiled-pc-personal.apk  l'application\n  MirrorsEdge-GOG.zip               vos fichiers de jeu\n\nÀ faire :\n1. Copiez l'APK et MirrorsEdge-GOG.zip sur votre tablette, par exemple dans Download.\n2. Installez l'APK. Android demandera d'autoriser l'installation depuis cette source.\n3. Ouvrez l'application et choisissez MirrorsEdge-GOG.zip lorsqu'elle demande l'archive du jeu.\n4. Si le jeu ne démarre pas ou si l'image présente des défauts, ouvrez Pilote graphique dans les paramètres et choisissez un paquet ZIP de pilote pour AdrenoTools (par exemple Turnip).\n\nIl faut un appareil Android avec Vulkan et un processeur ARMv8.4 ou plus récent.\n\nL'APK et l'archive contiennent des données de votre copie sous licence. Gardez-les pour vous : ne les publiez pas et ne les partagez pas.\n
+Установить на планшет…	Installer sur la tablette…
+Готово: откройте приложение на планшете	Terminé : ouvrez l'application sur la tablette
+Установка не удалась. Причина в журнале.	L'installation a échoué. La raison est dans le journal.
+Копирование на планшет ещё идёт. Прервать?	La copie vers la tablette est en cours. L'arrêter ?
+Установка на планшет	Installer sur la tablette
+Программа установит приложение и скопирует на планшет файлы игры (около 12 ГБ на планшете). 	Le programme installe l'application et copie les fichiers du jeu sur la tablette (environ 12 Go sur la tablette). 
+На планшете должен быть включён режим разработчика: Настройки → О планшете → семь раз нажать «Номер сборки».	Les options pour les développeurs doivent être activées : Paramètres → À propos de la tablette → touchez sept fois « Numéro de build ».
+По кабелю USB	Par câble USB
+Включите «Отладку по USB» в настройках для разработчиков, подключите кабель и разрешите отладку на экране планшета.	Activez « Débogage USB » dans les options pour les développeurs, branchez le câble et autorisez le débogage sur l'écran de la tablette.
+По Wi-Fi	Par Wi-Fi
+Включите «Отладку по Wi-Fi» в настройках для разработчиков. Компьютер и планшет должны быть в одной сети.	Activez « Débogage sans fil » dans les options pour les développeurs. L'ordinateur et la tablette doivent être sur le même réseau.
+Адрес сопряжения (IP:порт):	Adresse d'association (IP:port) :
+Код сопряжения:	Code d'association :
+Адрес подключения (IP:порт):	Adresse de connexion (IP:port) :
+Адрес и код сопряжения: «Подключить устройство с помощью кода». Если этот компьютер уже сопряжён, оставьте их пустыми. 	Adresse et code d'association : « Associer l'appareil avec un code ». Si cet ordinateur est déjà associé, laissez-les vides. 
+Адрес подключения показан на экране «Отладка по Wi-Fi»; порт меняется при каждом включении.	L'adresse de connexion s'affiche sur l'écran « Débogage sans fil » ; le port change à chaque activation.
+Установить	Installer
+Отмена	Annuler
+Укажите адрес подключения с экрана «Отладка по Wi-Fi».	Saisissez l'adresse de connexion de l'écran « Débogage sans fil ».
+Для сопряжения нужны и адрес, и код.	L'association demande l'adresse et le code.
+В этой сборке программы не указан adb. Сообщите об ошибке.	Cette version du programme n'indique pas adb. Signalez l'erreur.
+Скачивание adb	Téléchargement d'adb
+Подключено несколько устройств: {list}. Оставьте одно.	Plusieurs appareils sont connectés : {list}. N'en gardez qu'un.
+Разрешите отладку на планшете: на его экране появился запрос «Разрешить отладку по USB?». Отметьте «Всегда разрешать с этого компьютера», нажмите «Разрешить» и запустите установку ещё раз.	Autorisez le débogage sur la tablette : son écran affiche « Autoriser le débogage USB ? ». Cochez « Toujours autoriser cet ordinateur », touchez « Autoriser » et relancez l'installation.
+Планшет виден, но не отвечает. Отключите и снова включите отладку на планшете и запустите установку ещё раз.	La tablette est visible mais ne répond pas. Désactivez puis réactivez le débogage sur la tablette et relancez l'installation.
+Планшет не найден. Включите на нём отладку по USB и подключите кабель, или включите отладку по Wi-Fi и укажите адрес.	Tablette introuvable. Activez le débogage USB et branchez le câble, ou activez le débogage sans fil et saisissez l'adresse.
+Установка приложения на планшет	Installation de l'application sur la tablette
+На планшете стоит приложение, подписанное другим ключом. Удалите его на планшете (файлы игры и сохранения внутри приложения тоже удалятся) и запустите установку ещё раз.	La tablette a l'application signée avec une autre clé. Désinstallez-la (les fichiers du jeu et les sauvegardes dans l'application seront aussi supprimés) et relancez l'installation.
+На планшете не хватает места для приложения.	La tablette n'a pas assez d'espace pour l'application.
+Планшет не разрешил установку. На некоторых планшетах нужно включить «Установка через USB» в настройках для разработчиков или подтвердить установку на экране.	La tablette n'a pas autorisé l'installation. Sur certaines tablettes, il faut activer « Installer via USB » dans les options pour les développeurs ou confirmer à l'écran.
+Не удалось установить приложение: {reason}	Impossible d'installer l'application : {reason}
+связь с планшетом прервалась	la connexion avec la tablette a été perdue
+Планшет ответил: {reason}	La tablette a répondu : {reason}
+Приложение на планшете не ответило. Разблокируйте планшет, не закрывайте приложение и запустите установку ещё раз.	L'application sur la tablette n'a pas répondu. Déverrouillez la tablette, laissez l'application ouverte et relancez l'installation.
+Копирование игры на планшет	Copie du jeu sur la tablette
+Файл игры изменился во время копирования: {name}	Un fichier du jeu a changé pendant la copie : {name}
+  копирование, {speed} МБ/с: {p}%	  copie, {speed} Mo/s : {p}%
+Проверка файлов на планшете	Vérification des fichiers sur la tablette
+Поиск планшета	Recherche de la tablette
+Для сопряжения нужен код с экрана планшета.	L'association demande le code affiché sur la tablette.
+Сопряжение не удалось: проверьте адрес, порт и код. Код действует, пока открыто окно сопряжения на планшете.	Échec de l'association : vérifiez l'adresse, le port et le code. Le code n'est valable que tant que la fenêtre d'association est ouverte sur la tablette.
+Не удалось подключиться к {address}. Планшет и компьютер должны быть в одной сети Wi-Fi, а адрес и порт — с экрана «Отладка по Wi-Fi» (порт меняется при каждом включении).	Impossible de se connecter à {address}. La tablette et l'ordinateur doivent être sur le même réseau Wi-Fi, et l'adresse et le port doivent venir de l'écran « Débogage sans fil » (le port change à chaque activation).

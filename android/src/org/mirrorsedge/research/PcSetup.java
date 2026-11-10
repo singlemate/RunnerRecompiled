@@ -567,6 +567,188 @@ final class PcSetup {
             bytesTotal > 0 ? (float) bytesDone / bytesTotal : 0);
     }
 
+    /** Name of the socket RunnerBuilder reaches through `adb forward tcp:N localabstract:...`. */
+    static final String RECEIVE_SOCKET = "org.mirrorsedge.research.receive";
+    private static final int RECEIVE_WAIT_MS = 120_000;
+
+    /**
+     * Takes the game files from RunnerBuilder over adb (USB or Wi-Fi), so nothing has to be copied
+     * to the device by hand. This app writes the files itself: files that adb writes into
+     * Android/data belong to the shell user, and FUSE may not let the app read them.
+     * Only adbd may connect (shell uid); any other local client is turned away.
+     * Protocol (big-endian): server "RRX1"; client "RRX1", then 'T' total, 'F' path size (reply
+     * 0 = already there, 1 = send; after the bytes 1 = written), 'E' (reply 1).
+     * Any error is 3 + message, then the connection is closed.
+     */
+    void receive(boolean test) {
+        if (busy) return;
+        testing = test;
+        busy = true;
+        a.getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        say(Tr.t("Жду файлы игры с компьютера…"), "", 0);
+        new Thread(this::receiveLoop, "pc-receive").start();
+    }
+
+    private volatile boolean connected;
+    /** Check of the transfer only: files go to pc/transfer-test and are deleted at the end. */
+    private boolean testing;
+
+    private void receiveLoop() {
+        String error = null;
+        android.net.LocalServerSocket server = null;
+        connected = false;
+        try {
+            server = new android.net.LocalServerSocket(RECEIVE_SOCKET);
+            final android.net.LocalServerSocket listening = server;
+            Thread timer = new Thread(() -> {
+                try { Thread.sleep(RECEIVE_WAIT_MS); if (!connected) listening.close(); }
+                catch (Exception ignored) { }
+            }, "pc-receive-timeout");
+            timer.setDaemon(true);
+            timer.start();
+            while (true) {
+                android.net.LocalSocket peer;
+                try { peer = server.accept(); }
+                catch (IOException e) { throw new IOException(Tr.t("компьютер не подключился"), e); }
+                int uid = peer.getPeerCredentials().getUid();
+                if (uid != android.os.Process.SHELL_UID && uid != 0) { peer.close(); continue; }
+                connected = true;
+                try (android.net.LocalSocket s = peer) {
+                    if (serve(new DataInputStream(new BufferedInputStream(s.getInputStream(), 1 << 20)),
+                              new DataOutputStream(new BufferedOutputStream(s.getOutputStream())))) break;
+                }
+            }
+        } catch (Exception e) {
+            error = e.getMessage() == null ? e.toString() : e.getMessage();
+        } finally {
+            try { if (server != null) server.close(); } catch (IOException ignored) { }
+        }
+        final String failed = error;
+        a.runOnUiThread(() -> {
+            busy = false;
+            a.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            lastStatus = failed == null ? Tr.t("Файлы игры на месте.") : Tr.t("Не получилось: ") + failed + ".";
+            lastProgress = failed == null ? "" : Tr.t("Запустите установку на компьютере ещё раз, готовые файлы пропускаются.");
+            updateData();
+            a.refresh();
+        });
+    }
+
+    /** One connection; true when the files are complete and checked. */
+    private boolean serve(DataInputStream in, DataOutputStream out) throws IOException {
+        File pc = a.pcDir();
+        File test = new File(pc, "transfer-test");
+        File root = testing ? new File(test, "MirrorsEdge") : new File(pc, "MirrorsEdge");
+        byte[] buf = new byte[1 << 20];
+        out.writeBytes("RRX1");
+        out.flush();
+        byte[] magic = new byte[4];
+        in.readFully(magic);
+        if (!"RRX1".equals(new String(magic, "US-ASCII"))) return false;
+        try {
+            mkdirs(pc);
+            for (String[] b : BUNDLED) {
+                try (InputStream ignored = a.getAssets().open("pcdeps/" + b[0])) { /* present */ }
+                catch (IOException e) { throw new IOException(Tr.t("в этой сборке приложения нет библиотек ПК-версии")); }
+            }
+            while (true) {
+                int cmd = in.read();
+                if (cmd == 'T') {
+                    bytesTotal = in.readLong();
+                    bytesDone = 0;
+                    long have = size(root);
+                    if (pc.getUsableSpace() + have < bytesTotal + (1L << 30))
+                        throw new IOException(String.format(Locale.US, Tr.t("мало места: нужно ещё %.1f ГБ"),
+                            (bytesTotal + (1L << 30) - have - pc.getUsableSpace()) / 1e9));
+                } else if (cmd == 'F') {
+                    String path = in.readUTF();
+                    long size = in.readLong();
+                    File target = gameFile(root, path);
+                    if (target.isFile() && target.length() == size) {
+                        bytesDone += size;
+                        out.write(0);
+                        out.flush();
+                        report(path);
+                        continue;
+                    }
+                    out.write(1);
+                    out.flush();
+                    mkdirs(target.getParentFile());
+                    File part = new File(target.getPath() + ".part");
+                    try (OutputStream f = new FileOutputStream(part)) {
+                        for (long left = size; left > 0; ) {
+                            int n = in.read(buf, 0, (int) Math.min(buf.length, left));
+                            if (n < 0) throw new EOFException(Tr.t("связь с компьютером прервалась"));
+                            f.write(buf, 0, n);
+                            left -= n;
+                            bytesDone += n;
+                            report(path);
+                        }
+                    }
+                    if (!part.renameTo(target)) {
+                        target.delete();
+                        if (!part.renameTo(target)) throw new IOException(Tr.t("не удалось записать ") + path);
+                    }
+                    out.write(1);
+                    out.flush();
+                } else if (cmd == 'E' && testing) {
+                    long got = size(root);
+                    deleteAll(test);
+                    if (got != bytesTotal) throw new IOException("transfer test: " + got + " of " + bytesTotal + " bytes");
+                    android.util.Log.i("me_pc", "transfer test: " + got + " bytes received and deleted");
+                    out.write(1);
+                    out.flush();
+                    return true;
+                } else if (cmd == 'E') {
+                    say(Tr.t("Проверяю копию игры…"), "", 1);
+                    File exe = new File(root, "Binaries/MirrorsEdge.exe");
+                    if (!exe.isFile()) throw new IOException(Tr.t("в Binaries нет MirrorsEdge.exe"));
+                    MessageDigest sha = MessageDigest.getInstance("SHA-256");
+                    try (InputStream f = new FileInputStream(exe)) {
+                        for (int n; (n = f.read(buf)) > 0; ) sha.update(buf, 0, n);
+                    }
+                    if (!EXE_SHA256.equals(hex(sha.digest()))) throw new IOException(Tr.t("эта версия игры не подходит: нужна копия GOG той же сборки"));
+                    finish(pc, buf);
+                    out.write(1);
+                    out.flush();
+                    return true;
+                } else {
+                    throw new EOFException(Tr.t("связь с компьютером прервалась"));
+                }
+            }
+        } catch (Exception e) {
+            String m = e.getMessage() == null ? e.toString() : e.getMessage();
+            try { out.write(3); out.writeUTF(m); out.flush(); } catch (IOException ignored) { }
+            if (e instanceof IOException) throw (IOException) e;
+            throw new IOException(m, e);
+        }
+    }
+
+    /** A path from the computer, kept inside Binaries, Engine or TdGame of the game folder. */
+    private static File gameFile(File root, String path) throws IOException {
+        String p = path.replace('\\', '/');
+        boolean known = false;
+        for (String d : GAME_DIRS) known |= p.startsWith(d + "/");
+        if (!known || p.contains("/../") || p.endsWith("/..") || p.contains("/./") || p.contains("//")
+            || p.indexOf('\0') >= 0 || p.endsWith(".part"))
+            throw new IOException(Tr.t("неверный путь: ") + path);
+        return new File(root, p);
+    }
+
+    private static void deleteAll(File f) {
+        File[] list = f.listFiles();
+        if (list != null) for (File c : list) deleteAll(c);
+        f.delete();
+    }
+
+    private static long size(File f) {
+        if (f.isFile()) return f.length();
+        long n = 0;
+        File[] list = f.listFiles();
+        if (list != null) for (File c : list) n += size(c);
+        return n;
+    }
+
     private void install(Uri tree, boolean zip) {
         String error = null;
         try {

@@ -21,12 +21,22 @@ Everything except the window is Python (standard library only) and reads its for
 
 Tools and temporary files go to `%LOCALAPPDATA%\RunnerBuilder`, or `C:\RunnerBuilder` when that path has non-ASCII letters. The signing key lives there as well (`personal-key.p12` from earlier versions, made by keytool, or `personal-key.json`): with the same key a new APK installs over the old one, keeping the game files and saves on the device.
 
+## Installing on the tablet
+
+After a build the window offers **Install on the tablet…** (`device.py`): it installs the APK over USB or Wi-Fi debugging and copies the game files, so nothing has to be copied by hand. Over Wi-Fi a 20 MB test went at 38 MB/s on a Lenovo Y700, so the 11.5 GB should take about 5 minutes; the full copy and USB have not been tried yet. It only needs developer options on the tablet: USB debugging and a cable, or wireless debugging with a pairing code once.
+
+- adb comes out of Google's platform-tools, only `adb.exe` and its two DLLs (`remotezip.py`).
+- The app writes the game files itself. `device.py` starts it with the extra `receiveFromPc` and streams the files through `adb forward` into a local socket of the app (`PcSetup.receive`, protocol described there). The app accepts only adbd (shell uid) as the other end, keeps every path inside `Binaries`, `Engine` and `TdGame`, checks the SHA-256 of `MirrorsEdge.exe` and prepares the libraries as after a ZIP import. Files that adb itself pushes into `Android/data` belong to the shell user, and on Android 16 the app could not be shown to read them.
+- Files already on the tablet with the same size are skipped: a second run resumes, and checking all 4237 files takes about 30 seconds.
+- A tablet with the app signed by another key is not touched: the window says to uninstall it there first.
+
 ## Parts
 
 | Part | What it does |
 |---|---|
 | `pc/tools/builder.py` | The core. Lines starting with `==` name the current stage. |
 | `pc/tools/selfbuild.py` | Checks the inputs, translates, compiles, packs. |
+| `pc/tools/device.py` | Installs the APK on the tablet and copies the game files (adb). |
 | `pc/tools/remotezip.py` | Downloads chosen files out of a ZIP on a server. |
 | `pc/tools/redist.py` | Takes DLLs out of the Visual C++ and PhysX installers. |
 | `pc/tools/apk_pack.py` | Adds the personal parts to the shell APK and signs it; `--make-shell` makes the shell from a full build. |

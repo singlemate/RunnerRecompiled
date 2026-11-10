@@ -52,3 +52,45 @@ Python скачался с другой контрольной суммой.	Pyt
 Шаг сборки завершился с кодом {code}. Подробности в журнале выше.	Un paso terminó con el código {code}. Consulta el registro anterior.
 Не найдены библиотеки	Bibliotecas no encontradas
 README	Mirror's Edge para Android, preparado a partir de tu copia del juego\n\nEn esta carpeta:\n  RunnerRecompiled-pc-personal.apk  la aplicación\n  MirrorsEdge-GOG.zip               los archivos de tu juego\n\nQué hacer:\n1. Copia el APK y MirrorsEdge-GOG.zip a tu tableta, por ejemplo en Download.\n2. Instala el APK. Android pedirá permitir la instalación desde este origen.\n3. Abre la aplicación y elige MirrorsEdge-GOG.zip cuando pida el archivo del juego.\n4. Si el juego no se inicia o la imagen tiene fallos, abre Controlador gráfico en los ajustes y elige un paquete ZIP de controlador para AdrenoTools (por ejemplo, Turnip).\n\nNecesitas un dispositivo Android con Vulkan y una CPU ARMv8.4 o más reciente.\n\nEl APK y el archivo contienen datos de tu copia con licencia. Guárdalos para ti: no los publiques ni los compartas.\n
+Установить на планшет…	Instalar en la tableta…
+Готово: откройте приложение на планшете	Listo: abre la aplicación en la tableta
+Установка не удалась. Причина в журнале.	La instalación falló. El motivo está en el registro.
+Копирование на планшет ещё идёт. Прервать?	La copia a la tableta sigue en curso. ¿Detenerla?
+Установка на планшет	Instalar en la tableta
+Программа установит приложение и скопирует на планшет файлы игры (около 12 ГБ на планшете). 	El programa instala la aplicación y copia los archivos del juego a la tableta (unos 12 GB en la tableta). 
+На планшете должен быть включён режим разработчика: Настройки → О планшете → семь раз нажать «Номер сборки».	Las opciones de desarrollador deben estar activadas: Ajustes → Información de la tableta → toca siete veces «Número de compilación».
+По кабелю USB	Con cable USB
+Включите «Отладку по USB» в настройках для разработчиков, подключите кабель и разрешите отладку на экране планшета.	Activa «Depuración por USB» en las opciones de desarrollador, conecta el cable y permite la depuración en la pantalla de la tableta.
+По Wi-Fi	Por Wi-Fi
+Включите «Отладку по Wi-Fi» в настройках для разработчиков. Компьютер и планшет должны быть в одной сети.	Activa «Depuración inalámbrica» en las opciones de desarrollador. El ordenador y la tableta deben estar en la misma red.
+Адрес сопряжения (IP:порт):	Dirección de vinculación (IP:puerto):
+Код сопряжения:	Código de vinculación:
+Адрес подключения (IP:порт):	Dirección de conexión (IP:puerto):
+Адрес и код сопряжения: «Подключить устройство с помощью кода». Если этот компьютер уже сопряжён, оставьте их пустыми. 	Dirección y código de vinculación: «Vincular dispositivo con código». Si este ordenador ya está vinculado, déjalos vacíos. 
+Адрес подключения показан на экране «Отладка по Wi-Fi»; порт меняется при каждом включении.	La dirección de conexión aparece en la pantalla «Depuración inalámbrica»; el puerto cambia cada vez que se activa.
+Установить	Instalar
+Отмена	Cancelar
+Укажите адрес подключения с экрана «Отладка по Wi-Fi».	Introduce la dirección de conexión de la pantalla «Depuración inalámbrica».
+Для сопряжения нужны и адрес, и код.	La vinculación necesita la dirección y el código.
+В этой сборке программы не указан adb. Сообщите об ошибке.	Esta versión del programa no indica adb. Informa del error.
+Скачивание adb	Descargando adb
+Подключено несколько устройств: {list}. Оставьте одно.	Hay varios dispositivos conectados: {list}. Deja solo uno.
+Разрешите отладку на планшете: на его экране появился запрос «Разрешить отладку по USB?». Отметьте «Всегда разрешать с этого компьютера», нажмите «Разрешить» и запустите установку ещё раз.	Permite la depuración en la tableta: en su pantalla aparece «¿Permitir depuración por USB?». Marca «Permitir siempre desde este ordenador», toca «Permitir» y vuelve a iniciar la instalación.
+Планшет виден, но не отвечает. Отключите и снова включите отладку на планшете и запустите установку ещё раз.	La tableta se ve pero no responde. Desactiva y vuelve a activar la depuración en la tableta e inicia la instalación de nuevo.
+Планшет не найден. Включите на нём отладку по USB и подключите кабель, или включите отладку по Wi-Fi и укажите адрес.	No se encontró la tableta. Activa la depuración por USB y conecta el cable, o activa la depuración inalámbrica e introduce la dirección.
+Установка приложения на планшет	Instalando la aplicación en la tableta
+На планшете стоит приложение, подписанное другим ключом. Удалите его на планшете (файлы игры и сохранения внутри приложения тоже удалятся) и запустите установку ещё раз.	La tableta tiene la aplicación firmada con otra clave. Desinstálala (también se borrarán los archivos del juego y las partidas dentro de la aplicación) e inicia la instalación de nuevo.
+На планшете не хватает места для приложения.	La tableta no tiene espacio suficiente para la aplicación.
+Планшет не разрешил установку. На некоторых планшетах нужно включить «Установка через USB» в настройках для разработчиков или подтвердить установку на экране.	La tableta no permitió la instalación. En algunas hay que activar «Instalar vía USB» en las opciones de desarrollador o confirmar en la pantalla.
+Не удалось установить приложение: {reason}	No se pudo instalar la aplicación: {reason}
+связь с планшетом прервалась	se perdió la conexión con la tableta
+Планшет ответил: {reason}	La tableta respondió: {reason}
+Приложение на планшете не ответило. Разблокируйте планшет, не закрывайте приложение и запустите установку ещё раз.	La aplicación de la tableta no respondió. Desbloquea la tableta, deja la aplicación abierta e inicia la instalación de nuevo.
+Копирование игры на планшет	Copiando el juego a la tableta
+Файл игры изменился во время копирования: {name}	Un archivo del juego cambió durante la copia: {name}
+  копирование, {speed} МБ/с: {p}%	  copiando, {speed} MB/s: {p}%
+Проверка файлов на планшете	Comprobando los archivos en la tableta
+Поиск планшета	Buscando la tableta
+Для сопряжения нужен код с экрана планшета.	La vinculación necesita el código de la pantalla de la tableta.
+Сопряжение не удалось: проверьте адрес, порт и код. Код действует, пока открыто окно сопряжения на планшете.	La vinculación falló: revisa la dirección, el puerto y el código. El código solo vale mientras la ventana de vinculación está abierta en la tableta.
+Не удалось подключиться к {address}. Планшет и компьютер должны быть в одной сети Wi-Fi, а адрес и порт — с экрана «Отладка по Wi-Fi» (порт меняется при каждом включении).	No se pudo conectar a {address}. La tableta y el ordenador deben estar en la misma red Wi-Fi, y la dirección y el puerto deben ser los de la pantalla «Depuración inalámbrica» (el puerto cambia cada vez que se activa).
