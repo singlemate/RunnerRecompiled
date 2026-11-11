@@ -19,7 +19,7 @@ runtime in this repository, and the graphics go to Vulkan through DXVK.
 **No game files or game code are included or linked.** You need your own copy of the game
 from GOG; other releases do not work.
 
-> **Status: in testing, version 0.3.1.** The game installs, starts, goes through the menus
+> **Status: in testing, version 0.3.2.** The game installs, starts, goes through the menus
 > and has been played through several chapters on a real tablet. Expect bugs, and please
 > [report them](https://github.com/singlemate/RunnerRecompiled/issues/new?template=bug_report.yml).
 
@@ -32,7 +32,7 @@ and about 150 MB of downloads.
    It is not signed, so Windows may warn you the first time.
 2. Choose the folder of the installed game, accept the Android SDK terms and press Build.
    This takes from 5 to 30 minutes, depending on the CPU.
-3. Press **Install on the tablet…** to install the APK and copy the game over USB or Wi-Fi
+3. Press **Install on the device…** to install the APK and copy the game over USB or Wi-Fi
    debugging (new in 0.3.1, the full copy is not tested yet). Or copy the resulting folder
    to the device, install the APK and choose `MirrorsEdge-GOG.zip` in the app. The game
    needs about 12 GB on the device.

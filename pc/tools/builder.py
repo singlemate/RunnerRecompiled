@@ -64,7 +64,7 @@ Mirror's Edge для Android — подготовлено из вашей коп
   MirrorsEdge-GOG.zip               файлы вашей игры
 
 Что сделать:
-1. Скопируйте APK и MirrorsEdge-GOG.zip на планшет, например в папку Download.
+1. Скопируйте APK и MirrorsEdge-GOG.zip на устройство, например в папку Download.
 2. Установите APK. Android попросит разрешить установку из этого источника.
 3. Откройте приложение и выберите MirrorsEdge-GOG.zip, когда оно попросит архив игры.
 4. Если игра не запускается или картинка с артефактами, в настройках приложения откройте
@@ -278,7 +278,7 @@ def main():
                     "--toolchain", os.path.join(tools, "llvm-mingw"), "--ndk", os.path.join(tools, "android-ndk"),
                     "--workspace", workspace, "--keystore", key], check=True)
 
-    stage(t("Подготовка папки для планшета"))
+    stage(t("Подготовка папки для устройства"))
     shutil.copyfile(os.path.join(workspace, "RunnerRecompiled-pc-personal.apk"),
                     os.path.join(out, "RunnerRecompiled-pc-personal.apk"))
     zip_game(game, os.path.join(out, "MirrorsEdge-GOG.zip"))

@@ -1,5 +1,5 @@
 {
-  "versionCode": 6,
-  "versionName": "0.3.1",
-  "notes": "Install on the tablet from the program over USB or Wi-Fi, without copying by hand."
+  "versionCode": 7,
+  "versionName": "0.3.2",
+  "notes": "Texts say \"device\" instead of \"tablet\": installing works on phones too. A typo fixed."
 }

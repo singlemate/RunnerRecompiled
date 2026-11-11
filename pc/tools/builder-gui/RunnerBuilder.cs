@@ -14,7 +14,7 @@ using System.Threading;
 using System.Windows.Forms;
 
 [assembly: AssemblyTitle("RunnerBuilder")]
-[assembly: AssemblyVersion("0.3.1.0")]
+[assembly: AssemblyVersion("0.3.2.0")]
 
 /* Interface language: the Russian source text is the key into the embedded tables (i18n_<lang>). */
 static class Lang {
@@ -82,8 +82,8 @@ sealed class Meter : Control {
 }
 
 sealed class BuilderForm : Form {
-    const int VersionCode = 6;
-    const string VersionName = "0.3.1";
+    const int VersionCode = 7;
+    const string VersionName = "0.3.2";
     const string UpdateUrl = "https://raw.githubusercontent.com/singlemate/RunnerRecompiled/main/version-builder.json";
     const string ProjectUrl = "https://github.com/singlemate/RunnerRecompiled";
     const string TermsUrl = "https://developer.android.com/studio/terms";
@@ -155,7 +155,7 @@ sealed class BuilderForm : Form {
         var intro = new Label {
             AutoSize = true, Margin = new Padding(0, 0, 0, 4), MaximumSize = new Size(700, 0), ForeColor = Muted,
             Text = Lang.T("Программа соберёт приложение для Android из вашей лицензионной копии Mirror's Edge из GOG ") +
-                   Lang.T("и подготовит папку, которую останется скопировать на планшет.")
+                   Lang.T("и подготовит папку, которую останется скопировать на устройство.")
         };
         table.Controls.Add(intro, 0, 0); table.SetColumnSpan(intro, 3);
 
@@ -207,7 +207,7 @@ sealed class BuilderForm : Form {
         openOut.Padding = new Padding(10, 3, 10, 3);
         openOut.Margin = new Padding(0, 12, 12, 0);
         openOut.Click += delegate { Process.Start("explorer.exe", "\"" + doneFolder + "\""); };
-        install.Text = Lang.T("Установить на планшет…"); Flat(install, true);
+        install.Text = Lang.T("Установить на устройство…"); Flat(install, true);
         install.Padding = new Padding(10, 3, 10, 3);
         install.Margin = new Padding(0, 12, 0, 0);
         install.Click += delegate { StartInstall(); };
@@ -445,7 +445,7 @@ sealed class BuilderForm : Form {
             meter.Percent = ok ? 100 : 0;
             start.Enabled = true; start.BackColor = Ink; start.FlatAppearance.BorderColor = Ink;
             if (installing) {
-                status.Text = ok && installed ? Lang.T("Готово: откройте приложение на планшете")
+                status.Text = ok && installed ? Lang.T("Готово: откройте приложение на устройстве")
                                               : Lang.T("Установка не удалась. Причина в журнале.");
                 if (!(ok && installed)) log.AppendText(reason + Environment.NewLine);
             } else if (ok && doneFolder != null) {
@@ -466,7 +466,7 @@ sealed class BuilderForm : Form {
     void OnClosing(object sender, FormClosingEventArgs e) {
         Process p = running;
         if (p == null) return;
-        if (MessageBox.Show(this, installing ? Lang.T("Копирование на планшет ещё идёт. Прервать?") : Lang.T("Сборка ещё идёт. Прервать?"), Text, MessageBoxButtons.YesNo) != DialogResult.Yes) { e.Cancel = true; return; }
+        if (MessageBox.Show(this, installing ? Lang.T("Копирование на устройство ещё идёт. Прервать?") : Lang.T("Сборка ещё идёт. Прервать?"), Text, MessageBoxButtons.YesNo) != DialogResult.Yes) { e.Cancel = true; return; }
         try { Process.Start(new ProcessStartInfo("taskkill", "/T /F /PID " + p.Id) { CreateNoWindow = true, UseShellExecute = false }); } catch (Exception) { }
     }
 }
@@ -483,7 +483,7 @@ sealed class InstallDialog : Form {
     }
 
     public InstallDialog() {
-        Text = Lang.T("Установка на планшет");
+        Text = Lang.T("Установка на устройство");
         Font = new Font("Segoe UI", 10f);
         BackColor = Color.FromArgb(0xF7, 0xF8, 0xF9);
         FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -494,14 +494,14 @@ sealed class InstallDialog : Form {
         Padding = new Padding(18);
         var flow = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, WrapContents = false };
         flow.Controls.Add(new Label { AutoSize = true, MaximumSize = new Size(520, 0), Margin = new Padding(0, 0, 0, 12),
-            Text = Lang.T("Программа установит приложение и скопирует на планшет файлы игры (около 12 ГБ на планшете). ") +
-                   Lang.T("На планшете должен быть включён режим разработчика: Настройки → О планшете → семь раз нажать «Номер сборки».") });
+            Text = Lang.T("Программа установит приложение и скопирует на устройство файлы игры (около 12 ГБ на устройстве). ") +
+                   Lang.T("На устройстве должен быть включён режим разработчика: Настройки → Об устройстве → семь раз нажать «Номер сборки».") });
         usb.Text = Lang.T("По кабелю USB"); usb.AutoSize = true; usb.Checked = true;
         flow.Controls.Add(usb);
-        flow.Controls.Add(Note(Lang.T("Включите «Отладку по USB» в настройках для разработчиков, подключите кабель и разрешите отладку на экране планшета.")));
+        flow.Controls.Add(Note(Lang.T("Включите «Отладку по USB» в настройках для разработчиков, подключите кабель и разрешите отладку на экране устройства.")));
         wifi.Text = Lang.T("По Wi-Fi"); wifi.AutoSize = true;
         flow.Controls.Add(wifi);
-        flow.Controls.Add(Note(Lang.T("Включите «Отладку по Wi-Fi» в настройках для разработчиков. Компьютер и планшет должны быть в одной сети.")));
+        flow.Controls.Add(Note(Lang.T("Включите «Отладку по Wi-Fi» в настройках для разработчиков. Компьютер и устройство должны быть в одной сети.")));
         var grid = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, Margin = new Padding(22, 0, 0, 0) };
         AddRow(grid, 0, Lang.T("Адрес сопряжения (IP:порт):"), pair);
         AddRow(grid, 1, Lang.T("Код сопряжения:"), code);

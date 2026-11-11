@@ -23,7 +23,7 @@ Tools and temporary files go to `%LOCALAPPDATA%\RunnerBuilder`, or `C:\RunnerBui
 
 ## Installing on the tablet
 
-After a build the window offers **Install on the tablet…** (`device.py`): it installs the APK over USB or Wi-Fi debugging and copies the game files, so nothing has to be copied by hand. Over Wi-Fi a 20 MB test went at 38 MB/s on a Lenovo Y700, so the 11.5 GB should take about 5 minutes; the full copy and USB have not been tried yet. It only needs developer options on the tablet: USB debugging and a cable, or wireless debugging with a pairing code once.
+After a build the window offers **Install on the device…** (`device.py`): it installs the APK over USB or Wi-Fi debugging and copies the game files, so nothing has to be copied by hand. Over Wi-Fi a 20 MB test went at 38 MB/s on a Lenovo Y700, so the 11.5 GB should take about 5 minutes; the full copy and USB have not been tried yet. It only needs developer options on the tablet: USB debugging and a cable, or wireless debugging with a pairing code once.
 
 - adb comes out of Google's platform-tools, only `adb.exe` and its two DLLs (`remotezip.py`).
 - The app writes the game files itself. `device.py` starts it with the extra `receiveFromPc` and streams the files through `adb forward` into a local socket of the app (`PcSetup.receive`, protocol described there). The app accepts only adbd (shell uid) as the other end, keeps every path inside `Binaries`, `Engine` and `TdGame`, checks the SHA-256 of `MirrorsEdge.exe` and prepares the libraries as after a ZIP import. Files that adb itself pushes into `Android/data` belong to the shell user, and on Android 16 the app could not be shown to read them.

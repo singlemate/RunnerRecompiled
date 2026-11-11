@@ -1,5 +1,5 @@
 Программа соберёт приложение для Android из вашей лицензионной копии Mirror's Edge из GOG 	Dieses Programm erstellt die Android-App aus Ihrer eigenen lizenzierten GOG-Kopie von Mirror's Edge 
-и подготовит папку, которую останется скопировать на планшет.	und bereitet einen Ordner vor, den Sie auf Ihr Tablet kopieren.
+и подготовит папку, которую останется скопировать на устройство.	und bereitet einen Ordner vor, den Sie auf Ihr Gerät kopieren.
 Папка игры:	Spielordner:
 Выберите папку, куда установлена игра из GOG	Wählen Sie den Ordner, in dem das GOG-Spiel installiert ist
 Сохранить в:	Speichern in:
@@ -47,22 +47,22 @@ Python скачался с другой контрольной суммой.	Pyt
 Проверка файлов игры	Spieldateien werden geprüft
 На диске свободно {free} ГБ, а нужно {need} ГБ.	Auf dem Datenträger sind {free} GB frei, benötigt werden {need} GB.
 Сборка приложения из вашей копии игры (от 5 минут до получаса)	Die App wird aus Ihrer Spielkopie erstellt (5 bis 30 Minuten)
-Подготовка папки для планшета	Ordner für das Tablet wird vorbereitet
+Подготовка папки для устройства	Ordner für das Gerät wird vorbereitet
 КАК УСТАНОВИТЬ.txt	INSTALLATION.txt
 Шаг сборки завершился с кодом {code}. Подробности в журнале выше.	Ein Erstellungsschritt endete mit Code {code}. Siehe Protokoll oben.
 Не найдены библиотеки	Bibliotheken nicht gefunden
-README	Mirror's Edge für Android, erstellt aus Ihrer Spielkopie\n\nIn diesem Ordner:\n  RunnerRecompiled-pc-personal.apk  die App\n  MirrorsEdge-GOG.zip               Ihre Spieldateien\n\nSo geht es:\n1. Kopieren Sie APK und MirrorsEdge-GOG.zip auf Ihr Tablet, zum Beispiel nach Download.\n2. Installieren Sie das APK. Android fragt, ob die Installation aus dieser Quelle erlaubt ist.\n3. Öffnen Sie die App und wählen Sie MirrorsEdge-GOG.zip, wenn nach dem Spielarchiv gefragt wird.\n4. Startet das Spiel nicht oder hat das Bild Fehler, öffnen Sie in den Einstellungen Grafiktreiber und wählen Sie ein ZIP-Treiberpaket für AdrenoTools (zum Beispiel Turnip).\n\nBenötigt wird ein Android-Gerät mit Vulkan und einer ARMv8.4-CPU oder neuer.\n\nDas APK und das Archiv enthalten Daten Ihrer lizenzierten Spielkopie. Behalten Sie sie für sich: nicht veröffentlichen oder weitergeben.\n
-Установить на планшет…	Auf dem Tablet installieren…
-Готово: откройте приложение на планшете	Fertig: Öffnen Sie die App auf dem Tablet
+README	Mirror's Edge für Android, erstellt aus Ihrer Spielkopie\n\nIn diesem Ordner:\n  RunnerRecompiled-pc-personal.apk  die App\n  MirrorsEdge-GOG.zip               Ihre Spieldateien\n\nSo geht es:\n1. Kopieren Sie APK und MirrorsEdge-GOG.zip auf Ihr Gerät, zum Beispiel nach Download.\n2. Installieren Sie das APK. Android fragt, ob die Installation aus dieser Quelle erlaubt ist.\n3. Öffnen Sie die App und wählen Sie MirrorsEdge-GOG.zip, wenn nach dem Spielarchiv gefragt wird.\n4. Startet das Spiel nicht oder hat das Bild Fehler, öffnen Sie in den Einstellungen Grafiktreiber und wählen Sie ein ZIP-Treiberpaket für AdrenoTools (zum Beispiel Turnip).\n\nBenötigt wird ein Android-Gerät mit Vulkan und einer ARMv8.4-CPU oder neuer.\n\nDas APK und das Archiv enthalten Daten Ihrer lizenzierten Spielkopie. Behalten Sie sie für sich: nicht veröffentlichen oder weitergeben.\n
+Установить на устройство…	Auf dem Gerät installieren…
+Готово: откройте приложение на устройстве	Fertig: Öffnen Sie die App auf dem Gerät
 Установка не удалась. Причина в журнале.	Die Installation ist fehlgeschlagen. Der Grund steht im Protokoll.
-Копирование на планшет ещё идёт. Прервать?	Das Kopieren auf das Tablet läuft noch. Abbrechen?
-Установка на планшет	Auf dem Tablet installieren
-Программа установит приложение и скопирует на планшет файлы игры (около 12 ГБ на планшете). 	Das Programm installiert die App und kopiert die Spieldateien auf das Tablet (etwa 12 GB auf dem Tablet). 
-На планшете должен быть включён режим разработчика: Настройки → О планшете → семь раз нажать «Номер сборки».	Die Entwickleroptionen müssen aktiv sein: Einstellungen → Über das Tablet → siebenmal auf „Build-Nummer“ tippen.
+Копирование на устройство ещё идёт. Прервать?	Das Kopieren auf das Gerät läuft noch. Abbrechen?
+Установка на устройство	Auf dem Gerät installieren
+Программа установит приложение и скопирует на устройство файлы игры (около 12 ГБ на устройстве). 	Das Programm installiert die App und kopiert die Spieldateien auf das Gerät (etwa 12 GB auf dem Gerät). 
+На устройстве должен быть включён режим разработчика: Настройки → Об устройстве → семь раз нажать «Номер сборки».	Die Entwickleroptionen müssen aktiv sein: Einstellungen → Über das Gerät → siebenmal auf „Build-Nummer“ tippen.
 По кабелю USB	Mit USB-Kabel
-Включите «Отладку по USB» в настройках для разработчиков, подключите кабель и разрешите отладку на экране планшета.	Aktivieren Sie „USB-Debugging“ in den Entwickleroptionen, schließen Sie das Kabel an und erlauben Sie das Debugging auf dem Tablet.
+Включите «Отладку по USB» в настройках для разработчиков, подключите кабель и разрешите отладку на экране устройства.	Aktivieren Sie „USB-Debugging“ in den Entwickleroptionen, schließen Sie das Kabel an und erlauben Sie das Debugging auf dem Gerät.
 По Wi-Fi	Über WLAN
-Включите «Отладку по Wi-Fi» в настройках для разработчиков. Компьютер и планшет должны быть в одной сети.	Aktivieren Sie „Debugging über WLAN“ in den Entwickleroptionen. Computer und Tablet müssen im selben Netzwerk sein.
+Включите «Отладку по Wi-Fi» в настройках для разработчиков. Компьютер и устройство должны быть в одной сети.	Aktivieren Sie „Debugging über WLAN“ in den Entwickleroptionen. Computer und Gerät müssen im selben Netzwerk sein.
 Адрес сопряжения (IP:порт):	Kopplungsadresse (IP:Port):
 Код сопряжения:	Kopplungscode:
 Адрес подключения (IP:порт):	Verbindungsadresse (IP:Port):
@@ -75,22 +75,22 @@ README	Mirror's Edge für Android, erstellt aus Ihrer Spielkopie\n\nIn diesem Or
 В этой сборке программы не указан adb. Сообщите об ошибке.	In diesem Build des Programms ist kein adb angegeben. Bitte melden Sie den Fehler.
 Скачивание adb	adb wird heruntergeladen
 Подключено несколько устройств: {list}. Оставьте одно.	Mehrere Geräte sind verbunden: {list}. Lassen Sie nur eines.
-Разрешите отладку на планшете: на его экране появился запрос «Разрешить отладку по USB?». Отметьте «Всегда разрешать с этого компьютера», нажмите «Разрешить» и запустите установку ещё раз.	Erlauben Sie das Debugging auf dem Tablet: Dort erscheint „USB-Debugging zulassen?“. Wählen Sie „Von diesem Computer immer zulassen“, tippen Sie auf „Zulassen“ und starten Sie die Installation erneut.
-Планшет виден, но не отвечает. Отключите и снова включите отладку на планшете и запустите установку ещё раз.	Das Tablet ist sichtbar, antwortet aber nicht. Schalten Sie das Debugging auf dem Tablet aus und wieder ein und starten Sie die Installation erneut.
-Планшет не найден. Включите на нём отладку по USB и подключите кабель, или включите отладку по Wi-Fi и укажите адрес.	Das Tablet wurde nicht gefunden. Aktivieren Sie USB-Debugging und schließen Sie das Kabel an, oder aktivieren Sie Debugging über WLAN und geben Sie die Adresse ein.
-Установка приложения на планшет	App wird auf dem Tablet installiert
-На планшете стоит приложение, подписанное другим ключом. Удалите его на планшете (файлы игры и сохранения внутри приложения тоже удалятся) и запустите установку ещё раз.	Auf dem Tablet ist die App mit einem anderen Schlüssel signiert. Deinstallieren Sie sie (Spieldateien und Spielstände in der App werden ebenfalls gelöscht) und starten Sie die Installation erneut.
-На планшете не хватает места для приложения.	Auf dem Tablet ist nicht genug Platz für die App.
-Планшет не разрешил установку. На некоторых планшетах нужно включить «Установка через USB» в настройках для разработчиков или подтвердить установку на экране.	Das Tablet hat die Installation nicht erlaubt. Bei manchen Tablets muss „Über USB installieren“ in den Entwickleroptionen aktiviert oder die Installation am Bildschirm bestätigt werden.
+Разрешите отладку на устройстве: на его экране появился запрос «Разрешить отладку по USB?». Отметьте «Всегда разрешать с этого компьютера», нажмите «Разрешить» и запустите установку ещё раз.	Erlauben Sie das Debugging auf dem Gerät: Dort erscheint „USB-Debugging zulassen?“. Wählen Sie „Von diesem Computer immer zulassen“, tippen Sie auf „Zulassen“ und starten Sie die Installation erneut.
+Устройство видно, но не отвечает. Отключите и снова включите отладку на устройстве и запустите установку ещё раз.	Das Gerät ist sichtbar, antwortet aber nicht. Schalten Sie das Debugging auf dem Gerät aus und wieder ein und starten Sie die Installation erneut.
+Устройство не найдено. Включите на нём отладку по USB и подключите кабель, или включите отладку по Wi-Fi и укажите адрес.	Das Gerät wurde nicht gefunden. Aktivieren Sie USB-Debugging und schließen Sie das Kabel an, oder aktivieren Sie Debugging über WLAN und geben Sie die Adresse ein.
+Установка приложения на устройство	App wird auf dem Gerät installiert
+На устройстве стоит приложение, подписанное другим ключом. Удалите его на устройстве (файлы игры и сохранения внутри приложения тоже удалятся) и запустите установку ещё раз.	Auf dem Gerät ist die App mit einem anderen Schlüssel signiert. Deinstallieren Sie sie (Spieldateien und Spielstände in der App werden ebenfalls gelöscht) und starten Sie die Installation erneut.
+На устройстве не хватает места для приложения.	Auf dem Gerät ist nicht genug Platz für die App.
+Устройство не разрешило установку. На некоторых устройствах нужно включить «Установка через USB» в настройках для разработчиков или подтвердить установку на экране.	Das Gerät hat die Installation nicht erlaubt. Bei manchen Geräten muss „Über USB installieren“ in den Entwickleroptionen aktiviert oder die Installation am Bildschirm bestätigt werden.
 Не удалось установить приложение: {reason}	Die App konnte nicht installiert werden: {reason}
-связь с планшетом прервалась	die Verbindung zum Tablet wurde unterbrochen
-Планшет ответил: {reason}	Das Tablet meldet: {reason}
-Приложение на планшете не ответило. Разблокируйте планшет, не закрывайте приложение и запустите установку ещё раз.	Die App auf dem Tablet hat nicht geantwortet. Entsperren Sie das Tablet, lassen Sie die App geöffnet und starten Sie die Installation erneut.
-Копирование игры на планшет	Spiel wird auf das Tablet kopiert
+связь с устройством прервалась	die Verbindung zum Gerät wurde unterbrochen
+Устройство ответило: {reason}	Das Gerät meldet: {reason}
+Приложение на устройстве не ответило. Разблокируйте устройство, не закрывайте приложение и запустите установку ещё раз.	Die App auf dem Gerät hat nicht geantwortet. Entsperren Sie das Gerät, lassen Sie die App geöffnet und starten Sie die Installation erneut.
+Копирование игры на устройство	Spiel wird auf das Gerät kopiert
 Файл игры изменился во время копирования: {name}	Eine Spieldatei hat sich beim Kopieren geändert: {name}
   копирование, {speed} МБ/с: {p}%	  Kopieren, {speed} MB/s: {p}%
-Проверка файлов на планшете	Dateien auf dem Tablet werden geprüft
-Поиск планшета	Tablet wird gesucht
-Для сопряжения нужен код с экрана планшета.	Zum Koppeln wird der Code vom Tablet-Bildschirm benötigt.
-Сопряжение не удалось: проверьте адрес, порт и код. Код действует, пока открыто окно сопряжения на планшете.	Kopplung fehlgeschlagen: Prüfen Sie Adresse, Port und Code. Der Code gilt nur, solange das Kopplungsfenster auf dem Tablet offen ist.
-Не удалось подключиться к {address}. Планшет и компьютер должны быть в одной сети Wi-Fi, а адрес и порт — с экрана «Отладка по Wi-Fi» (порт меняется при каждом включении).	Verbindung zu {address} fehlgeschlagen. Tablet und Computer müssen im selben WLAN sein, Adresse und Port vom Bildschirm „Debugging über WLAN“ (der Port ändert sich bei jedem Einschalten).
+Проверка файлов на устройстве	Dateien auf dem Gerät werden geprüft
+Поиск устройства	Gerät wird gesucht
+Для сопряжения нужен код с экрана устройства.	Zum Koppeln wird der Code vom Bildschirm des Geräts benötigt.
+Сопряжение не удалось: проверьте адрес, порт и код. Код действует, пока открыто окно сопряжения на устройстве.	Kopplung fehlgeschlagen: Prüfen Sie Adresse, Port und Code. Der Code gilt nur, solange das Kopplungsfenster auf dem Gerät offen ist.
+Не удалось подключиться к {address}. Устройство и компьютер должны быть в одной сети Wi-Fi, а адрес и порт — с экрана «Отладка по Wi-Fi» (порт меняется при каждом включении).	Verbindung zu {address} fehlgeschlagen. Gerät und Computer müssen im selben WLAN sein, Adresse und Port vom Bildschirm „Debugging über WLAN“ (der Port ändert sich bei jedem Einschalten).

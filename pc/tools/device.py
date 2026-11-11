@@ -99,27 +99,27 @@ def choose_device(adb, wanted):
         time.sleep(1)
     states = {state for _, state in rows}
     if "unauthorized" in states:
-        stop(t("Разрешите отладку на планшете: на его экране появился запрос «Разрешить отладку по USB?». "
+        stop(t("Разрешите отладку на устройстве: на его экране появился запрос «Разрешить отладку по USB?». "
                "Отметьте «Всегда разрешать с этого компьютера», нажмите «Разрешить» и запустите установку ещё раз."))
     if "offline" in states:
-        stop(t("Планшет виден, но не отвечает. Отключите и снова включите отладку на планшете и запустите установку ещё раз."))
-    stop(t("Планшет не найден. Включите на нём отладку по USB и подключите кабель, "
+        stop(t("Устройство видно, но не отвечает. Отключите и снова включите отладку на устройстве и запустите установку ещё раз."))
+    stop(t("Устройство не найдено. Включите на нём отладку по USB и подключите кабель, "
            "или включите отладку по Wi-Fi и укажите адрес."))
 
 
 def install(adb, apk):
-    stage(t("Установка приложения на планшет"))
+    stage(t("Установка приложения на устройство"))
     out = adb.run("install", "-r", apk, check=False, timeout=900)
     print(out, flush=True)
     if "Success" in out:
         return
     if "INSTALL_FAILED_UPDATE_INCOMPATIBLE" in out:
-        stop(t("На планшете стоит приложение, подписанное другим ключом. Удалите его на планшете "
+        stop(t("На устройстве стоит приложение, подписанное другим ключом. Удалите его на устройстве "
                "(файлы игры и сохранения внутри приложения тоже удалятся) и запустите установку ещё раз."))
     if "INSTALL_FAILED_INSUFFICIENT_STORAGE" in out:
-        stop(t("На планшете не хватает места для приложения."))
+        stop(t("На устройстве не хватает места для приложения."))
     if "INSTALL_FAILED_USER_RESTRICTED" in out or "INSTALL_FAILED_ABORTED" in out:
-        stop(t("Планшет не разрешил установку. На некоторых планшетах нужно включить «Установка через USB» "
+        stop(t("Устройство не разрешило установку. На некоторых устройствах нужно включить «Установка через USB» "
                "в настройках для разработчиков или подтвердить установку на экране."))
     stop(t("Не удалось установить приложение: {reason}", reason=out.splitlines()[-1] if out else "?"))
 
@@ -158,7 +158,7 @@ class Link:
         while len(data) < n:
             chunk = self.sock.recv(n - len(data))
             if not chunk:
-                raise ConnectionError(t("связь с планшетом прервалась"))
+                raise ConnectionError(t("связь с устройством прервалась"))
             data += chunk
         return data
 
@@ -166,7 +166,7 @@ class Link:
         code = self.read(1)[0]
         if code == 3:
             n = struct.unpack(">H", self.read(2))[0]
-            stop(t("Планшет ответил: {reason}", reason=self.read(n).decode("utf-8", "replace")))
+            stop(t("Устройство ответило: {reason}", reason=self.read(n).decode("utf-8", "replace")))
         return code
 
 
@@ -185,12 +185,12 @@ def connect(port, seconds=60):
         if s:
             s.close()
         if time.monotonic() > end:
-            stop(t("Приложение на планшете не ответило. Разблокируйте планшет, не закрывайте приложение и запустите установку ещё раз."))
+            stop(t("Приложение на устройстве не ответило. Разблокируйте устройство, не закрывайте приложение и запустите установку ещё раз."))
         time.sleep(1)
 
 
 def send_game(adb, game, test=False):
-    stage(t("Копирование игры на планшет"))
+    stage(t("Копирование игры на устройство"))
     files = game_files(game)
     total = sum(size for _, _, size in files)
     # --test-transfer: the app takes the files into a folder of its own and deletes it after counting them.
@@ -223,7 +223,7 @@ def send_game(adb, game, test=False):
                 link.reply()
             else:
                 done += size
-        stage(t("Проверка файлов на планшете"))
+        stage(t("Проверка файлов на устройстве"))
         sock.sendall(b"E")
         link.reply()
         sock.close()
@@ -238,7 +238,7 @@ def main():
     ap.add_argument("--home", required=True, help="папка инструментов RunnerBuilder")
     ap.add_argument("--pair", help="адрес и порт сопряжения (отладка по Wi-Fi), вместе с --code")
     ap.add_argument("--code", help="код сопряжения")
-    ap.add_argument("--connect", help="адрес и порт планшета (отладка по Wi-Fi)")
+    ap.add_argument("--connect", help="адрес и порт устройства (отладка по Wi-Fi)")
     ap.add_argument("--serial", help="устройство из adb devices")
     ap.add_argument("--adb", help="свой adb вместо скачанного")
     ap.add_argument("--skip-install", action="store_true", help="только скопировать игру")
@@ -248,21 +248,21 @@ def main():
     builder.set_language(args.lang)
     builder.check_game(os.path.abspath(args.game))
     adb = Adb(ensure_adb(os.path.abspath(args.home), args.adb))
-    stage(t("Поиск планшета"))
+    stage(t("Поиск устройства"))
     adb.run("start-server", timeout=60)
     serial = args.serial
     if args.pair:
         if not args.code:
-            stop(t("Для сопряжения нужен код с экрана планшета."))
+            stop(t("Для сопряжения нужен код с экрана устройства."))
         out = adb.run("pair", args.pair.strip(), args.code.strip(), check=False, timeout=60)
         print(out, flush=True)
         if "Successfully paired" not in out:
-            stop(t("Сопряжение не удалось: проверьте адрес, порт и код. Код действует, пока открыто окно сопряжения на планшете."))
+            stop(t("Сопряжение не удалось: проверьте адрес, порт и код. Код действует, пока открыто окно сопряжения на устройстве."))
     if args.connect:
         out = adb.run("connect", args.connect.strip(), check=False, timeout=60)
         print(out, flush=True)
         if "connected to" not in out:
-            stop(t("Не удалось подключиться к {address}. Планшет и компьютер должны быть в одной сети Wi-Fi, "
+            stop(t("Не удалось подключиться к {address}. Устройство и компьютер должны быть в одной сети Wi-Fi, "
                    "а адрес и порт — с экрана «Отладка по Wi-Fi» (порт меняется при каждом включении).", address=args.connect))
         serial = serial or args.connect.strip()
     adb.serial = choose_device(adb, serial)
@@ -270,7 +270,7 @@ def main():
     if not args.skip_install:
         install(adb, os.path.abspath(args.apk))
     send_game(adb, os.path.abspath(args.game), args.test_transfer)
-    stage(t("Готово: откройте приложение на планшете"))
+    stage(t("Готово: откройте приложение на устройстве"))
     print("INSTALLED", flush=True)
 
 
