@@ -19,8 +19,10 @@
 typedef struct RtObj {
     int type;
     void *data;                 /* files and find handles (rt_files.c) */
-    /* events */
+    /* events; PulseEvent releases the threads waiting at that moment: pulse_gen counts pulses,
+       pulse_left is how many of them may still go (all of a manual-reset event, one otherwise) */
     int manual, signaled;
+    uint32_t waiters, pulse_gen, pulse_left;
     /* mutexes */
     uint32_t owner, count;
     /* semaphores */
@@ -83,6 +85,9 @@ void rt_handle_close(uint32_t h)
 
 /* ---- waiting ---- */
 
+/* gen: the event's pulse_gen when this waiter started; a later pulse with releases left counts. */
+static int pulsed(RtObj *o, uint32_t gen) { return o->type == RT_H_EVENT && o->pulse_gen != gen && o->pulse_left; }
+
 static int is_signaled(RtObj *o, uint32_t tid)
 {
     switch (o->type) {
@@ -94,10 +99,13 @@ static int is_signaled(RtObj *o, uint32_t tid)
     }
 }
 
-static void acquire(RtObj *o, uint32_t tid)
+static void acquire(RtObj *o, uint32_t tid, uint32_t gen)
 {
     switch (o->type) {
-    case RT_H_EVENT: if (!o->manual) o->signaled = 0; break;
+    case RT_H_EVENT:
+        if (o->signaled) { if (!o->manual) o->signaled = 0; }
+        else if (pulsed(o, gen)) o->pulse_left--;
+        break;
     case RT_H_MUTEX: o->owner = tid; o->count++; break;
     case RT_H_SEMAPHORE: o->sem--; break;
     default: break;
@@ -108,30 +116,52 @@ static uint32_t wait_objects(uint32_t n, const uint32_t *hs, int all, uint32_t m
 {
     sync_init();
     uint32_t tid = rt_thread_self()->id;
-    uint64_t deadline = ms == 0xFFFFFFFFu ? 0 : host_ticks_ns() + (uint64_t)ms * 1000000ull;
+    uint64_t started = host_ticks_ns();
+    uint64_t deadline = ms == 0xFFFFFFFFu ? 0 : started + (uint64_t)ms * 1000000ull;
+    RtObj *os[64];
+    uint32_t gen[64], result;
     host_lock(sync_lock);
-    for (;;) {
-        RtObj *os[64];
-        uint32_t ready = 0, first = n;
-        for (uint32_t i = 0; i < n; i++) {
-            os[i] = obj(hs[i]);
-            if (!os[i]) { host_unlock(sync_lock); return WAIT_FAILED; }
-            if (is_signaled(os[i], tid)) { ready++; if (first == n) first = i; }
-        }
-        if (all ? ready == n : ready > 0) {
-            if (all) for (uint32_t i = 0; i < n; i++) acquire(os[i], tid);
-            else acquire(os[first], tid);
+    for (uint32_t i = 0; i < n; i++) {
+        os[i] = obj(hs[i]);
+        if (!os[i]) {
+            for (uint32_t k = 0; k < i; k++) os[k]->waiters--;
             host_unlock(sync_lock);
-            return WAIT_OBJECT_0 + (all ? 0 : first);
+            return WAIT_FAILED;
+        }
+        gen[i] = os[i]->pulse_gen;
+        os[i]->waiters++;
+    }
+    for (;;) {
+        uint32_t ready = 0, first = n;
+        for (uint32_t i = 0; i < n; i++)
+            if (is_signaled(os[i], tid) || pulsed(os[i], gen[i])) { ready++; if (first == n) first = i; }
+        if (all ? ready == n : ready > 0) {
+            if (all) for (uint32_t i = 0; i < n; i++) acquire(os[i], tid, gen[i]);
+            else acquire(os[first], tid, gen[first]);
+            result = WAIT_OBJECT_0 + (all ? 0 : first);
+            break;
         }
         uint32_t left = 0xFFFFFFFFu;
         if (ms != 0xFFFFFFFFu) {
             uint64_t now = host_ticks_ns();
-            if (now >= deadline) { host_unlock(sync_lock); return WAIT_TIMEOUT; }
+            if (now >= deadline) { result = WAIT_TIMEOUT; break; }
             left = (uint32_t)((deadline - now + 999999) / 1000000);
         }
         host_cond_wait(sync_cond, sync_lock, left);
     }
+    for (uint32_t i = 0; i < n; i++) os[i]->waiters--;
+    int first_type = os[0]->type;
+    host_unlock(sync_lock);
+    /* ME_PC_HITCH: waits of the game that took 300 ms or more, however they ended (a lost
+       wake-up, a thread that takes long to stop). */
+    static int log_waits = -1;
+    if (log_waits < 0) log_waits = getenv("ME_PC_HITCH") != NULL;
+    uint64_t took = (host_ticks_ns() - started) / 1000000ull;
+    if (log_waits && took >= 300)
+        rt_log("long wait: %llu ms, %s, %u object(s), first type %d, timeout %d ms, thread %#x, returns to %#x",
+               (unsigned long long)took, result == WAIT_TIMEOUT ? "timed out" : "signaled", n, first_type,
+               ms == 0xFFFFFFFFu ? -1 : (int)ms, tid, ld32(rt_thread_self()->ctx.esp));
+    return result;
 }
 
 static void k_WaitForSingleObject(X86Ctx *ctx)
@@ -175,9 +205,20 @@ static void set_event(uint32_t h, int state, int pulse)
     RtObj *o = obj(h);
     if (!o || o->type != RT_H_EVENT) return;
     host_lock(sync_lock);
-    o->signaled = state;
+    if (pulse) {
+        /* PulseEvent: the threads waiting now go (all of them for a manual-reset event, one for an
+           auto-reset one), and the event stays non-signaled. Setting the state for an instant did
+           not work: the waiters looked only after it was reset again and slept until their
+           timeout (a 1 s stall each time the game restarted its rendering thread). */
+        o->signaled = 0;
+        if (o->waiters) {
+            o->pulse_gen++;
+            o->pulse_left = o->manual ? o->waiters : 1;
+        }
+    } else {
+        o->signaled = state;
+    }
     notify();
-    if (pulse) o->signaled = 0; /* wakes current waiters only on the next check: approximate */
     host_unlock(sync_lock);
 }
 
@@ -267,6 +308,7 @@ static void thread_main(void *arg)
     o->done = 1;
     notify();
     host_unlock(sync_lock);
+    if (getenv("ME_PC_HITCH")) rt_log("thread %#x (start %#x) ended, code %u", o->thread->id, o->start, o->exit_code);
 }
 
 static void k_CreateThread(X86Ctx *ctx)

@@ -126,12 +126,40 @@ static int read_path(const char *g, char *out, size_t n)
     return 0;
 }
 
+/* Every folder on the way is created; the last folder done is remembered, since the game rewrites
+   the same file many times in a row (TdInput.ini 56 times at a level start), and on Android each
+   mkdir and its case lookup goes through the shared-storage file system (about 10 ms per file).
+   Removing a folder forgets it. */
+static char dirs_done[1024];
+static HostMutex *dirs_lock;
+
 static void mkdirs_for(const char *host_file)
 {
     char d[1024];
     snprintf(d, sizeof d, "%s", host_file);
+    char *last = strrchr(d, '/');
+    if (!last) return;
+    *last = 0;
+    if (!dirs_lock) dirs_lock = host_mutex_new();
+    host_lock(dirs_lock);
+    int same = !strcmp(dirs_done, d);
+    host_unlock(dirs_lock);
+    if (same) return;
+    *last = '/';
     for (char *p = d + strlen(user_root) + 1; *p; p++)
         if (*p == '/') { *p = 0; host_mkdir(d); *p = '/'; }
+    *last = 0;
+    host_lock(dirs_lock);
+    snprintf(dirs_done, sizeof dirs_done, "%s", d);
+    host_unlock(dirs_lock);
+}
+
+static void dirs_forget(void)
+{
+    if (!dirs_lock) return;
+    host_lock(dirs_lock);
+    dirs_done[0] = 0;
+    host_unlock(dirs_lock);
 }
 
 static int copy_file(const char *from, const char *to)
@@ -319,7 +347,20 @@ static uint32_t create_file(const char *name, uint32_t access, uint32_t disp, ui
         mkdirs_for(op);
         fd = host_open(op, 1, 1, truncate);
         snprintf(hp, sizeof hp, "%s", op);
-        rt_log("CreateFile %s (write, disposition %u): %s", g, disp, op);
+        /* The same file rewritten in a row is logged once a second with a count (TdInput.ini). */
+        static char last_written[512];
+        static uint64_t last_logged;
+        static unsigned repeats;
+        uint64_t now = host_ticks_ns();
+        if (strcmp(last_written, g) || now - last_logged >= 1000000000ull) {
+            if (repeats) rt_log("CreateFile %s: written %u more times", last_written, repeats);
+            rt_log("CreateFile %s (write, disposition %u): %s", g, disp, op);
+            snprintf(last_written, sizeof last_written, "%s", g);
+            last_logged = now;
+            repeats = 0;
+        } else {
+            repeats++;
+        }
     }
     if (fd < 0) { set_error(5); return INVALID_HANDLE; }
     set_error((disp == 2 || disp == 4) && exists ? 183 : 0); /* ERROR_ALREADY_EXISTS is informational */
@@ -555,6 +596,7 @@ static uint32_t remove_name(const char *name, int dir)
     char g[512], op[1024];
     canonical(name, g, sizeof g);
     overlay_path(g, op, sizeof op);
+    if (dir) dirs_forget();
     if (host_stat(op, NULL, NULL)) return dir ? host_rmdir(op) : host_unlink(op);
     char gp[1024];
     if (game_path(g, gp, sizeof gp) && host_stat(gp, NULL, NULL)) {

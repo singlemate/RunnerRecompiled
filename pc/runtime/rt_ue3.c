@@ -792,11 +792,25 @@ void rt_ue_achievements_tick(void)
     ach.installed = 1;
 }
 
-/* ME_PC_PAD_GLYPHS=ps: the button font is the game's own PS3 one. The UI style that should select it
+/* PlayStation pad: the button font is the game's own PS3 one. The UI style that should select it
    draws nothing in this build, so the Xbox font's table and pages become those of the PS3 font (both
    are MultiFonts of 3 x 256 characters, loaded with the front end). The third size of the PS3 table
-   holds small cells, the second one is used for it as well. Runs on the game thread. */
-static struct { void *thread; uint64_t next_ns; int tries, done; } pad_font;
+   holds small cells, the second one is used for it as well. Runs on the game thread.
+   Wanted at start: ME_PC_PAD_GLYPHS=ps; during play the app sets it (rt_android_pad_glyphs) when
+   the first pad changes. Going back to Xbox puts the saved Xbox table back, only while the font
+   objects are the ones that were changed. */
+enum { PAD_TIER = 256, PAD_SIZE = 24 };  /* FFontCharacter: 4 ints, the page byte, the vertical offset */
+static struct {
+    void *thread; uint64_t next_ns; int tries, failed, applied;
+    uint32_t xbox, xc, xt;                       /* the changed Xbox font, its table and pages */
+    uint32_t chars, pc;                          /* Characters offset; the PS3 table copied */
+    uint64_t check_ns;
+    uint8_t saved[3 * PAD_TIER * PAD_SIZE];      /* its own table and pages before the change */
+    uint8_t saved_pages[3 * 4];
+} pad_font;
+static volatile int pad_glyphs_set = -1;  /* -1: as at start; 0 Xbox; 1 PlayStation */
+
+void rt_android_pad_glyphs(int playstation) { pad_glyphs_set = playstation ? 1 : 0; }
 
 static uint32_t ue_multifont(const char *wanted)
 {
@@ -814,12 +828,34 @@ static uint32_t ue_multifont(const char *wanted)
 
 void rt_ue_font_tick(void)
 {
-    const char *mode = getenv("ME_PC_PAD_GLYPHS");
-    if (pad_font.done || !mode || strcmp(mode, "ps") || (void *)rt_thread_self() != pad_font.thread) return;
+    if ((void *)rt_thread_self() != pad_font.thread) return;
+    int want = pad_glyphs_set;
+    if (want < 0) {
+        const char *mode = getenv("ME_PC_PAD_GLYPHS");
+        want = mode && !strcmp(mode, "ps");
+    }
     uint64_t now = host_ticks_ns();
+    if (want && pad_font.applied && now >= pad_font.check_ns) {
+        /* A level change may load the Xbox font again: then its fresh table gets the PS3 one too.
+           Only reads here; the full search runs again only if the table is not ours any more. */
+        pad_font.check_ns = now + 10000000000ull;
+        if (ld32(pad_font.xbox + pad_font.chars) != pad_font.xc
+            || memcmp(rt_ptr(pad_font.xc), rt_ptr(pad_font.pc), PAD_SIZE * 8)) {
+            pad_font.applied = 0;
+            pad_font.xbox = 0;  /* nothing of ours to put back */
+            rt_log("button font: the Xbox font changed, PS3 glyphs again");
+        }
+    }
+    if (want == pad_font.applied) return;
+    if (pad_font.failed == want + 1) return;  /* gave up on this direction; a new request retries */
     if (now < pad_font.next_ns) return;
     pad_font.next_ns = now + 2000000000ull;
-    if (++pad_font.tries > 150) { pad_font.done = 1; rt_log("button font: PS3 font not found"); return; }
+    if (++pad_font.tries > 150) {
+        pad_font.failed = want + 1;
+        pad_font.tries = 0;
+        rt_log("button font: PS3 font not found");
+        return;
+    }
     ue_names = 0;
     ue_nnames = 0;
     ue_find_names();
@@ -830,19 +866,42 @@ void rt_ue_font_tick(void)
     uint32_t chars = ue_prop_offset_typed("Font", "Characters", "ArrayProperty");
     uint32_t pages = ue_prop_offset_typed("Font", "Textures", "ArrayProperty");
     uint32_t xbox = ue_multifont("UI_Fonts_XboxButtons"), ps3 = ue_multifont("UI_Fonts_PS3Buttons");
-    if (!chars || !pages || !xbox || !ps3) return;
-    enum { TIER = 256, SIZE = 24 };  /* FFontCharacter: 4 ints, the page byte, the vertical offset */
-    uint32_t xc = ld32(xbox + chars), pc = ld32(ps3 + chars), xt = ld32(xbox + pages), pt = ld32(ps3 + pages);
-    if (ld32(xbox + chars + 4) != 3 * TIER || ld32(ps3 + chars + 4) != 3 * TIER
+    if (!chars || !pages || !xbox) return;
+    uint32_t xc = ld32(xbox + chars), xt = ld32(xbox + pages);
+    pad_font.tries = 0;
+    pad_font.failed = 0;
+    if (!want) {
+        /* Back to Xbox: only into the very tables changed before; a reloaded font has its own. */
+        if (xbox == pad_font.xbox && xc == pad_font.xc && xt == pad_font.xt) {
+            memcpy(rt_ptr(xc), pad_font.saved, sizeof pad_font.saved);
+            memcpy(rt_ptr(xt), pad_font.saved_pages, sizeof pad_font.saved_pages);
+            rt_log("button font: Xbox glyphs back");
+        } else {
+            rt_log("button font: Xbox font was reloaded, its own glyphs are in place");
+        }
+        pad_font.applied = 0;
+        return;
+    }
+    if (!ps3) return;
+    uint32_t pc = ld32(ps3 + chars), pt = ld32(ps3 + pages);
+    if (ld32(xbox + chars + 4) != 3 * PAD_TIER || ld32(ps3 + chars + 4) != 3 * PAD_TIER
         || ld32(xbox + pages + 4) != 3 || ld32(ps3 + pages + 4) != 3) {
-        pad_font.done = 1;
+        pad_font.failed = want + 1;
         rt_log("button font: unexpected tables, left as they are");
         return;
     }
-    memcpy(rt_ptr(xc), rt_ptr(pc), 2 * TIER * SIZE);
-    memcpy(rt_ptr(xc + 2 * TIER * SIZE), rt_ptr(pc + TIER * SIZE), TIER * SIZE);
+    memcpy(pad_font.saved, rt_ptr(xc), sizeof pad_font.saved);
+    memcpy(pad_font.saved_pages, rt_ptr(xt), sizeof pad_font.saved_pages);
+    pad_font.xbox = xbox;
+    pad_font.xc = xc;
+    pad_font.xt = xt;
+    pad_font.chars = chars;
+    pad_font.pc = pc;
+    pad_font.check_ns = now + 10000000000ull;
+    memcpy(rt_ptr(xc), rt_ptr(pc), 2 * PAD_TIER * PAD_SIZE);
+    memcpy(rt_ptr(xc + 2 * PAD_TIER * PAD_SIZE), rt_ptr(pc + PAD_TIER * PAD_SIZE), PAD_TIER * PAD_SIZE);
     memcpy(rt_ptr(xt), rt_ptr(pt), 3 * 4);
-    pad_font.done = 1;
+    pad_font.applied = 1;
     rt_log("button font: PS3 glyphs in place");
 }
 

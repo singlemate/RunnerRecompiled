@@ -551,7 +551,26 @@ static void k_Sleep(X86Ctx *ctx)
     rt_ue_achievements_tick();
     rt_ue_font_tick();
     { extern void rt_ue_aspect_tick(void); rt_ue_aspect_tick(); }
-    if (ARG(0)) host_sleep_ms(ARG(0));
+    uint32_t ms = ARG(0);
+    /* The game's own appSleep(1.0f) (0x10ED040) called from 0x11C6471: in the handler that stops
+       and restarts the rendering thread on a request flag (bit 4 at +0x1D0, checked each tick by
+       0x11C8150), between the two. It froze the picture for a second each time, several times a
+       minute in some places (2026-11-13, CHECKLIST). The threads are joined by waits anyway; the
+       sleep is skipped. ME_PC_RESTART_SLEEP=<ms> puts a sleep back (1000 as in the game). */
+    if (ms == 1000 && ld32(ctx->esp) == 0x10ED072u && ld32(ctx->esp + 0x10) == 0x11C6476u) {
+        static int restart_ms = -1;
+        if (restart_ms < 0) restart_ms = getenv("ME_PC_RESTART_SLEEP") ? atoi(getenv("ME_PC_RESTART_SLEEP")) : 0;
+        static unsigned skipped;
+        if (!skipped++ || getenv("ME_PC_HITCH")) rt_log("rendering thread restart: Sleep(1000) -> %d ms", restart_ms);
+        ms = (uint32_t)restart_ms;
+    } else if (ms >= 1000 && ld32(ctx->esp) == 0x10ED072u && getenv("ME_PC_HITCH")) {
+        rt_log("appSleep(%u ms) called from %#x", ms, ld32(ctx->esp + 0x10));
+    }
+    static int log_sleeps = -1;
+    if (log_sleeps < 0) log_sleeps = getenv("ME_PC_HITCH") != NULL;
+    if (log_sleeps && ms >= 100)
+        rt_log("Sleep(%u), thread %#x, returns to %#x", ms, rt_thread_self()->id, ld32(ctx->esp));
+    if (ms) host_sleep_ms(ms);
     else sleep_zero();
 }
 

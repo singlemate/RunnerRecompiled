@@ -28,6 +28,7 @@ static void (*pad)(uint32_t, int, uint16_t, uint8_t, uint8_t, int16_t, int16_t, 
 static void (*pad_rumble)(uint32_t, uint16_t *, uint16_t *);
 static void (*set_fov)(float);
 static void (*audio_route)(int, int);
+static void (*pad_glyphs)(int);
 static ANativeWindow *window;
 static int argc;
 static char **argv;
@@ -63,6 +64,7 @@ JNIEXPORT jboolean JNICALL JNI(nativeStart)(JNIEnv *env, jclass cls, jstring pat
     set_fov = (void (*)(float))dlsym(lib, "rt_android_set_fov");
     audio_route = (void (*)(int, int))dlsym(lib, "rt_android_audio_route");
     pad_rumble = (void (*)(uint32_t, uint16_t *, uint16_t *))dlsym(lib, "rt_android_pad_rumble");
+    pad_glyphs = (void (*)(int))dlsym(lib, "rt_android_pad_glyphs");
 #undef SYM
     for (jsize i = 0, n = (*env)->GetArrayLength(env, vars); i < n; i++) {
         jstring s = (*env)->GetObjectArrayElement(env, vars, i);
@@ -169,6 +171,13 @@ JNIEXPORT jint JNICALL JNI(nativeCpuMask)(JNIEnv *env, jclass cls, jint cpus)
     }
     closedir(d);
     return done;
+}
+
+/* Button glyphs of the pad in use: 1 PlayStation, 0 Xbox (older libraries without it: ignored). */
+JNIEXPORT void JNICALL JNI(nativePadGlyphs)(JNIEnv *env, jclass cls, jint playstation)
+{
+    (void)env; (void)cls;
+    if (pad_glyphs) pad_glyphs(playstation);
 }
 
 JNIEXPORT void JNICALL JNI(nativeSetFov)(JNIEnv *env, jclass cls, jint degrees)

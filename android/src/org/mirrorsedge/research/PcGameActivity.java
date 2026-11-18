@@ -48,6 +48,7 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
     private static native void nativeSetFov(int degrees);
     private static native int nativeCpuMask(int cpus);
     private static native void nativeAudioRoute(int mainDevice, int padDevice);
+    private static native void nativePadGlyphs(int playstation);
 
     private final android.media.AudioDeviceCallback audioDevices = new android.media.AudioDeviceCallback() {
         @Override public void onAudioDevicesAdded(android.media.AudioDeviceInfo[] added) { updateAudioRoute(); }
@@ -431,7 +432,8 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
                 InputDevice d = InputDevice.getDevice(id);
                 if (d == null || d.isVirtual() || !Controller.isGamepad(d)) continue;
                 Controller c = Controller.of(d, getSharedPreferences("controllers", MODE_PRIVATE));
-                if (c.kind == Controller.Kind.PLAYSTATION) { env.add("ME_PC_PAD_GLYPHS=ps"); break; }
+                Log.i(TAG, "pad at start: " + d.getName() + ", " + c.kind);
+                if (c.kind == Controller.Kind.PLAYSTATION) { env.add("ME_PC_PAD_GLYPHS=ps"); glyphsPs = true; break; }
                 // Swapped by label, the Xbox letters already match the buttons.
                 if (c.kind == Controller.Kind.NINTENDO) { if (!c.swapFace) env.add("ME_PC_PAD_GLYPHS=nintendo"); break; }
             }
@@ -448,8 +450,12 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
                 if (kv.length == 2) setIni(systemIni, "SystemSettings", kv[0], kv[1]);
             }
         logSystemSettings(systemIni);
-        String extra = getIntent().getStringExtra("env");
-        if (extra != null) for (String item : extra.trim().split("\\s+")) if (item.contains("=")) env.add(item);
+        // "env" replaces the launcher's settings (adb tests); "envAdd" keeps them and adds variables
+        // (diagnostics during normal play, e.g. ME_PC_HITCH=1).
+        for (String key : new String[] {"env", "envAdd"}) {
+            String extra = getIntent().getStringExtra(key);
+            if (extra != null) for (String item : extra.trim().split("\\s+")) if (item.contains("=")) env.add(item);
+        }
         for (String item : env) if (item.startsWith("ME_PC_TOUCH=")) touchMode = item.endsWith("=1") ? 1 : 0;
         for (String item : env) if (item.startsWith("ME_PC_AB=")) powerLog(item.substring(9));
         String[] args = {new File(game, "Binaries").getPath(), deps.getPath(), user.getPath()};
@@ -563,9 +569,24 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
         for (int slot = 0; slot < 4; slot++) {  // the lowest free one: the game itself only reads the first
             if (padIndex.indexOfValue(slot) >= 0) continue;
             padIndex.put(id, slot);
+            if (slot == 0) followGlyphs(id);
             return slot;
         }
         return -1;
+    }
+
+    /** PlayStation button glyphs in the game while the first pad is a PlayStation one (a pad
+     *  connected during play too); Xbox glyphs otherwise. Set at start from the pad then connected. */
+    private boolean glyphsPs;
+
+    private void followGlyphs(int id) {
+        InputDevice d = InputDevice.getDevice(id);
+        if (d == null) return;
+        boolean ps = controller(d).kind == Controller.Kind.PLAYSTATION;
+        if (ps == glyphsPs) return;
+        glyphsPs = ps;
+        Log.i(TAG, "button glyphs: " + (ps ? "PlayStation" : "Xbox") + " (" + d.getName() + ")");
+        try { nativePadGlyphs(ps ? 1 : 0); } catch (UnsatisfiedLinkError ignored) { }
     }
 
     /** A pad that went away frees its slot, and nothing it was holding stays pressed. */
