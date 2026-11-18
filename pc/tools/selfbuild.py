@@ -147,6 +147,10 @@ def main():
     rebased = os.path.join(deps, "rebased")
     for folder in (pc_bin, rebased, os.path.join(work, "work", "pc-recomp")):
         os.makedirs(folder, exist_ok=True)
+    # The libraries are ready when this file is there (RunnerBuilder puts them on the device early).
+    ready = os.path.join(deps, ".ready")
+    if os.path.exists(ready):
+        os.remove(ready)
 
     print("[2/6] Preparing the libraries")
     shutil.copyfile(exe, os.path.join(pc_bin, "MirrorsEdge.exe"))
@@ -164,17 +168,33 @@ def main():
         if not os.path.isfile(src):
             fail(f"{name} is missing from {binaries}.")
         place(src, name, base, want)
+    open(ready, "w").close()
 
     bindir = os.path.join(args.toolchain, "bin")
     print("[3/6] Finding the functions of the game (about a minute)")
+    # One process per module, all at once: the game's own catalog is the long one. A catalog made by
+    # another version of the scripts (or of another binary) is made again; see catalog_stamp.
+    def catalog_stamp(binary):
+        h = hashlib.sha256(sha256(os.path.join(work, binary)).encode())
+        for f in ("catalog.py", "x86cfg.py", "pe32.py", "eh.py"):
+            h.update(sha256(os.path.join(HERE, f)).encode())
+        return h.hexdigest()
+
     def catalog(binary, out):
-        if not os.path.isfile(os.path.join(work, out, "catalog.json")):
-            subprocess.run([sys.executable, "-I", os.path.join(HERE, "catalog.py"), binary, "--llvm", bindir, "--out", out],
-                           cwd=work, check=True, stdout=subprocess.DEVNULL)
+        stamp_file = os.path.join(work, out, ".catalog")
+        stamp = catalog_stamp(binary)
+        if os.path.isfile(os.path.join(work, out, "catalog.json")) and os.path.isfile(stamp_file) and \
+                open(stamp_file).read() == stamp:
+            return
+        subprocess.run([sys.executable, "-I", os.path.join(HERE, "catalog.py"), binary, "--llvm", bindir, "--out", out],
+                       cwd=work, check=True, stdout=subprocess.DEVNULL)
+        with open(stamp_file, "w") as f:
+            f.write(stamp)
     recomp = os.path.join("work", "pc-recomp")
-    catalog("work/pc/Binaries/MirrorsEdge.exe", recomp)
-    for tag, binary in CATALOGS:
-        catalog(binary, os.path.join(recomp, tag))
+    import concurrent.futures as cf
+    with cf.ThreadPoolExecutor(len(CATALOGS) + 1) as ex:
+        list(ex.map(lambda item: catalog(*item), [("work/pc/Binaries/MirrorsEdge.exe", recomp)] +
+                    [(binary, os.path.join(recomp, tag)) for tag, binary in CATALOGS]))
 
     print("[4/6] Translating and compiling (5 to 30 minutes, depending on the CPU)")
     subprocess.run([sys.executable, "-I", os.path.join(HERE, "build_pc_runtime.py"), "--toolchain", args.toolchain,

@@ -13,9 +13,21 @@ The app around the game (launcher, runtime, DXVK, controls) is open source and c
 1. Checks `Binaries\MirrorsEdge.exe` (SHA-256 of the supported GOG build).
 2. Downloads what the translation needs, about 100 MB in all: the compiler, linker and Android headers out of Google's Android NDK, and the x86 disassembler (`libLLVM`) out of llvm-mingw. Only those files are taken out of the two archives (`remotezip.py`, about 100 MB of 920): the archive's list of files is checked by SHA-256, every file by its CRC-32.
 3. Finds the Visual C++ 2005 and PhysX 2.8.0 DLLs on the PC, or takes them out of Microsoft's and NVIDIA's installers without running them (`redist.py`).
-4. Translates and compiles the game's code (`selfbuild.py`, see [SELFBUILD.md](SELFBUILD.md)): 5 to 30 minutes.
+4. Translates and compiles the game's code (`selfbuild.py`, see [SELFBUILD.md](SELFBUILD.md)).
 5. Puts the result into the ready-made app and signs it (`apk_pack.py`: no Java and no Android SDK).
-6. Writes the APK, a ZIP of the game files and the instructions to the chosen folder.
+6. Writes the APK and the instructions to the chosen folder, and installs on the device or adds a ZIP of the game files (see below).
+
+Before the build the window asks where the result goes: to a device over USB or Wi-Fi, or only to a folder. With a device, the game files are copied to it **while** the code is being built, and no ZIP is made:
+
+1. As soon as the user's Visual C++ and PhysX libraries are ready (the first seconds of the build), the published app with these libraries but without game code is signed with the user's key and installed (`apk_pack.pack` without `lib`). It already receives files.
+2. The game files go to it (`device.send_game`) while the translation and compilation run.
+3. When the build ends, the finished app is installed over it; the game files and saves stay.
+
+So the whole run takes about as long as the longer of the two, not their sum. These lines of `builder.py` start with `[device] `; the window shows them under the progress bar.
+
+The build is kept in `RunnerBuilder\build` between runs and versions of the program. The lifted C is made again only when the lifter's own files, the binary or its catalog change (a stamp in each generated folder), the catalogs only when their scripts or binary change, and every object only when its source, headers, compiler or flags change (SHA-256 in `<object>.key`, not file dates: each version unpacks the sources anew). An update of the program then builds in a minute or two. `--clean-build` removes the folder after the run.
+
+Times on a 20-thread PC (2026-11-18): a first build in an empty folder 320 s (was about 10 minutes): finding the functions about 1 minute (the game's catalog; the 14 other modules at the same time), translating the game 24 s in parallel processes (was 109 s in one), compiling about 4 minutes. A second run with the same sources but new file dates: 3 s; one runtime file changed: only that object and the link. The longest files are compiled first, and two huge functions that never ran in profiles of a whole chapter are not optimized (`COLD_HUGE` in `gen_module.py`): one of them alone kept clang busy for 2 to 3 minutes at the end of every build.
 
 Everything except the window is Python (standard library only) and reads its formats itself: cabinets with LZX, 7-Zip with LZMA and BCJ2, ZIP ranges over HTTP, PKCS#12 keys with AES, APK Signature Scheme v2. So it needs no tools of the system, which is also what makes it work under Wine and Proton.
 

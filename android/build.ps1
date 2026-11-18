@@ -62,7 +62,7 @@ Remove-Item -Force -ErrorAction SilentlyContinue "$build\res.zip"
 & "$bt\aapt2.exe" compile --dir (Join-Path $root 'res') -o "$build\res.zip"
 Check
 $manifest=$(if ($Manifest) { $Manifest } else { Join-Path $root 'AndroidManifest.xml' })
-& "$bt\aapt2.exe" link "$build\res.zip" -I $android --manifest $manifest --min-sdk-version 26 --target-sdk-version 35 --version-code 12 --version-name '0.3.1' -o "$build\base.apk"
+& "$bt\aapt2.exe" link "$build\res.zip" -I $android --manifest $manifest --min-sdk-version 26 --target-sdk-version 35 --version-code 13 --version-name '0.3.3' -o "$build\base.apk"
 Check
 $nativeLibs = @('lib/arm64-v8a/libmepcjni.so')
 # Earlier extras are not left behind: everything but the libraries below is rebuilt or copied anew.

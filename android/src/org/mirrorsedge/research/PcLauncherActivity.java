@@ -612,6 +612,10 @@ public class PcLauncherActivity extends Activity {
         String name = lang;
         for (String[] l : LANGUAGES) if (l[0].equals(lang)) name = l[1];
         playMeta.setText(ok ? name + Tr.t(" · до ") + prefs().getInt("fps", 62) + Tr.t(" кадров/с · ") + (fov > 0 ? Tr.t("поле зрения ") + fov + "°" : Tr.t("поле зрения как в игре"))
+            : !new File(getApplicationInfo().nativeLibraryDir, "libmepc.so").isFile() && PcSetup.filesReady(pcDir())
+            // RunnerBuilder copies the game files while it still builds the game's code, then installs
+            // the finished app over this one.
+            ? Tr.t("Файлы игры на месте. Код игры ещё собирается на компьютере: RunnerBuilder сам установит его, когда закончит.")
             : Tr.t("Не хватает файлов игры — смотрите раздел «Файлы»"));
         filesText.setText(filesReport());
         if (setup.isBusy()) play.setEnabled(false);

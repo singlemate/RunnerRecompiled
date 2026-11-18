@@ -19,7 +19,7 @@ runtime in this repository, and the graphics go to Vulkan through DXVK.
 **No game files or game code are included or linked.** You need your own copy of the game
 from GOG; other releases do not work.
 
-> **Status: in testing, version 0.3.2.** The game installs, starts, goes through the menus
+> **Status: in testing, version 0.3.3.** The game installs, starts, goes through the menus
 > and has been played through several chapters on a real tablet. Expect bugs, and please
 > [report them](https://github.com/singlemate/RunnerRecompiled/issues/new?template=bug_report.yml).
 
@@ -31,11 +31,12 @@ and about 150 MB of downloads.
 1. Download [RunnerBuilder.exe](https://github.com/singlemate/RunnerRecompiled/releases/latest/download/RunnerBuilder.exe).
    It is not signed, so Windows may warn you the first time.
 2. Choose the folder of the installed game, accept the Android SDK terms and press Build.
-   This takes from 5 to 30 minutes, depending on the CPU.
-3. Press **Install on the device…** to install the APK and copy the game over USB or Wi-Fi
-   debugging (new in 0.3.1, the full copy is not tested yet). Or copy the resulting folder
-   to the device, install the APK and choose `MirrorsEdge-GOG.zip` in the app. The game
-   needs about 12 GB on the device.
+3. Choose where it goes: to your device over USB or Wi-Fi debugging, or to a folder only.
+   With a device, the game files are copied to it while the app is being built, and the app
+   is installed at the end. A first build takes about 5 minutes on a fast PC (up to half an
+   hour on a slow one); building again after an update of the program takes a minute or two.
+   Without a device you get the APK and `MirrorsEdge-GOG.zip`: copy them to the device,
+   install the APK and choose the ZIP in the app. The game needs about 12 GB on the device.
 
 **The result contains code and files from your copy of the game. Keep it to yourself: do not
 publish or share it.**

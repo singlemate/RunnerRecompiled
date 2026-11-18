@@ -9,6 +9,7 @@ Expects catalogs in work/pc-recomp (game: catalog.json; msvcr80/, msvcp80/), the
 work/pc/Binaries and the CRT DLLs in work/pc-deps. Output: work/pc-recomp/bin/me_pc.exe.
 """
 import argparse
+import hashlib
 import concurrent.futures as cf
 import glob
 import os
@@ -69,18 +70,70 @@ def write_module_table(path):
         open(path, "w").write(new)
 
 
+_header_digests = {}
+
+
+def _digest(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def compile_one(cc, src, obj, extra=()):
+    """Compiles src unless obj was made from the same source, headers, compiler and flags.
+
+    By content, not by date: RunnerBuilder unpacks the sources anew for every version of the program,
+    with new dates, and the lifted C of the game (520 MB, minutes of clang) rarely changes. The
+    object's key (SHA-256 of all of these) is kept next to it in <obj>.key."""
     # headers every file depends on (runtime files also on rt.h and the D3D9 bridge headers)
-    headers = ["x86rt.h"] + (["rt.h", "rt_d3d9.h", "rt_d3d9_idx.h"]
-                             if os.path.dirname(os.path.abspath(src)) == RUNTIME else [])
-    if os.path.exists(obj) and os.path.getmtime(obj) >= os.path.getmtime(src) and \
-            all(os.path.getmtime(obj) >= os.path.getmtime(os.path.join(RUNTIME, h)) for h in headers):
-        return obj, None
+    headers = ["x86rt.h", "x86rt_module.h"] + (["rt.h", "rt_d3d9.h", "rt_d3d9_idx.h"]
+                                               if os.path.dirname(os.path.abspath(src)) == RUNTIME else [])
     flags = list(extra)
     if os.path.basename(src) == "rt_main.c" and "-fPIC" in flags:
         flags.append("-Dmain=me_pc_main")  # Android: a library entry the app calls on its thread
+    key = hashlib.sha256()
+    key.update(repr((os.path.basename(cc), CFLAGS, flags)).encode())
+    for h in headers:
+        hp = os.path.join(RUNTIME, h)
+        if os.path.exists(hp):
+            if hp not in _header_digests:
+                _header_digests[hp] = _digest(hp)
+            key.update(_header_digests[hp].encode())
+    key.update(_digest(src).encode())
+    key = key.hexdigest()
+    key_file = obj + ".key"
+    if os.path.exists(obj) and os.path.exists(key_file) and open(key_file).read() == key:
+        return obj, None
     r = subprocess.run([cc, *CFLAGS, *flags, "-I", RUNTIME, "-c", src, "-o", obj], capture_output=True, text=True)
-    return obj, (r.stderr if r.returncode else None)
+    if r.returncode:
+        return obj, r.stderr
+    with open(key_file, "w") as f:
+        f.write(key)
+    return obj, None
+
+
+# The lifter's own files: lifted C made by another version of them is made again (the generated
+# folder keeps the stamp of what made it, see lifter_stamp).
+LIFTER_FILES = ("lift.py", "gen_module.py", "xflags.py", "eh.py", "pe32.py", "x86cfg.py")
+
+
+def lifter_stamp(binary, catalog):
+    h = hashlib.sha256()
+    for f in LIFTER_FILES:
+        h.update(_digest(os.path.join(HERE, f)).encode())
+    for path in (binary, catalog):
+        h.update(_digest(path).encode() if os.path.exists(path) else b"-")
+    return h.hexdigest()
+
+
+def cost(job):
+    """A rough compile time, so that the longest files start first and none is left alone at the
+    end: the size of the source, and PhysX's x87 code in registers (MODULE_FLAGS) about 4 times
+    slower per byte."""
+    size = os.path.getsize(job[0])
+    return size * (4 if len(job) > 2 and job[2] else 1)
 
 
 def main():
@@ -118,9 +171,16 @@ def main():
     regen = set(args.regen_only.split(",")) if args.regen_only else None
     for name, binary, cat, *_ in MODULES:
         out = os.path.join(gen_root, name)
-        if args.regen or (regen and name in regen) or not os.path.exists(os.path.join(out, f"dispatch_{name}.c")):
+        stamp_file = os.path.join(out, ".lifter")
+        stamp = lifter_stamp(binary, os.path.join(args.work, cat))
+        current = os.path.exists(os.path.join(out, f"dispatch_{name}.c")) and os.path.exists(stamp_file) and \
+            open(stamp_file).read() == stamp
+        if args.regen or (regen and name in regen) or not current:
             subprocess.run([sys.executable, "-I", os.path.join(HERE, "gen_module.py"), binary, "--llvm", bindir,
-                            "--catalog", os.path.join(args.work, cat), "--name", name, "--out", out], check=True)
+                            "--catalog", os.path.join(args.work, cat), "--name", name, "--out", out,
+                            "--jobs", str(args.jobs)], check=True)
+            with open(stamp_file, "w") as f:
+                f.write(stamp)
 
     os.makedirs(gen_root, exist_ok=True)
     write_module_table(os.path.join(gen_root, "rt_modules_gen.c"))
@@ -140,11 +200,14 @@ def main():
 
     errors = 0
     with cf.ThreadPoolExecutor(args.jobs) as ex:
-        for i, (obj, err) in enumerate(ex.map(lambda j: compile_one(cc, j[0], j[1], tuple(extra) + (j[2] if len(j) > 2 else ())), jobs)):
+        futures = [ex.submit(compile_one, cc, j[0], j[1], tuple(extra) + (j[2] if len(j) > 2 else ()))
+                   for j in sorted(jobs, key=cost, reverse=True)]
+        for i, fut in enumerate(cf.as_completed(futures)):
+            obj, err = fut.result()
             if err:
                 errors += 1
                 print(f"error in {obj}:\n{err[:3000]}")
-            if (i + 1) % 5 == 0:
+            if (i + 1) % 5 == 0 or i + 1 == len(jobs):
                 print(f"compiled {i + 1}/{len(jobs)} ({time.time() - t0:.0f} s)", flush=True)
     if errors:
         sys.exit(f"{errors} files failed to compile")

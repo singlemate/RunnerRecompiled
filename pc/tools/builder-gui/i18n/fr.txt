@@ -94,3 +94,11 @@ README	Mirror's Edge pour Android, préparé à partir de votre copie du jeu\n\n
 Для сопряжения нужен код с экрана устройства.	L'association demande le code affiché sur l'appareil.
 Сопряжение не удалось: проверьте адрес, порт и код. Код действует, пока открыто окно сопряжения на устройстве.	Échec de l'association : vérifiez l'adresse, le port et le code. Le code n'est valable que tant que la fenêtre d'association est ouverte sur l'appareil.
 Не удалось подключиться к {address}. Устройство и компьютер должны быть в одной сети Wi-Fi, а адрес и порт — с экрана «Отладка по Wi-Fi» (порт меняется при каждом включении).	Impossible de se connecter à {address}. L'appareil et l'ordinateur doivent être sur le même réseau Wi-Fi, et l'adresse et le port doivent venir de l'écran « Débogage sans fil » (le port change à chaque activation).
+Устройство: 	Appareil : 
+Куда установить	Où installer
+Если устройство подключено, файлы игры поедут на него, пока собирается приложение, и всё закончится быстрее. 	Si un appareil est connecté, les fichiers du jeu y sont copiés pendant la création de l'application, et tout se termine plus tôt. 
+Без устройства: только папка с APK и ZIP игры	Sans appareil : seulement un dossier avec l'APK et un ZIP du jeu
+Скопируете на устройство сами или установите потом кнопкой «Установить на устройство…». Нужно ещё около 12 ГБ на диске для ZIP.	Copiez-le vous-même sur l'appareil ou installez plus tard avec « Installer sur l'appareil… ». Le ZIP demande environ 12 Go de plus sur le disque.
+Ожидание копирования на устройство	Attente de la copie vers l'appareil
+Копирование закончено, ждёт сборки приложения	Copie terminée, en attente de l'application
+Приложение собрано, но установить его на устройство не удалось (причина выше). Нажмите «Установить на устройство…», чтобы повторить без новой сборки.	L'application est créée, mais son installation sur l'appareil a échoué (raison ci-dessus). Appuyez sur « Installer sur l'appareil… » pour réessayer sans tout recréer.

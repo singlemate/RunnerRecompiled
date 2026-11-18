@@ -16,6 +16,7 @@ import re
 import shutil
 import sys
 import subprocess
+import threading
 import urllib.request
 import zipfile
 
@@ -238,13 +239,64 @@ def zip_game(game, target):
     os.replace(tmp, target)
 
 
+class DeviceJob(threading.Thread):
+    """Puts the app on the device while the game code is being built: the user's own libraries in the
+    published app first (no game code: the build has not made it yet), then the game files through it,
+    and the finished app over it at the end. Runs beside selfbuild.py; its lines start with
+    device.PREFIX."""
+
+    def __init__(self, args, home, game, workspace, shell, key, final, built):
+        super().__init__(daemon=True)
+        self.args, self.home, self.game, self.workspace = args, home, game, workspace
+        self.shell, self.key, self.final, self.built = shell, key, final, built
+        self.ok = self.ok_build = False
+
+    def run(self):
+        import device
+        device.PREFIX = "[device] "
+        try:
+            a = self.args
+            adb = device.open_device(self.home, None, a.serial, a.pair, a.code, a.connect)
+            deps = os.path.join(self.workspace, "work", "pc-deps")
+            ready = os.path.join(deps, ".ready")
+            while not os.path.exists(ready):  # selfbuild.py makes the libraries in its first seconds
+                if self.built.wait(1):
+                    if not os.path.exists(ready):
+                        return
+            import apk_pack
+            first = os.path.join(self.workspace, "RunnerRecompiled-first.apk")
+            apk_pack.pack(self.shell, None, deps, self.key, first)
+            device.install(adb, first)
+            device.send_game(adb, self.game)
+            device.say(t("Копирование закончено, ждёт сборки приложения"))
+            self.built.wait()
+            if not os.path.isfile(self.final):
+                return
+            device.install(adb, self.final)
+            device.say(t("Готово: откройте приложение на устройстве"))
+            self.ok = True
+        except SystemExit:
+            pass  # stop() printed the reason
+        except Exception as e:  # noqa: BLE001 - shown to the user, the build goes on
+            print(f"{device.PREFIX}{t('ОШИБКА: {text}', text=e)}", flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--game", required=True, help="папка установленной игры из GOG")
     ap.add_argument("--out", required=True, help="куда положить готовые файлы")
     ap.add_argument("--home", required=True, help="папка инструментов, ключа и промежуточной сборки")
     ap.add_argument("--accept-android-terms", action="store_true", help="условия Android SDK приняты")
-    ap.add_argument("--keep-build", action="store_true", help="не удалять промежуточную сборку")
+    ap.add_argument("--keep-build", action="store_true", help="(прежний параметр, сборка теперь хранится всегда)")
+    ap.add_argument("--clean-build", action="store_true", help="удалить промежуточную сборку после завершения")
+    # Install on a device while building: the game files go to it during the translation and
+    # compilation, the finished app is installed over the first one at the end. No ZIP then.
+    ap.add_argument("--device", action="store_true", help="сразу установить на устройство (USB или Wi-Fi)")
+    ap.add_argument("--pair", help="адрес и порт сопряжения (отладка по Wi-Fi), вместе с --code")
+    ap.add_argument("--code", help="код сопряжения")
+    ap.add_argument("--connect", help="адрес и порт устройства (отладка по Wi-Fi)")
+    ap.add_argument("--serial", help="устройство из adb devices")
+    ap.add_argument("--zip", action="store_true", help="сделать ZIP игры и при установке на устройство")
     ap.add_argument("--lang", default="ru", help="язык сообщений: ru, en, de, fr, es, pt, pl, zh")
     args = ap.parse_args()
     set_language(args.lang)
@@ -267,30 +319,56 @@ def main():
 
     stage(t("Сборка приложения из вашей копии игры (от 5 минут до получаса)"))
     prebuilt = os.path.join(REPO, "prebuilt")
+    shell = os.path.join(prebuilt, "RunnerRecompiled-shell.apk")
+    # Kept between runs and versions of the program: the lifted code and the compiled objects are
+    # reused by content (build_pc_runtime.py), so an update builds in a minute or two.
     workspace = os.path.join(home, "build")
     # Keep the key of earlier builds (keytool), so that a new APK installs over the old one.
     key = os.path.join(home, "personal-key.p12")
     if not os.path.isfile(key):
         key = os.path.join(home, "personal-key.json")
-    subprocess.run([sys.executable, "-I", "-X", "utf8", "-u", os.path.join(HERE, "selfbuild.py"), "--game", game,
-                    *(["--crt", crt] if crt else []), *(["--physx", physx] if physx else []),
-                    "--shell", os.path.join(prebuilt, "RunnerRecompiled-shell.apk"),
-                    "--toolchain", os.path.join(tools, "llvm-mingw"), "--ndk", os.path.join(tools, "android-ndk"),
-                    "--workspace", workspace, "--keystore", key], check=True)
+    if not os.path.isfile(key):
+        import apk_pack  # the key must exist before the first app goes to the device
+        apk_pack.load_key(key)
+    final = os.path.join(workspace, "RunnerRecompiled-pc-personal.apk")
+    built = threading.Event()
+    device_job = None
+    if args.device:
+        device_job = DeviceJob(args, home, game, workspace, shell, key, final, built)
+        device_job.start()
+    try:
+        subprocess.run([sys.executable, "-I", "-X", "utf8", "-u", os.path.join(HERE, "selfbuild.py"), "--game", game,
+                        *(["--crt", crt] if crt else []), *(["--physx", physx] if physx else []),
+                        "--shell", shell,
+                        "--toolchain", os.path.join(tools, "llvm-mingw"), "--ndk", os.path.join(tools, "android-ndk"),
+                        "--workspace", workspace, "--keystore", key], check=True)
+    finally:
+        built.set()
+    if device_job:
+        device_job.ok_build = True
 
     stage(t("Подготовка папки для устройства"))
-    shutil.copyfile(os.path.join(workspace, "RunnerRecompiled-pc-personal.apk"),
-                    os.path.join(out, "RunnerRecompiled-pc-personal.apk"))
-    zip_game(game, os.path.join(out, "MirrorsEdge-GOG.zip"))
+    shutil.copyfile(final, os.path.join(out, "RunnerRecompiled-pc-personal.apk"))
+    if device_job:
+        if device_job.is_alive():
+            stage(t("Ожидание копирования на устройство"))
+        device_job.join()
+    if not args.device or args.zip:
+        zip_game(game, os.path.join(out, "MirrorsEdge-GOG.zip"))
     for name in os.listdir(prebuilt):
         if name.startswith("turnip-") and name.endswith(".zip"):
             shutil.copyfile(os.path.join(prebuilt, name), os.path.join(out, name))
     with open(os.path.join(out, t("КАК УСТАНОВИТЬ.txt")), "w", encoding="utf-8-sig", newline="\r\n") as f:
         f.write(README if LANG == "ru" else t("README"))
-    if not args.keep_build:
+    if args.clean_build:
         shutil.rmtree(workspace, ignore_errors=True)
+    if device_job and not device_job.ok:
+        stop(t("Приложение собрано, но установить его на устройство не удалось (причина выше). "
+               "Нажмите «Установить на устройство…», чтобы повторить без новой сборки."))
     stage(t("Готово"))
     print(f"DONE {out}", flush=True)
+    if device_job:
+        print("INSTALLED", flush=True)
 
 
 if __name__ == "__main__":

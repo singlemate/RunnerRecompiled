@@ -1,5 +1,5 @@
 {
-  "versionCode": 7,
-  "versionName": "0.3.2",
-  "notes": "Texts say \"device\" instead of \"tablet\": installing works on phones too. A typo fixed."
+  "versionCode": 8,
+  "versionName": "0.3.3",
+  "notes": "Much faster: the game is copied to the device while it builds, a first build takes about 5 minutes on a fast PC, and an update of the program about a minute."
 }

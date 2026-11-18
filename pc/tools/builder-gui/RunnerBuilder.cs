@@ -7,6 +7,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Net;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -14,7 +15,7 @@ using System.Threading;
 using System.Windows.Forms;
 
 [assembly: AssemblyTitle("RunnerBuilder")]
-[assembly: AssemblyVersion("0.3.2.0")]
+[assembly: AssemblyVersion("0.3.3.0")]
 
 /* Interface language: the Russian source text is the key into the embedded tables (i18n_<lang>). */
 static class Lang {
@@ -48,9 +49,25 @@ static class Lang {
     }
 }
 
+/* Sharp on high-DPI screens: the process says it draws for the system DPI itself (otherwise Windows
+   draws the window at 96 DPI and stretches the picture, which blurs the text), and every pixel size
+   in this file goes through D. Fonts are in points and follow the DPI by themselves. */
+static class Ui {
+    [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
+    public static float Scale = 1f;
+
+    public static void Init() {
+        try { SetProcessDPIAware(); } catch (Exception) { }  // Windows Vista and later; Wine has it too
+        try { using (var g = Graphics.FromHwnd(IntPtr.Zero)) Scale = Math.Max(1f, g.DpiX / 96f); } catch (Exception) { }
+    }
+
+    public static int D(int px) { return (int)Math.Round(px * Scale); }
+}
+
 static class Program {
     [STAThread]
     static void Main(string[] args) {
+        Ui.Init();
         ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
@@ -68,7 +85,7 @@ sealed class Meter : Control {
 
     public void Advance() {
         if (!Running || percent >= 0) return;
-        phase = (phase + 6) % (Width + 160);
+        phase = (phase + Ui.D(6)) % (Width + Ui.D(160));
         Invalidate();
     }
 
@@ -76,14 +93,14 @@ sealed class Meter : Control {
         using (var track = new SolidBrush(Color.FromArgb(0xE8, 0xEC, 0xEF))) e.Graphics.FillRectangle(track, ClientRectangle);
         using (var red = new SolidBrush(Color.FromArgb(0xE2, 0x4B, 0x4A))) {
             if (percent >= 0) e.Graphics.FillRectangle(red, 0, 0, Math.Min(percent, 100) * Width / 100, Height);
-            else if (Running) e.Graphics.FillRectangle(red, phase - 160, 0, 160, Height);
+            else if (Running) e.Graphics.FillRectangle(red, phase - Ui.D(160), 0, Ui.D(160), Height);
         }
     }
 }
 
 sealed class BuilderForm : Form {
-    const int VersionCode = 7;
-    const string VersionName = "0.3.2";
+    const int VersionCode = 8;
+    const string VersionName = "0.3.3";
     const string UpdateUrl = "https://raw.githubusercontent.com/singlemate/RunnerRecompiled/main/version-builder.json";
     const string ProjectUrl = "https://github.com/singlemate/RunnerRecompiled";
     const string TermsUrl = "https://developer.android.com/studio/terms";
@@ -102,6 +119,9 @@ sealed class BuilderForm : Form {
     string doneFolder;
     // The current run: a build (builder.py) or an install on the tablet (device.py).
     bool installing, installed;
+    // The build installs on a device as it goes (builder.py --device).
+    bool buildToDevice;
+    readonly Label deviceStatus = new Label();
     // For tests: RunnerBuilder.exe --auto <game> <out> <log> presses Build and leaves when it ends.
     string autoLog;
 
@@ -118,7 +138,7 @@ sealed class BuilderForm : Form {
         Muted = Color.FromArgb(0x6A, 0x76, 0x80), Rule = Color.FromArgb(0xE8, 0xEC, 0xEF), Red = Color.FromArgb(0xE2, 0x4B, 0x4A);
 
     static Label Kicker(string text) {
-        return new Label { Text = text, AutoSize = true, ForeColor = Red, Font = new Font("Segoe UI", 8.5f, FontStyle.Bold), Margin = new Padding(0, 14, 0, 6) };
+        return new Label { Text = text, AutoSize = true, ForeColor = Red, Font = new Font("Segoe UI", 8.5f, FontStyle.Bold), Margin = new Padding(0, Ui.D(14), 0, Ui.D(6)) };
     }
 
     static void Flat(Button b, bool primary) {
@@ -136,16 +156,16 @@ sealed class BuilderForm : Form {
 
     public BuilderForm(string[] args) {
         Text = "RunnerBuilder " + VersionName;
-        ClientSize = new Size(760, 640);
-        MinimumSize = new Size(660, 560);
+        ClientSize = new Size(Ui.D(760), Ui.D(640));
+        MinimumSize = new Size(Ui.D(660), Ui.D(560));
         Font = new Font("Segoe UI", 10f);
         BackColor = Paper;
         ForeColor = Ink;
-        AutoScaleMode = AutoScaleMode.Dpi;
+        AutoScaleMode = AutoScaleMode.None;
         StartPosition = FormStartPosition.CenterScreen;
         try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch (Exception) { }
 
-        var table = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(26, 6, 26, 20), ColumnCount = 3, RowCount = 11 };
+        var table = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(Ui.D(26), Ui.D(6), Ui.D(26), Ui.D(20)), ColumnCount = 3, RowCount = 11 };
         table.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         table.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -153,7 +173,7 @@ sealed class BuilderForm : Form {
         table.RowStyles[9] = new RowStyle(SizeType.Percent, 100);
 
         var intro = new Label {
-            AutoSize = true, Margin = new Padding(0, 0, 0, 4), MaximumSize = new Size(700, 0), ForeColor = Muted,
+            AutoSize = true, Margin = new Padding(0, 0, 0, Ui.D(4)), MaximumSize = new Size(Ui.D(700), 0), ForeColor = Muted,
             Text = Lang.T("Программа соберёт приложение для Android из вашей лицензионной копии Mirror's Edge из GOG ") +
                    Lang.T("и подготовит папку, которую останется скопировать на устройство.")
         };
@@ -169,14 +189,14 @@ sealed class BuilderForm : Form {
         terms.Text = Lang.T("Принимаю условия Android SDK");
         terms.AutoSize = true;
         terms.FlatStyle = FlatStyle.Flat;
-        terms.Margin = new Padding(0, 10, 0, 0);
+        terms.Margin = new Padding(0, Ui.D(10), 0, 0);
         table.Controls.Add(terms, 0, 4); table.SetColumnSpan(terms, 2);
-        var link = new LinkLabel { Text = Lang.T("Прочитать"), AutoSize = true, Margin = new Padding(0, 12, 0, 0), LinkColor = Red, ActiveLinkColor = Ink, VisitedLinkColor = Red };
+        var link = new LinkLabel { Text = Lang.T("Прочитать"), AutoSize = true, Margin = new Padding(0, Ui.D(12), 0, 0), LinkColor = Red, ActiveLinkColor = Ink, VisitedLinkColor = Red };
         link.LinkClicked += delegate { Process.Start(TermsUrl); };
         table.Controls.Add(link, 2, 4);
 
         var note = new Label {
-            AutoSize = true, Margin = new Padding(0, 8, 0, 0), MaximumSize = new Size(700, 0), ForeColor = Muted, Font = new Font("Segoe UI", 9f),
+            AutoSize = true, Margin = new Padding(0, Ui.D(8), 0, 0), MaximumSize = new Size(Ui.D(700), 0), ForeColor = Muted, Font = new Font("Segoe UI", 9f),
             Text = Lang.T("Понадобится около 16 ГБ на диске и около 150 МБ интернета. Результат содержит данные вашей копии игры: не публикуйте и не передавайте его.")
         };
         table.Controls.Add(note, 0, 5); table.SetColumnSpan(note, 3);
@@ -186,8 +206,8 @@ sealed class BuilderForm : Form {
 
         start.Text = Lang.T("Собрать");
         Flat(start, true);
-        start.Padding = new Padding(26, 6, 26, 6);
-        start.Margin = new Padding(0, 0, 16, 0);
+        start.Padding = new Padding(Ui.D(26), Ui.D(6), Ui.D(26), Ui.D(6));
+        start.Margin = new Padding(0, 0, Ui.D(16), 0);
         start.Font = new Font("Segoe UI", 10f, FontStyle.Bold);
         start.Click += delegate { StartBuild(); };
         table.Controls.Add(start, 0, 7);
@@ -196,20 +216,27 @@ sealed class BuilderForm : Form {
         elapsed.AutoSize = true; elapsed.Anchor = AnchorStyles.Right; elapsed.ForeColor = Muted; elapsed.Font = new Font("Consolas", 11f);
         table.Controls.Add(elapsed, 2, 7);
 
-        meter.Dock = DockStyle.Fill; meter.Height = 8; meter.Margin = new Padding(0, 12, 0, 12);
-        table.Controls.Add(meter, 0, 8); table.SetColumnSpan(meter, 3);
+        meter.Dock = DockStyle.Fill; meter.Height = Ui.D(8); meter.Margin = new Padding(0, Ui.D(12), 0, Ui.D(12));
+        deviceStatus.AutoSize = true; deviceStatus.ForeColor = Muted; deviceStatus.Visible = false;
+        deviceStatus.Margin = new Padding(0, 0, 0, Ui.D(8));
+        var meterRow = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, WrapContents = false,
+                                             Dock = DockStyle.Fill, Margin = new Padding(0) };
+        meterRow.Controls.Add(meter);
+        meterRow.Controls.Add(deviceStatus);
+        meterRow.Resize += delegate { meter.Width = meterRow.ClientSize.Width; };
+        table.Controls.Add(meterRow, 0, 8); table.SetColumnSpan(meterRow, 3);
 
         log.Multiline = true; log.ReadOnly = true; log.ScrollBars = ScrollBars.Vertical; log.Dock = DockStyle.Fill; log.Margin = new Padding(0);
         log.BackColor = Color.White; log.ForeColor = Muted; log.BorderStyle = BorderStyle.FixedSingle; log.Font = new Font("Consolas", 9f);
         table.Controls.Add(log, 0, 9); table.SetColumnSpan(log, 3);
 
         openOut.Text = Lang.T("Открыть папку с результатом"); Flat(openOut, false); openOut.Visible = false;
-        openOut.Padding = new Padding(10, 3, 10, 3);
-        openOut.Margin = new Padding(0, 12, 12, 0);
+        openOut.Padding = new Padding(Ui.D(10), Ui.D(3), Ui.D(10), Ui.D(3));
+        openOut.Margin = new Padding(0, Ui.D(12), Ui.D(12), 0);
         openOut.Click += delegate { Process.Start("explorer.exe", "\"" + doneFolder + "\""); };
         install.Text = Lang.T("Установить на устройство…"); Flat(install, true);
-        install.Padding = new Padding(10, 3, 10, 3);
-        install.Margin = new Padding(0, 12, 0, 0);
+        install.Padding = new Padding(Ui.D(10), Ui.D(3), Ui.D(10), Ui.D(3));
+        install.Margin = new Padding(0, Ui.D(12), 0, 0);
         install.Click += delegate { StartInstall(); };
         var after = new FlowLayoutPanel { AutoSize = true, Margin = new Padding(0), WrapContents = false };
         after.Controls.Add(install);
@@ -218,7 +245,7 @@ sealed class BuilderForm : Form {
         output.TextChanged += delegate { UpdateInstall(); };
         UpdateInstall();
 
-        var header = new Panel { Dock = DockStyle.Top, Height = 84, BackColor = Paper };
+        var header = new Panel { Dock = DockStyle.Top, Height = Ui.D(84), BackColor = Paper };
         header.Paint += PaintHeader;
         header.Resize += delegate { header.Invalidate(); };
 
@@ -246,26 +273,26 @@ sealed class BuilderForm : Form {
         g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
         int w = ((Control)sender).ClientSize.Width, h = ((Control)sender).ClientSize.Height;
         using (var red = new SolidBrush(Red))
-            g.FillPolygon(red, new[] { new Point(w - 190, h), new Point(w - 150, h), new Point(w, h - 62), new Point(w, h - 40 - 62) });
+            g.FillPolygon(red, new[] { new Point(w - Ui.D(190), h), new Point(w - Ui.D(150), h), new Point(w, h - Ui.D(62)), new Point(w, h - Ui.D(40) - Ui.D(62)) });
         using (var big = new Font("Segoe UI", 21f, FontStyle.Bold))
         using (var small = new Font("Segoe UI", 9f))
         using (var ink = new SolidBrush(Ink)) using (var red = new SolidBrush(Red)) using (var muted = new SolidBrush(Muted)) {
-            float x = 24, y = 20;
+            float x = Ui.D(24), y = Ui.D(20);
             foreach (var part in new[] { Tuple.Create("RUNNER", ink), Tuple.Create("/", red), Tuple.Create("BUILDER", ink) }) {
                 g.DrawString(part.Item1, big, part.Item2, x, y, StringFormat.GenericTypographic);
                 x += g.MeasureString(part.Item1, big, 1000, StringFormat.GenericTypographic).Width + 1;
             }
-            g.DrawString(VersionName, small, muted, x + 10, y + 15, StringFormat.GenericTypographic);
+            g.DrawString(VersionName, small, muted, x + Ui.D(10), y + Ui.D(15), StringFormat.GenericTypographic);
         }
     }
 
     void AddPathRow(TableLayoutPanel table, int row, string caption, TextBox box, string prompt) {
-        table.Controls.Add(new Label { Text = caption, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, 12, 0) }, 0, row);
-        box.Dock = DockStyle.Fill; box.Margin = new Padding(0, 4, 8, 4); box.BorderStyle = BorderStyle.FixedSingle; box.BackColor = Color.White;
+        table.Controls.Add(new Label { Text = caption, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, Ui.D(6), Ui.D(12), 0) }, 0, row);
+        box.Dock = DockStyle.Fill; box.Margin = new Padding(0, Ui.D(4), Ui.D(8), Ui.D(4)); box.BorderStyle = BorderStyle.FixedSingle; box.BackColor = Color.White;
         table.Controls.Add(box, 1, row);
-        var browse = new Button { Text = Lang.T("Обзор…"), Margin = new Padding(0, 2, 0, 2) };
+        var browse = new Button { Text = Lang.T("Обзор…"), Margin = new Padding(0, Ui.D(2), 0, Ui.D(2)) };
         Flat(browse, false);
-        browse.Padding = new Padding(8, 0, 8, 0);
+        browse.Padding = new Padding(Ui.D(8), 0, Ui.D(8), 0);
         browse.Click += delegate {
             using (var d = new FolderBrowserDialog { Description = prompt, SelectedPath = box.Text })
                 if (d.ShowDialog(this) == DialogResult.OK) box.Text = d.SelectedPath;
@@ -299,13 +326,22 @@ sealed class BuilderForm : Form {
         }
         if (o.Length == 0) { MessageBox.Show(this, Lang.T("Укажите, куда сохранить результат."), Text); return; }
         if (!terms.Checked) { MessageBox.Show(this, Lang.T("Для скачивания инструментов Google нужно принять условия Android SDK."), Text); return; }
-        installing = false;
+        // Where the result goes: straight to a device (the game files are copied while the code is
+        // being built, no ZIP), or a folder with a ZIP to copy by hand.
+        string target;
+        using (var d = new InstallDialog(true)) {
+            if (d.ShowDialog(this) != DialogResult.OK) return;
+            target = d.Arguments(Quote);
+            buildToDevice = d.ToDevice;
+        }
+        installing = false; installed = false;
+        deviceStatus.Text = ""; deviceStatus.Visible = buildToDevice;
         start.Enabled = false; start.BackColor = Rule; start.FlatAppearance.BorderColor = Rule; install.Enabled = false;
         openOut.Visible = false; log.Clear(); doneFolder = null;
         meter.Percent = -1;
         meter.Running = true;
         clock.Restart();
-        new Thread(() => Build(g, o)) { IsBackground = true }.Start();
+        new Thread(() => Build(g, o, target)) { IsBackground = true }.Start();
     }
 
     string Apk { get { return Path.Combine(output.Text.Trim(), "RunnerRecompiled-pc-personal.apk"); } }
@@ -326,7 +362,7 @@ sealed class BuilderForm : Form {
             return;
         }
         string extra;
-        using (var d = new InstallDialog()) {
+        using (var d = new InstallDialog(false)) {
             if (d.ShowDialog(this) != DialogResult.OK) return;
             extra = d.Arguments(Quote);
         }
@@ -340,8 +376,8 @@ sealed class BuilderForm : Form {
         new Thread(() => Run("device.py", args)) { IsBackground = true }.Start();
     }
 
-    void Build(string g, string o) {
-        Run("builder.py", " --game " + Quote(g) + " --out " + Quote(o) + " --accept-android-terms");
+    void Build(string g, string o, string target) {
+        Run("builder.py", " --game " + Quote(g) + " --out " + Quote(o) + " --accept-android-terms" + target);
     }
 
     void Run(string script, string args) {
@@ -416,6 +452,14 @@ sealed class BuilderForm : Form {
             if (text.StartsWith("DONE ")) { doneFolder = text.Substring(5); return; }
             if (text == "INSTALLED") { installed = true; return; }
             Match m;
+            if (text.StartsWith("[device] ")) {
+                // The install that runs beside the build: its own line, the build keeps the meter.
+                string d = text.Substring(9);
+                if ((m = Regex.Match(d, @"(\d+)%$")).Success || !d.StartsWith(" "))
+                    deviceStatus.Text = Lang.T("Устройство: ") + d.Trim();
+                log.AppendText(text + Environment.NewLine);
+                return;
+            }
             if (text.StartsWith("== ")) { status.Text = text.Substring(3); meter.Percent = -1; }
             else if ((m = Regex.Match(text, @"^lifted (\d+)/(\d+) (\w+)")).Success) {
                 // Translating is about a third of the work and nearly all of it is the game's own module.
@@ -449,7 +493,7 @@ sealed class BuilderForm : Form {
                                               : Lang.T("Установка не удалась. Причина в журнале.");
                 if (!(ok && installed)) log.AppendText(reason + Environment.NewLine);
             } else if (ok && doneFolder != null) {
-                status.Text = Lang.T("Готово");
+                status.Text = buildToDevice && installed ? Lang.T("Готово: откройте приложение на устройстве") : Lang.T("Готово");
                 openOut.Visible = true;
             } else {
                 status.Text = Lang.T("Сборка не удалась. Причина в журнале.");
@@ -473,27 +517,31 @@ sealed class BuilderForm : Form {
 
 /* How to reach the tablet: a USB cable, or Wi-Fi debugging (pairing code once, then address and port). */
 sealed class InstallDialog : Form {
-    readonly RadioButton usb = new RadioButton(), wifi = new RadioButton();
+    readonly RadioButton usb = new RadioButton(), wifi = new RadioButton(), folder = new RadioButton();
+    readonly bool forBuild;
+    public bool ToDevice { get { return !folder.Checked; } }
     readonly TextBox pair = new TextBox(), code = new TextBox(), connect = new TextBox();
     readonly Panel wifiBox = new Panel();
 
     static Label Note(string text) {
-        return new Label { Text = text, AutoSize = true, MaximumSize = new Size(500, 0), ForeColor = Color.FromArgb(0x6A, 0x76, 0x80),
-                           Margin = new Padding(22, 0, 0, 8), Font = new Font("Segoe UI", 9f) };
+        return new Label { Text = text, AutoSize = true, MaximumSize = new Size(Ui.D(500), 0), ForeColor = Color.FromArgb(0x6A, 0x76, 0x80),
+                           Margin = new Padding(Ui.D(22), 0, 0, Ui.D(8)), Font = new Font("Segoe UI", 9f) };
     }
 
-    public InstallDialog() {
-        Text = Lang.T("Установка на устройство");
+    // forBuild: asked before a build, with a third choice (no device: a folder with a ZIP).
+    public InstallDialog(bool forBuild) {
+        this.forBuild = forBuild;
+        Text = forBuild ? Lang.T("Куда установить") : Lang.T("Установка на устройство");
         Font = new Font("Segoe UI", 10f);
         BackColor = Color.FromArgb(0xF7, 0xF8, 0xF9);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = MinimizeBox = false;
         StartPosition = FormStartPosition.CenterParent;
         AutoSize = true; AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        AutoScaleMode = AutoScaleMode.Dpi;
-        Padding = new Padding(18);
+        AutoScaleMode = AutoScaleMode.None;
+        Padding = new Padding(Ui.D(18));
         var flow = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, WrapContents = false };
-        flow.Controls.Add(new Label { AutoSize = true, MaximumSize = new Size(520, 0), Margin = new Padding(0, 0, 0, 12),
+        flow.Controls.Add(new Label { AutoSize = true, MaximumSize = new Size(Ui.D(520), 0), Margin = new Padding(0, 0, 0, Ui.D(12)),
             Text = Lang.T("Программа установит приложение и скопирует на устройство файлы игры (около 12 ГБ на устройстве). ") +
                    Lang.T("На устройстве должен быть включён режим разработчика: Настройки → Об устройстве → семь раз нажать «Номер сборки».") });
         usb.Text = Lang.T("По кабелю USB"); usb.AutoSize = true; usb.Checked = true;
@@ -502,7 +550,7 @@ sealed class InstallDialog : Form {
         wifi.Text = Lang.T("По Wi-Fi"); wifi.AutoSize = true;
         flow.Controls.Add(wifi);
         flow.Controls.Add(Note(Lang.T("Включите «Отладку по Wi-Fi» в настройках для разработчиков. Компьютер и устройство должны быть в одной сети.")));
-        var grid = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, Margin = new Padding(22, 0, 0, 0) };
+        var grid = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, Margin = new Padding(Ui.D(22), 0, 0, 0) };
         AddRow(grid, 0, Lang.T("Адрес сопряжения (IP:порт):"), pair);
         AddRow(grid, 1, Lang.T("Код сопряжения:"), code);
         AddRow(grid, 2, Lang.T("Адрес подключения (IP:порт):"), connect);
@@ -510,8 +558,15 @@ sealed class InstallDialog : Form {
         flow.Controls.Add(wifiBox);
         flow.Controls.Add(Note(Lang.T("Адрес и код сопряжения: «Подключить устройство с помощью кода». Если этот компьютер уже сопряжён, оставьте их пустыми. ") +
                                Lang.T("Адрес подключения показан на экране «Отладка по Wi-Fi»; порт меняется при каждом включении.")));
-        var buttons = new FlowLayoutPanel { AutoSize = true, Margin = new Padding(0, 10, 0, 0) };
-        var ok = new Button { Text = Lang.T("Установить"), AutoSize = true, DialogResult = DialogResult.None };
+        if (forBuild) {
+            flow.Controls[0].Text = Lang.T("Если устройство подключено, файлы игры поедут на него, пока собирается приложение, и всё закончится быстрее. ") +
+                                    Lang.T("На устройстве должен быть включён режим разработчика: Настройки → Об устройстве → семь раз нажать «Номер сборки».");
+            folder.Text = Lang.T("Без устройства: только папка с APK и ZIP игры"); folder.AutoSize = true;
+            flow.Controls.Add(folder);
+            flow.Controls.Add(Note(Lang.T("Скопируете на устройство сами или установите потом кнопкой «Установить на устройство…». Нужно ещё около 12 ГБ на диске для ZIP.")));
+        }
+        var buttons = new FlowLayoutPanel { AutoSize = true, Margin = new Padding(0, Ui.D(10), 0, 0) };
+        var ok = new Button { Text = forBuild ? Lang.T("Собрать") : Lang.T("Установить"), AutoSize = true, DialogResult = DialogResult.None };
         var cancel = new Button { Text = Lang.T("Отмена"), AutoSize = true, DialogResult = DialogResult.Cancel };
         ok.Click += delegate {
             if (wifi.Checked && connect.Text.Trim().Length == 0) {
@@ -530,18 +585,20 @@ sealed class InstallDialog : Form {
         Controls.Add(flow);
         AcceptButton = ok; CancelButton = cancel;
         usb.CheckedChanged += delegate { wifiBox.Enabled = wifi.Checked; };
+        wifi.CheckedChanged += delegate { wifiBox.Enabled = wifi.Checked; };
         wifiBox.Enabled = false;
     }
 
     static void AddRow(TableLayoutPanel grid, int row, string caption, TextBox box) {
-        grid.Controls.Add(new Label { Text = caption, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, 10, 0) }, 0, row);
-        box.Width = 200; box.Margin = new Padding(0, 3, 0, 3);
+        grid.Controls.Add(new Label { Text = caption, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, Ui.D(6), Ui.D(10), 0) }, 0, row);
+        box.Width = Ui.D(200); box.Margin = new Padding(0, Ui.D(3), 0, Ui.D(3));
         grid.Controls.Add(box, 1, row);
     }
 
     public string Arguments(Func<string, string> quote) {
-        if (!wifi.Checked) return "";
-        string a = "";
+        if (folder.Checked) return "";
+        string a = forBuild ? " --device" : "";
+        if (!wifi.Checked) return a;
         if (pair.Text.Trim().Length > 0) a += " --pair " + quote(pair.Text.Trim()) + " --code " + quote(code.Text.Trim());
         return a + " --connect " + quote(connect.Text.Trim());
     }

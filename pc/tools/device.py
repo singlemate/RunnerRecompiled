@@ -34,6 +34,16 @@ GAME_DIRS = ("Binaries", "Engine", "TdGame")
 PLATFORM_TOOLS = (builder.GOOGLE + "platform-tools_r37.0.1-win.zip",
                   "3ecd42407d52e5e1eb9d45650b9f59e16e189cb50d35b7ef9f411af5e5b21c0a", "platform-tools/")
 ADB_FILES = r"(adb\.exe|AdbWinApi\.dll|AdbWinUsbApi\.dll)"
+# While RunnerBuilder builds, this runs beside the build in the same output: then every line of it
+# starts with this mark, and the window shows them apart from the build's own stages.
+PREFIX = ""
+
+
+def say(text):
+    if PREFIX:
+        print(PREFIX + text, flush=True)
+    else:
+        stage(text)
 
 
 def ensure_adb(home, override=None):
@@ -47,7 +57,7 @@ def ensure_adb(home, override=None):
         return adb
     if not listing:
         stop(t("В этой сборке программы не указан adb. Сообщите об ошибке."))
-    stage(t("Скачивание adb"))
+    say(t("Скачивание adb"))
     partial = folder + ".part"
     builder.shutil.rmtree(partial, ignore_errors=True)
 
@@ -108,9 +118,9 @@ def choose_device(adb, wanted):
 
 
 def install(adb, apk):
-    stage(t("Установка приложения на устройство"))
+    say(t("Установка приложения на устройство"))
     out = adb.run("install", "-r", apk, check=False, timeout=900)
-    print(out, flush=True)
+    print(PREFIX + out.replace("\n", "\n" + PREFIX), flush=True)
     if "Success" in out:
         return
     if "INSTALL_FAILED_UPDATE_INCOMPATIBLE" in out:
@@ -190,7 +200,7 @@ def connect(port, seconds=60):
 
 
 def send_game(adb, game, test=False):
-    stage(t("Копирование игры на устройство"))
+    say(t("Копирование игры на устройство"))
     files = game_files(game)
     total = sum(size for _, _, size in files)
     # --test-transfer: the app takes the files into a folder of its own and deletes it after counting them.
@@ -219,16 +229,40 @@ def send_game(adb, game, test=False):
                         if percent >= shown + 5:
                             shown = percent - percent % 5
                             speed = done / max(time.monotonic() - started, 0.1) / 2 ** 20
-                            print(t("  копирование, {speed} МБ/с: {p}%", p=shown, speed=f"{speed:.0f}"), flush=True)
+                            print(PREFIX + t("  копирование, {speed} МБ/с: {p}%", p=shown, speed=f"{speed:.0f}"), flush=True)
                 link.reply()
             else:
                 done += size
-        stage(t("Проверка файлов на устройстве"))
+        say(t("Проверка файлов на устройстве"))
         sock.sendall(b"E")
         link.reply()
         sock.close()
     finally:
         adb.run("forward", "--remove", f"tcp:{port}", check=False)
+
+
+def open_device(home, adb_path=None, serial=None, pair=None, code=None, connect=None):
+    """adb (downloaded if needed), the pairing and connection over Wi-Fi if asked, one device chosen."""
+    adb = Adb(ensure_adb(home, adb_path))
+    say(t("Поиск устройства"))
+    adb.run("start-server", timeout=60)
+    if pair:
+        if not code:
+            stop(t("Для сопряжения нужен код с экрана устройства."))
+        out = adb.run("pair", pair.strip(), code.strip(), check=False, timeout=60)
+        print(PREFIX + out, flush=True)
+        if "Successfully paired" not in out:
+            stop(t("Сопряжение не удалось: проверьте адрес, порт и код. Код действует, пока открыто окно сопряжения на устройстве."))
+    if connect:
+        out = adb.run("connect", connect.strip(), check=False, timeout=60)
+        print(PREFIX + out, flush=True)
+        if "connected to" not in out:
+            stop(t("Не удалось подключиться к {address}. Устройство и компьютер должны быть в одной сети Wi-Fi, "
+                   "а адрес и порт — с экрана «Отладка по Wi-Fi» (порт меняется при каждом включении).", address=connect))
+        serial = serial or connect.strip()
+    adb.serial = choose_device(adb, serial)
+    print(f"{PREFIX}device {adb.serial}", flush=True)
+    return adb
 
 
 def main():
@@ -247,26 +281,7 @@ def main():
     args = ap.parse_args()
     builder.set_language(args.lang)
     builder.check_game(os.path.abspath(args.game))
-    adb = Adb(ensure_adb(os.path.abspath(args.home), args.adb))
-    stage(t("Поиск устройства"))
-    adb.run("start-server", timeout=60)
-    serial = args.serial
-    if args.pair:
-        if not args.code:
-            stop(t("Для сопряжения нужен код с экрана устройства."))
-        out = adb.run("pair", args.pair.strip(), args.code.strip(), check=False, timeout=60)
-        print(out, flush=True)
-        if "Successfully paired" not in out:
-            stop(t("Сопряжение не удалось: проверьте адрес, порт и код. Код действует, пока открыто окно сопряжения на устройстве."))
-    if args.connect:
-        out = adb.run("connect", args.connect.strip(), check=False, timeout=60)
-        print(out, flush=True)
-        if "connected to" not in out:
-            stop(t("Не удалось подключиться к {address}. Устройство и компьютер должны быть в одной сети Wi-Fi, "
-                   "а адрес и порт — с экрана «Отладка по Wi-Fi» (порт меняется при каждом включении).", address=args.connect))
-        serial = serial or args.connect.strip()
-    adb.serial = choose_device(adb, serial)
-    print(f"device {adb.serial}", flush=True)
+    adb = open_device(os.path.abspath(args.home), args.adb, args.serial, args.pair, args.code, args.connect)
     if not args.skip_install:
         install(adb, os.path.abspath(args.apk))
     send_game(adb, os.path.abspath(args.game), args.test_transfer)

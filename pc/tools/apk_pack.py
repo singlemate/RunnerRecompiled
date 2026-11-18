@@ -389,7 +389,10 @@ def pack(shell, lib, deps, key_path, out):
             data = f.read()
         return [name, 0, zlib.crc32(data), data, len(data), stamp]
 
-    entries.append(stored("lib/arm64-v8a/libmepc.so", lib))
+    # Without lib: the app with the user's libraries but no game code yet (RunnerBuilder installs it
+    # first, so that the game files go to the device while the game code is still being built).
+    if lib:
+        entries.append(stored("lib/arm64-v8a/libmepc.so", lib))
     for name in ("msvcr80.dll", "msvcp80.dll", "PhysXCore.dll", "PhysXCooking.dll"):
         path = os.path.join(deps, name)
         if not os.path.isfile(path):

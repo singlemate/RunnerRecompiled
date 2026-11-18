@@ -94,3 +94,11 @@ README	Mirror's Edge para Android, preparado a partir da sua cópia do jogo\n\nN
 Для сопряжения нужен код с экрана устройства.	O pareamento precisa do código da tela do dispositivo.
 Сопряжение не удалось: проверьте адрес, порт и код. Код действует, пока открыто окно сопряжения на устройстве.	O pareamento falhou: verifique o endereço, a porta e o código. O código só vale enquanto a janela de pareamento estiver aberta no dispositivo.
 Не удалось подключиться к {address}. Устройство и компьютер должны быть в одной сети Wi-Fi, а адрес и порт — с экрана «Отладка по Wi-Fi» (порт меняется при каждом включении).	Não foi possível conectar a {address}. O dispositivo e o computador devem estar na mesma rede Wi-Fi, e o endereço e a porta devem ser os da tela “Depuração por Wi-Fi” (a porta muda sempre que é ativada).
+Устройство: 	Dispositivo: 
+Куда установить	Onde instalar
+Если устройство подключено, файлы игры поедут на него, пока собирается приложение, и всё закончится быстрее. 	Com um dispositivo conectado, os arquivos do jogo são copiados enquanto o aplicativo é criado, e tudo termina mais cedo. 
+Без устройства: только папка с APK и ZIP игры	Sem dispositivo: só uma pasta com o APK e um ZIP do jogo
+Скопируете на устройство сами или установите потом кнопкой «Установить на устройство…». Нужно ещё около 12 ГБ на диске для ZIP.	Copie você mesmo para o dispositivo ou instale depois com “Instalar no dispositivo…”. O ZIP precisa de cerca de 12 GB a mais no disco.
+Ожидание копирования на устройство	Aguardando a cópia para o dispositivo
+Копирование закончено, ждёт сборки приложения	Cópia concluída, aguardando o aplicativo
+Приложение собрано, но установить его на устройство не удалось (причина выше). Нажмите «Установить на устройство…», чтобы повторить без новой сборки.	O aplicativo foi criado, mas a instalação no dispositivo falhou (motivo acima). Toque em “Instalar no dispositivo…” para tentar de novo sem recriar.

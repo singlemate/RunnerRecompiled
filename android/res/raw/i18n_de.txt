@@ -133,6 +133,7 @@ libmepc.so (только личная сборка)	libmepc.so (nur persönliche
 поле зрения 	Sichtfeld 
 поле зрения как в игре	Sichtfeld wie im Spiel
 Не хватает файлов игры — смотрите раздел «Файлы»	Spieldateien fehlen: siehe Dateien
+Файлы игры на месте. Код игры ещё собирается на компьютере: RunnerBuilder сам установит его, когда закончит.	Die Spieldateien sind vorhanden. Der Spielcode wird noch auf dem Computer erstellt: RunnerBuilder installiert ihn, wenn er fertig ist.
 MIRROR'S EDGE · ПК-ВЕРСИЯ	MIRROR'S EDGE · PC-VERSION
 Настроим за пару минут	Die Einrichtung dauert nur wenige Minuten
 Приложение запускает ПК-версию игры на Android. Файлы игры берутся из вашей копии GOG, в приложении их нет.	Diese App führt die PC-Version des Spiels auf Android aus. Die Spieldateien stammen aus Ihrer GOG-Kopie und sind nicht enthalten.
